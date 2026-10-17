@@ -20,9 +20,12 @@ Async end to end: cloud AI work is dominated by waiting on providers, so routers
 | Module | Contents | Status |
 | --- | --- | --- |
 | `health` | `/healthz` (process), `/readyz` (database ping, 503 problem when down) | Implemented |
-| `identity` | `PetId` (device-issued UUIDv4 hex), `PetOrigin`, `ProjectionKey` `(PetId, snapshotGeneration)` with wrap-safe u32 ordering | Domain only; tables in CLD-11 |
+| `accounts` | Generic OIDC JWT verification (RS256/ES256 via JWKS, vendor-neutral), owner auto-provisioning by `(issuer, subject)`, `GET /v1/me`, `current_owner` dependency | CLD-11 implemented; vendor not chosen |
+| `identity` | `PetId`, `ProjectionKey`, device proof message (ECDSA P-256), challenges (single-use, 5 min), TOFU pet binding creating Pet + active Brain + Device; `POST /v1/devices/challenges`, `POST/GET /v1/pets`, `GET /v1/pets/{petId}` | CLD-11 implemented; firmware Identity V2 signing pending |
 | `exports` | `xuna.export.v1` envelope/hash check and strict payload schema; golden fixture produced by the mobile Dart code | Validation only; storing projections needs gate (c) + CLD-14 |
 | `cognition` | Provider-independent chat/voice types, ports (`TextGenerator`, `SpeechRecognizer`, `SpeechSynthesizer`, `Tool`), `ProviderRegistry`, deterministic `echo` adapter | Ports only; vendor by CLD-13, voice by VOICE gates |
+
+Cross-cutting in `core`: `idempotency` (24 h `Idempotency-Key` replay store), `db` (UTC sessions, `DbSession`, `commit_or_conflict`).
 
 Planned (Cloud plan §8): `consent`, `conversation`, `memory`, `backup`, `suggestion`, `audit`.
 

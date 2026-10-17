@@ -19,6 +19,10 @@ class Settings:
     environment: Environment
     database_url: str
     log_level: str = "INFO"
+    # Managed OIDC owner auth (vendor open). Empty issuer = auth unavailable.
+    oidc_issuer: str = ""
+    oidc_audience: str = ""
+    oidc_jwks_url: str = ""
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -30,4 +34,7 @@ class Settings:
             environment=Environment(source.get("XUNA_ENV", Environment.LOCAL)),
             database_url=database_url,
             log_level=source.get("XUNA_LOG_LEVEL", "INFO"),
+            oidc_issuer=source.get("XUNA_OIDC_ISSUER", ""),
+            oidc_audience=source.get("XUNA_OIDC_AUDIENCE", ""),
+            oidc_jwks_url=source.get("XUNA_OIDC_JWKS_URL", ""),
         )

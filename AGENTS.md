@@ -47,7 +47,7 @@ src/xuna_backend/
 | `domain` | stdlib, own/other modules' `domain` | `pydantic`, any framework (`fastapi`, `starlette`, `sqlalchemy`, `alembic`, `psycopg`, `httpx`, `uvicorn`), `core`, any `application`/`infrastructure`/`api` |
 | `application` | stdlib, `pydantic`, `domain`, `application` | frameworks, `core`, `infrastructure`, `api` |
 | `infrastructure` | `domain`, `application`, `core`, frameworks, vendor SDKs | `api` |
-| `api` | `domain`, `application`, `core`, `fastapi` | `infrastructure` (inject through dependencies wired in `main.py`/`wiring.py`) |
+| `api` | `domain`, `application`, `core`, `fastapi`, `pydantic` | `infrastructure`, `sqlalchemy`/`alembic`/`psycopg` (sessions via `core.db.DbSession`, commits via `core.db.commit_or_conflict`; ports placed on `app.state` by `main.py`) |
 | `core` | stdlib, frameworks | `modules` |
 
 - These rules are enforced by `tests/test_architecture.py`. Do not weaken that test to make code pass; fix the code.
@@ -73,7 +73,7 @@ src/xuna_backend/
 ## 5. Infrastructure
 
 - ORM models subclass `core.db.Base` (naming convention fixed). Tables: snake_case plural; primary keys are UUIDs or device-issued IDs; timestamps are `timestamptz` in UTC; versioned payloads are `JSONB` with an explicit `schema_version` column.
-- Async SQLAlchemy only (`AsyncSession`); one transaction per use case; no lazy loading across awaits.
+- Async SQLAlchemy only (`AsyncSession`); one transaction per request, committed by the router through `commit_or_conflict`; no lazy loading across awaits. Every connection runs with `timezone=UTC` (`core.db`); serialize times with `.astimezone(UTC).isoformat()`.
 - Provider adapters: one file per vendor, register with `ProviderRegistry` under a stable name, enforce their own timeout, map vendor errors to `ProviderUnavailableError`, never log prompts/outputs, read credentials only from `XUNA_*` env vars.
 - Every external call has an explicit timeout. Retries only for idempotent calls, with backoff and a cap.
 
@@ -81,7 +81,8 @@ src/xuna_backend/
 
 - Versioned paths `/v1/...`; resource names plural nouns. Health probes `/healthz`, `/readyz` are unversioned.
 - Errors are RFC 9457 `application/problem+json` with a stable `code` (`core.errors.AppError`). Never return `str(exception)`, stack traces, user content or secrets.
-- Mutating requests require `Idempotency-Key` and carry `schemaVersion` in the body (contract draft §2).
+- Mutating requests require `Idempotency-Key` (`core.idempotency.run_once`) and carry `schemaVersion` in the body (contract draft §1).
+- Owner-scoped reads return `404 not_found` for another owner's resource; never reveal that it exists.
 - Authentication: managed OIDC/magic-link for owners and per-device asymmetric credentials (CLD-11). No custom password system, no shared fleet secret, no API keys in source.
 - Streaming responses (chat, voice) use SSE or WebSocket with typed event payloads mirroring `cognition.domain.types`.
 

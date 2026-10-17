@@ -6,6 +6,7 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parents[1] / "src" / "xuna_backend"
 PKG = "xuna_backend"
 FRAMEWORKS = ("fastapi", "starlette", "sqlalchemy", "alembic", "psycopg", "httpx", "uvicorn")
+DATA_FRAMEWORKS = ("sqlalchemy", "alembic", "psycopg")
 LAYERS = ("domain", "application", "infrastructure", "api")
 # layer -> layers of any module it may import
 ALLOWED = {
@@ -50,6 +51,8 @@ def test_layers_and_purity() -> None:
             _, layer = own
             if layer in ("domain", "application") and top in FRAMEWORKS:
                 violations.append(f"{where} ({layer} must stay framework-free)")
+            if layer == "api" and top in DATA_FRAMEWORKS:
+                violations.append(f"{where} (api reaches data only through core/ports)")
             if layer == "domain" and top == "pydantic":
                 violations.append(f"{where} (domain is stdlib-only)")
             if layer in ("domain", "application") and name.startswith(f"{PKG}.core"):
