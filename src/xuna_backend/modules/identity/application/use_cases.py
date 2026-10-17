@@ -5,6 +5,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from xuna_backend.modules.audit.application.ports import AuditLog
+from xuna_backend.modules.audit.domain.event import AuditAction, AuditEvent
 from xuna_backend.modules.identity.application.ports import (
     IdentityRepository,
     SignatureVerifier,
@@ -58,11 +60,49 @@ async def issue_challenge(
 async def bind_pet(
     repo: IdentityRepository,
     verifier: SignatureVerifier,
+    audit: AuditLog,
+    owner_id: uuid.UUID,
+    command: BindPet,
+    now: datetime,
+    request_id: str = "",
+) -> tuple[Pet, bool]:
+    """Returns (pet, created). Challenges are single-use even when rejected.
+    New bindings and every rejection are audited (caller commits both)."""
+    try:
+        pet, created = await _bind(repo, verifier, owner_id, command, now)
+    except IdentityError as error:
+        await audit.record(
+            AuditEvent(
+                owner_id=owner_id,
+                action=AuditAction.PET_BIND_REJECTED,
+                occurred_at=now,
+                subject=command.pet_id.value,
+                request_id=request_id,
+                metadata={"code": error.code},
+            )
+        )
+        raise
+    if created:
+        await audit.record(
+            AuditEvent(
+                owner_id=owner_id,
+                action=AuditAction.PET_BOUND,
+                occurred_at=now,
+                subject=pet.pet_id.value,
+                request_id=request_id,
+                metadata={"generation": pet.last_generation, "origin": pet.origin.value},
+            )
+        )
+    return pet, created
+
+
+async def _bind(
+    repo: IdentityRepository,
+    verifier: SignatureVerifier,
     owner_id: uuid.UUID,
     command: BindPet,
     now: datetime,
 ) -> tuple[Pet, bool]:
-    """Returns (pet, created). Challenges are single-use even when rejected."""
     try:
         validate_public_key(command.public_key)
     except ValueError as error:

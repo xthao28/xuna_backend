@@ -22,6 +22,7 @@ pytestmark = pytest.mark.postgres
 ROOT = Path(__file__).resolve().parents[3]
 PET = "d945c77026fd4f4a8a899bbff4aeed86"
 TABLES = "idempotency_keys, device_challenges, devices, brains, pets, owners"
+APPEND_ONLY = ("audit_events", "consent_records")
 
 
 @pytest.fixture
@@ -155,3 +156,15 @@ def test_validation_and_missing_idempotency_key(client: TestClient, issuer: Loca
     )
     assert (bad.status_code, bad.json()["code"]) == (422, "validation_failed")
     assert PET.upper() not in bad.text
+
+
+def test_bind_outcomes_appear_in_audit_trail(client: TestClient, issuer: LocalIssuer) -> None:
+    headers = auth(issuer)
+    device = SimulatedDevice()
+    client.post("/v1/pets", json=bind_body(client, headers, device), headers={**headers, **idem()})
+    other = bind_body(client, headers, SimulatedDevice())
+    assert client.post("/v1/pets", json=other, headers={**headers, **idem()}).status_code == 409
+    trail = client.get("/v1/audit-events", headers=headers).json()["items"]
+    assert [e["action"] for e in trail] == ["pet.bind_rejected", "pet.bound"]
+    assert trail[0]["metadata"] == {"code": "device_key_mismatch"}
+    assert trail[1]["subject"] == PET

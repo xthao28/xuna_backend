@@ -14,6 +14,7 @@ from xuna_backend.core.db import commit_or_conflict
 from xuna_backend.core.errors import AppError
 from xuna_backend.core.idempotency import StoredResponse, parse_key, request_hash, run_once
 from xuna_backend.modules.accounts.api.dependencies import CurrentOwner, Session, state
+from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.identity.api.schemas import BindPetRequest, ChallengeRequest
 from xuna_backend.modules.identity.application.ports import (
     IdentityRepository,
@@ -126,8 +127,15 @@ async def create_pet(
     )
 
     async def action() -> StoredResponse:
+        audit_for: Callable[[object], AuditLog] = state(request, "audit_log")
         pet, created = await bind_pet(
-            _repo(request, session), verifier, owner.owner_id, command, now
+            _repo(request, session),
+            verifier,
+            audit_for(session),
+            owner.owner_id,
+            command,
+            now,
+            request.state.request_id,
         )
         return StoredResponse(HTTPStatus.CREATED if created else HTTPStatus.OK, _pet_body(pet))
 

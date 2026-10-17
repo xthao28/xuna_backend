@@ -22,7 +22,7 @@
 2. **PetId is device-issued.** The server validates (`PetId` value object) and references it; it never generates or reassigns one. Keep `UserId`, `PetId`, `BrainId`, `DeviceId` distinct types.
 3. **Provider output is untrusted.** LLM/ASR text is display text or a *candidate*. Nothing becomes a fact, preference or growth change without owner confirmation **and** a durable device commit (CLD-14). Tool-call arguments from a model are untrusted input and are validated like any request.
 4. **No device actuation from the cloud.** Device behaviour changes only through typed, signed, bounded, expiring, replay-protected suggestions that the device `ActionGate` re-validates. A device action is never a model tool.
-5. **Privacy (D23):** U0 (no upload) is the default; U1/U2/U3 are separate opt-ins checked server-side before storing anything. Raw audio is never stored. Conversation text is not retained after the provider call unless U3 is on. Confirmed facts are correctable, exportable, deletable; deletion writes a tombstone that blocks resurrection.
+5. **Privacy (D23):** U0 (no upload) is the default; U1/U2/U3 are separate opt-ins checked server-side before storing anything. Every route that stores or forwards owner data of a class **must** declare `Annotated[Owner, RequireConsent(ConsentClass.X)]` (`consent.api.routes`) or call `require_consent` in its use case. Raw audio is never stored. Conversation text is not retained after the provider call unless U3 is on. Confirmed facts are correctable, exportable, deletable; deletion writes a tombstone that blocks resurrection.
 6. **Offline-first:** a provider or service outage degrades features; it must never break identity or require the device to change behaviour.
 7. **Gates:** storing device-data projections (CLD-14+) needs Cloud gate (a)–(c). Choosing a vendor needs CLD-13 evidence (D11a open). Voice capabilities (VAD/ASR/TTS adapters) are interface-only until VOICE-01–04.
 
@@ -68,7 +68,7 @@ src/xuna_backend/
 - Ports are `typing.Protocol` classes in `application/ports.py`. Long-running provider ports stream with `AsyncIterator`.
 - Request/response schemas are Pydantic models with `ConfigDict(extra="forbid", frozen=True, strict=True)`; JSON field names follow the wire contract (camelCase where the device/app contract is camelCase).
 - Raise module exceptions (subclasses of `ValueError`/`Exception` defined in the module) — the API layer maps them to problem codes.
-- Every mutating use case is idempotent on its `Idempotency-Key`, and records an audit event (CLD-12) once that module exists.
+- Every mutating use case is idempotent on its `Idempotency-Key`. Security- or privacy-relevant outcomes (bindings, rejections, consent changes, deletions, exports) record an `AuditEvent` through the `AuditLog` port in the same transaction. Add new actions to `AuditAction`; metadata is short codes/numbers/booleans only — the domain type rejects free text.
 
 ## 5. Infrastructure
 
@@ -92,6 +92,7 @@ src/xuna_backend/
 - Import new ORM models in `migrations/env.py`.
 - `tests/test_migrations.py` must round-trip (upgrade → downgrade → upgrade) against PostgreSQL in CI.
 - Data-destroying migrations need owner approval and a backup note in the PR.
+- `audit_events` and `consent_records` are append-only by database trigger. Never drop the trigger to make code work; account deletion (CLD-20) needs its own audited maintenance path.
 
 ## 8. Security, privacy, logging
 

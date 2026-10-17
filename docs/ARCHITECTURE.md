@@ -25,6 +25,9 @@ Async end to end: cloud AI work is dominated by waiting on providers, so routers
 | `exports` | `xuna.export.v1` envelope/hash check and strict payload schema; golden fixture produced by the mobile Dart code | Validation only; storing projections needs gate (c) + CLD-14 |
 | `cognition` | Provider-independent chat/voice types, ports (`TextGenerator`, `SpeechRecognizer`, `SpeechSynthesizer`, `Tool`), `ProviderRegistry`, deterministic `echo` adapter | Ports only; vendor by CLD-13, voice by VOICE gates |
 
+| `consent` | U0 default, append-only history (version per change, policy tag), optimistic `expectedVersion`, `GET/PUT /v1/consents`, `RequireConsent` route guard | CLD-12 implemented |
+| `audit` | Append-only `audit_events` (DB trigger), content-free typed metadata, `GET /v1/audit-events` for the owner's own trail; binding and consent changes recorded | CLD-12 implemented |
+
 Cross-cutting in `core`: `idempotency` (24 h `Idempotency-Key` replay store), `db` (UTC sessions, `DbSession`, `commit_or_conflict`).
 
 Planned (Cloud plan §8): `consent`, `conversation`, `memory`, `backup`, `suggestion`, `audit`.

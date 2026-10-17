@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 
 from xuna_backend.modules.accounts.infrastructure.oidc import OidcTokenVerifier
+from xuna_backend.modules.audit.domain.event import AuditEvent
 
 ISSUER = "https://auth.test.xuna"
 AUDIENCE = "xuna-api"
@@ -60,3 +61,14 @@ def b64(raw: bytes) -> str:
 
 def idem() -> dict[str, str]:
     return {"Idempotency-Key": str(uuid.uuid4())}
+
+
+class MemoryAuditLog:
+    def __init__(self) -> None:
+        self.events: list[AuditEvent] = []
+
+    async def record(self, event: AuditEvent) -> None:
+        self.events.append(event)
+
+    async def recent(self, owner_id: uuid.UUID, limit: int) -> list[AuditEvent]:
+        return [e for e in self.events if e.owner_id == owner_id][-limit:][::-1]

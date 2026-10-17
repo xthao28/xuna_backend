@@ -18,6 +18,10 @@ from xuna_backend.modules.accounts.infrastructure.oidc import (
     jwks_resolver,
 )
 from xuna_backend.modules.accounts.infrastructure.repository import SqlOwnerRepository
+from xuna_backend.modules.audit.api.routes import router as audit_router
+from xuna_backend.modules.audit.infrastructure.repository import SqlAuditLog
+from xuna_backend.modules.consent.api.routes import router as consent_router
+from xuna_backend.modules.consent.infrastructure.repository import SqlConsentRepository
 from xuna_backend.modules.health.api.routes import router as health_router
 from xuna_backend.modules.identity.api.routes import router as identity_router
 from xuna_backend.modules.identity.infrastructure.p256 import P256SignatureVerifier
@@ -54,11 +58,15 @@ def create_app(
     app.state.owner_repository = SqlOwnerRepository
     app.state.identity_repository = SqlIdentityRepository
     app.state.signature_verifier = P256SignatureVerifier()
+    app.state.audit_log = SqlAuditLog
+    app.state.consent_repository = SqlConsentRepository
     install_error_handlers(app)
     install_request_context(app)
     app.include_router(health_router)
     app.include_router(accounts_router)
     app.include_router(identity_router)
+    app.include_router(consent_router)
+    app.include_router(audit_router)
     return app
 
 

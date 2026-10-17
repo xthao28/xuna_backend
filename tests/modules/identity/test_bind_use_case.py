@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tests.helpers import SimulatedDevice
+from tests.helpers import MemoryAuditLog, SimulatedDevice
 from xuna_backend.modules.identity.application.use_cases import (
     BindPet,
     IdentityError,
@@ -73,8 +73,11 @@ def command(
     )
 
 
+AUDIT = MemoryAuditLog()
+
+
 def bind(repo: MemoryRepo, cmd: BindPet, owner: uuid.UUID = OWNER, now: datetime = NOW) -> Pet:
-    pet, _ = asyncio.run(bind_pet(repo, P256SignatureVerifier(), owner, cmd, now))
+    pet, _ = asyncio.run(bind_pet(repo, P256SignatureVerifier(), AUDIT, owner, cmd, now))
     return pet
 
 
@@ -89,7 +92,7 @@ def test_first_bind_creates_pet_brain_device_then_is_idempotent() -> None:
     pet = bind(repo, command(repo, device))
     assert pet.last_generation == 38
     again, created = asyncio.run(
-        bind_pet(repo, P256SignatureVerifier(), OWNER, command(repo, device), NOW)
+        bind_pet(repo, P256SignatureVerifier(), AUDIT, OWNER, command(repo, device), NOW)
     )
     assert not created
     assert again == pet
@@ -143,3 +146,19 @@ def test_foreign_pet_is_not_found() -> None:
     bind(repo, command(repo, device))
     with pytest.raises(IdentityError, match="not_found"):
         asyncio.run(get_owned_pet(repo, uuid.uuid4(), PET))
+
+
+def test_binding_and_rejections_are_audited_without_content() -> None:
+    repo, device, audit = MemoryRepo(), SimulatedDevice(), MemoryAuditLog()
+    asyncio.run(bind_pet(repo, P256SignatureVerifier(), audit, OWNER, command(repo, device), NOW))
+    asyncio.run(bind_pet(repo, P256SignatureVerifier(), audit, OWNER, command(repo, device), NOW))
+    with pytest.raises(IdentityError):
+        asyncio.run(
+            bind_pet(
+                repo, P256SignatureVerifier(), audit, OWNER, command(repo, SimulatedDevice()), NOW
+            )
+        )
+    assert [e.action.value for e in audit.events] == ["pet.bound", "pet.bind_rejected"]
+    assert audit.events[0].subject == PET.value
+    assert audit.events[0].metadata == {"generation": 38, "origin": "migrated_from_v1"}
+    assert audit.events[1].metadata == {"code": "device_key_mismatch"}
