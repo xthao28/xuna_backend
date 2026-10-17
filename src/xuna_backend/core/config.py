@@ -23,6 +23,16 @@ class Settings:
     oidc_issuer: str = ""
     oidc_audience: str = ""
     oidc_jwks_url: str = ""
+    # Firebase Auth preset (owner choice 2026-10-17): fills issuer/audience/JWKS.
+    firebase_project_id: str = ""
+    # Text provider (cognition). `echo` = offline fake; `openai_compatible` =
+    # any OpenAI-style /chat/completions server (internal AI over VPN, vLLM,
+    # Ollama /v1, hosted vendors later).
+    text_provider: str = "echo"
+    text_base_url: str = ""
+    text_model: str = ""
+    text_api_key: str = ""
+    text_timeout_s: float = 30.0
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -37,4 +47,17 @@ class Settings:
             oidc_issuer=source.get("XUNA_OIDC_ISSUER", ""),
             oidc_audience=source.get("XUNA_OIDC_AUDIENCE", ""),
             oidc_jwks_url=source.get("XUNA_OIDC_JWKS_URL", ""),
+            firebase_project_id=source.get("XUNA_FIREBASE_PROJECT_ID", ""),
+            text_provider=source.get("XUNA_TEXT_PROVIDER", "echo"),
+            text_base_url=source.get("XUNA_TEXT_BASE_URL", ""),
+            text_model=source.get("XUNA_TEXT_MODEL", ""),
+            text_api_key=source.get("XUNA_TEXT_API_KEY", ""),
+            text_timeout_s=float(source.get("XUNA_TEXT_TIMEOUT_S", "30")),
+        )
+
+    def __repr__(self) -> str:
+        # Never print secrets (database password, API key) in logs or errors.
+        return (
+            f"Settings(environment={self.environment.value!r}, "
+            f"text_provider={self.text_provider!r})"
         )

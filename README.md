@@ -1,6 +1,6 @@
 # xuna_backend
 
-Optional Cloud Brain for XUNA. The device stays authoritative; the cloud is a projection, backup and cognitive service (ADR-0008). Status: **CLD-10 scaffold + CLD-11 identity** — health probes, OIDC owner auth, device-proof (ECDSA P-256) pet binding with Pet/Brain/Device records, idempotency, `xuna.export.v1` verification and cognition provider ports. No device-data projection is stored yet (CLD-14 needs gate c).
+Optional Cloud Brain for XUNA. The device stays authoritative; the cloud is a projection, backup and cognitive service (ADR-0008). Status: **CLD-10 scaffold + CLD-11 identity + CLD-12 consent/audit + CLD-13 text provider adapter and conversation turn** — health probes, OIDC owner auth, device-proof (ECDSA P-256) pet binding with Pet/Brain/Device records, idempotency, `xuna.export.v1` verification and cognition provider ports. No device-data projection is stored yet (CLD-14 needs gate c).
 
 Read [AGENTS.md](AGENTS.md) before coding and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 
@@ -25,6 +25,8 @@ curl localhost:8000/healthz   # {"status":"ok"}
 curl localhost:8000/readyz    # {"status":"ready"}
 ```
 
-Configuration is only through `XUNA_*` environment variables: `XUNA_DATABASE_URL` (required), `XUNA_ENV` (`local|test|production`), `XUNA_LOG_LEVEL`, `XUNA_OIDC_ISSUER`, `XUNA_OIDC_AUDIENCE`, `XUNA_OIDC_JWKS_URL` (defaults to `<issuer>/.well-known/jwks.json`). Without an issuer every authenticated route returns `503 auth_unavailable`.
+Configuration is only through `XUNA_*` environment variables: `XUNA_DATABASE_URL` (required), `XUNA_ENV` (`local|test|production`), `XUNA_LOG_LEVEL`, `XUNA_OIDC_ISSUER`, `XUNA_OIDC_AUDIENCE`, `XUNA_OIDC_JWKS_URL` (defaults to `<issuer>/.well-known/jwks.json`). Without an issuer every authenticated route returns `503 auth_unavailable`. **Firebase Auth** (owner choice): set only `XUNA_FIREBASE_PROJECT_ID`; issuer, audience and JWKS are derived.
+
+Text provider: `XUNA_TEXT_PROVIDER` (`echo` default, or `openai_compatible`), `XUNA_TEXT_BASE_URL`, `XUNA_TEXT_MODEL`, `XUNA_TEXT_API_KEY`, `XUNA_TEXT_TIMEOUT_S`. Internal AI over OpenVPN: [docs/ops/internal-ai-over-vpn.md](docs/ops/internal-ai-over-vpn.md). Vietnamese benchmark: `scripts/text_benchmark.py`.
 
 CI: `.github/workflows/ci.yml` runs `scripts/check.sh` against PostgreSQL 16.

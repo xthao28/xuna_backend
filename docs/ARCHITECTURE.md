@@ -23,7 +23,8 @@ Async end to end: cloud AI work is dominated by waiting on providers, so routers
 | `accounts` | Generic OIDC JWT verification (RS256/ES256 via JWKS, vendor-neutral), owner auto-provisioning by `(issuer, subject)`, `GET /v1/me`, `current_owner` dependency | CLD-11 implemented; vendor not chosen |
 | `identity` | `PetId`, `ProjectionKey`, device proof message (ECDSA P-256), challenges (single-use, 5 min), TOFU pet binding creating Pet + active Brain + Device; `POST /v1/devices/challenges`, `POST/GET /v1/pets`, `GET /v1/pets/{petId}` | CLD-11 implemented; firmware Identity V2 signing pending |
 | `exports` | `xuna.export.v1` envelope/hash check and strict payload schema; golden fixture produced by the mobile Dart code | Validation only; storing projections needs gate (c) + CLD-14 |
-| `cognition` | Provider-independent chat/voice types, ports (`TextGenerator`, `SpeechRecognizer`, `SpeechSynthesizer`, `Tool`), `ProviderRegistry`, deterministic `echo` adapter | Ports only; vendor by CLD-13, voice by VOICE gates |
+| `cognition` | Provider-independent chat/voice types, ports (`TextGenerator`, `SpeechRecognizer`, `SpeechSynthesizer`, `Tool`), `ProviderRegistry`, `echo` adapter, **`openai_compatible` streaming adapter** (owner's internal AI over VPN now, rented vendor later) | Text adapter implemented; voice by VOICE gates |
+| `conversation` | `POST /v1/conversations/{petId}/turns` SSE (`delta`/`finished`/`error`), XUNA Vietnamese persona, U3 guard, own-pet check, nothing stored, `provider_unavailable` fallback event | Implemented (Phase 1 text) |
 
 | `consent` | U0 default, append-only history (version per change, policy tag), optimistic `expectedVersion`, `GET/PUT /v1/consents`, `RequireConsent` route guard | CLD-12 implemented |
 | `audit` | Append-only `audit_events` (DB trigger), content-free typed metadata, `GET /v1/audit-events` for the owner's own trail; binding and consent changes recorded | CLD-12 implemented |

@@ -1,4 +1,5 @@
 import asyncio
+from typing import cast
 
 import pytest
 
@@ -23,7 +24,7 @@ def registry() -> ProviderRegistry:
 
 
 def test_registry_selects_adapter_by_name_and_streams() -> None:
-    generator = registry().create(Capability.TEXT, "echo", {}, TextGenerator)
+    generator = cast(TextGenerator, registry().create(Capability.TEXT, "echo", {}))
     request = ChatRequest(messages=(Message(Role.USER, "xin chào XUNA"),))
 
     async def collect() -> list[ChatEvent]:
@@ -39,7 +40,7 @@ def test_registry_selects_adapter_by_name_and_streams() -> None:
 def test_unknown_or_duplicate_adapter_fails_fast() -> None:
     providers = registry()
     with pytest.raises(LookupError, match="have \\['echo'\\]"):
-        providers.create(Capability.TEXT, "missing", {}, TextGenerator)
+        providers.create(Capability.TEXT, "missing", {})
     with pytest.raises(ValueError):
         echo.register(providers)
     assert providers.names(Capability.SPEECH_RECOGNITION) == []

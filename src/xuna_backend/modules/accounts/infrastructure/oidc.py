@@ -60,6 +60,18 @@ class OidcTokenVerifier:
             raise InvalidTokenError("invalid token") from error
 
 
+FIREBASE_JWKS_URL = (
+    "https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com"
+)
+
+
+def firebase_settings(project_id: str) -> tuple[str, str, str]:
+    """(issuer, audience, jwks_url) for Firebase Auth ID tokens."""
+    if not project_id or not project_id.replace("-", "").isalnum():
+        raise ValueError("invalid Firebase project id")
+    return f"https://securetoken.google.com/{project_id}", project_id, FIREBASE_JWKS_URL
+
+
 class UnconfiguredTokenVerifier:
     """Used when XUNA_OIDC_ISSUER is empty: every request gets 503."""
 

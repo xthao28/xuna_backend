@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import cast
 
 from fastapi import FastAPI
 
@@ -15,13 +16,19 @@ from xuna_backend.modules.accounts.application.ports import TokenVerifier
 from xuna_backend.modules.accounts.infrastructure.oidc import (
     OidcTokenVerifier,
     UnconfiguredTokenVerifier,
+    firebase_settings,
     jwks_resolver,
 )
 from xuna_backend.modules.accounts.infrastructure.repository import SqlOwnerRepository
 from xuna_backend.modules.audit.api.routes import router as audit_router
 from xuna_backend.modules.audit.infrastructure.repository import SqlAuditLog
+from xuna_backend.modules.cognition.application.ports import TextGenerator
+from xuna_backend.modules.cognition.application.registry import ProviderRegistry
+from xuna_backend.modules.cognition.domain.types import Capability
+from xuna_backend.modules.cognition.infrastructure import echo, openai_compatible
 from xuna_backend.modules.consent.api.routes import router as consent_router
 from xuna_backend.modules.consent.infrastructure.repository import SqlConsentRepository
+from xuna_backend.modules.conversation.api.routes import router as conversation_router
 from xuna_backend.modules.health.api.routes import router as health_router
 from xuna_backend.modules.identity.api.routes import router as identity_router
 from xuna_backend.modules.identity.infrastructure.p256 import P256SignatureVerifier
@@ -29,6 +36,9 @@ from xuna_backend.modules.identity.infrastructure.repository import SqlIdentityR
 
 
 def token_verifier(settings: Settings) -> TokenVerifier:
+    if settings.firebase_project_id:
+        issuer, audience, jwks_url = firebase_settings(settings.firebase_project_id)
+        return OidcTokenVerifier(issuer, audience, jwks_resolver(jwks_url))
     if not settings.oidc_issuer:
         return UnconfiguredTokenVerifier()
     jwks_url = settings.oidc_jwks_url or (
@@ -37,8 +47,24 @@ def token_verifier(settings: Settings) -> TokenVerifier:
     return OidcTokenVerifier(settings.oidc_issuer, settings.oidc_audience, jwks_resolver(jwks_url))
 
 
+def text_generator(settings: Settings) -> TextGenerator:
+    """Fails at startup on an unknown or misconfigured provider."""
+    registry = ProviderRegistry()
+    echo.register(registry)
+    openai_compatible.register(registry)
+    options = {
+        "base_url": settings.text_base_url,
+        "model": settings.text_model,
+        "api_key": settings.text_api_key,
+    }
+    return cast(TextGenerator, registry.create(Capability.TEXT, settings.text_provider, options))
+
+
 def create_app(
-    settings: Settings | None = None, *, verifier: TokenVerifier | None = None
+    settings: Settings | None = None,
+    *,
+    verifier: TokenVerifier | None = None,
+    generator: TextGenerator | None = None,
 ) -> FastAPI:
     resolved = settings or Settings.from_env()
     configure_logging(resolved.log_level)
@@ -60,6 +86,7 @@ def create_app(
     app.state.signature_verifier = P256SignatureVerifier()
     app.state.audit_log = SqlAuditLog
     app.state.consent_repository = SqlConsentRepository
+    app.state.text_generator = generator or text_generator(resolved)
     install_error_handlers(app)
     install_request_context(app)
     app.include_router(health_router)
@@ -67,6 +94,7 @@ def create_app(
     app.include_router(identity_router)
     app.include_router(consent_router)
     app.include_router(audit_router)
+    app.include_router(conversation_router)
     return app
 
 
