@@ -147,3 +147,25 @@ def test_gateway_key_header_for_bifrost() -> None:
     assert "authorization" not in seen
     with pytest.raises(ValueError):
         OpenAICompatibleTextGenerator("http://gw/v1", "m", api_key_header="bad header\n")
+
+
+def test_reasoning_effort_is_sent_only_when_configured() -> None:
+    bodies: list[dict[str, object]] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, content=sse({"choices": [{"delta": {"content": "ok"}}]}))
+
+    async def collect(generator: OpenAICompatibleTextGenerator) -> None:
+        async for _ in generator.stream(REQUEST):
+            pass
+
+    for effort in ("", "none"):
+        generator = OpenAICompatibleTextGenerator(
+            "http://gw/v1", "m", reasoning_effort=effort, transport=httpx.MockTransport(handle)
+        )
+        asyncio.run(collect(generator))
+    assert "reasoning_effort" not in bodies[0]
+    assert bodies[1]["reasoning_effort"] == "none"
+    with pytest.raises(ValueError):
+        OpenAICompatibleTextGenerator("http://gw/v1", "m", reasoning_effort="x; y")

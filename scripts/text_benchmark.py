@@ -81,18 +81,22 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", type=int, default=1)
     parser.add_argument("--out", type=Path, default=Path("benchmark-results/latest.json"))
+    parser.add_argument(
+        "--delay", type=float, default=0.0, help="seconds between calls (free tiers)"
+    )
     args = parser.parse_args()
     settings = Settings.from_env({**_env(), "XUNA_DATABASE_URL": "unused://"})
     generator = text_generator(settings)
-    results = [
-        await one(generator, prompt, settings.text_timeout_s)
-        for _ in range(args.runs)
-        for prompt in PROMPTS
-    ]
+    results = []
+    for _ in range(args.runs):
+        for prompt in PROMPTS:
+            results.append(await one(generator, prompt, settings.text_timeout_s))
+            await asyncio.sleep(args.delay)
     ok = [r for r in results if r["ok"]]
     summary = {
         "provider": settings.text_provider,
         "model": settings.text_model,
+        "reasoningEffort": settings.text_reasoning_effort or None,
         "at": datetime.now(UTC).isoformat(),
         "calls": len(results),
         "failures": len(results) - len(ok),

@@ -57,6 +57,7 @@ def text_generator(settings: Settings) -> TextGenerator:
         "model": settings.text_model,
         "api_key": settings.text_api_key,
         "api_key_header": settings.text_api_key_header,
+        "reasoning_effort": settings.text_reasoning_effort,
     }
     return cast(TextGenerator, registry.create(Capability.TEXT, settings.text_provider, options))
 

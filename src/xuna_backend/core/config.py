@@ -36,6 +36,9 @@ class Settings:
     # header such as Bifrost's "x-bf-vk" (raw key).
     text_api_key_header: str = "authorization"
     text_timeout_s: float = 30.0
+    # Optional OpenAI `reasoning_effort` (e.g. "none"/"low") for thinking models,
+    # whose hidden reasoning otherwise eats short output budgets. Empty = not sent.
+    text_reasoning_effort: str = ""
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -57,6 +60,7 @@ class Settings:
             text_api_key=source.get("XUNA_TEXT_API_KEY", ""),
             text_api_key_header=source.get("XUNA_TEXT_API_KEY_HEADER", "authorization"),
             text_timeout_s=float(source.get("XUNA_TEXT_TIMEOUT_S", "30")),
+            text_reasoning_effort=source.get("XUNA_TEXT_REASONING_EFFORT", ""),
         )
 
     def __repr__(self) -> str:

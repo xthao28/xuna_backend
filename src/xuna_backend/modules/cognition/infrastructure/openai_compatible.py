@@ -37,6 +37,7 @@ class OpenAICompatibleTextGenerator:
         transport: httpx.AsyncBaseTransport | None = None,
         api_key_header: str = "authorization",
         provider_label: str = NAME,
+        reasoning_effort: str = "",
     ) -> None:
         if not base_url.startswith(("http://", "https://")) or not model:
             raise ValueError("base_url (http/https) and model are required")
@@ -51,6 +52,9 @@ class OpenAICompatibleTextGenerator:
             self._headers = {"Authorization": f"Bearer {api_key}"}
         else:
             self._headers = {header: api_key}  # e.g. Bifrost virtual key x-bf-vk
+        if reasoning_effort and not reasoning_effort.isalpha():
+            raise ValueError("invalid reasoning_effort")
+        self._reasoning_effort = reasoning_effort
         self._transport = transport
         self._label = provider_label
 
@@ -65,6 +69,8 @@ class OpenAICompatibleTextGenerator:
                 for m in request.messages
             ],
         }
+        if self._reasoning_effort:
+            payload["reasoning_effort"] = self._reasoning_effort
         if request.tools:
             payload["tools"] = [
                 {
@@ -138,6 +144,7 @@ def register(registry: ProviderRegistry) -> None:
             model=str(options.get("model", "")),
             api_key=str(options.get("api_key", "")),
             api_key_header=str(options.get("api_key_header", "authorization")),
+            reasoning_effort=str(options.get("reasoning_effort", "")),
         )
 
     registry.register(Capability.TEXT, NAME, text)
