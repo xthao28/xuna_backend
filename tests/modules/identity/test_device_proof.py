@@ -1,5 +1,6 @@
-"""Golden vector for the device proof message. Firmware Identity V2 must
-produce byte-identical messages for the same inputs."""
+"""Golden vector for the device proof message. Firmware Identity V2 checks
+the same SHA-256 in `firmware/test/test_device_proof` (golden_message_matches_backend);
+change both together."""
 
 import hashlib
 
