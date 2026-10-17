@@ -56,6 +56,7 @@ def text_generator(settings: Settings) -> TextGenerator:
         "base_url": settings.text_base_url,
         "model": settings.text_model,
         "api_key": settings.text_api_key,
+        "api_key_header": settings.text_api_key_header,
     }
     return cast(TextGenerator, registry.create(Capability.TEXT, settings.text_provider, options))
 

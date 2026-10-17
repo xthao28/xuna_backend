@@ -122,3 +122,28 @@ def test_registry_and_config_validation() -> None:
         OpenAICompatibleTextGenerator("ftp://x", "m")
     with pytest.raises(ValueError):
         OpenAICompatibleTextGenerator("https://x", "")
+
+
+def test_gateway_key_header_for_bifrost() -> None:
+    seen: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.update(request.headers)
+        return httpx.Response(200, content=sse({"choices": [{"delta": {"content": "ok"}}]}))
+
+    generator = OpenAICompatibleTextGenerator(
+        "http://gw/v1",
+        "m",
+        api_key="vk-123",
+        api_key_header="x-bf-vk",
+        transport=httpx.MockTransport(handle),
+    )
+
+    async def collect() -> list[ChatEvent]:
+        return [e async for e in generator.stream(REQUEST)]
+
+    asyncio.run(collect())
+    assert seen["x-bf-vk"] == "vk-123"
+    assert "authorization" not in seen
+    with pytest.raises(ValueError):
+        OpenAICompatibleTextGenerator("http://gw/v1", "m", api_key_header="bad header\n")

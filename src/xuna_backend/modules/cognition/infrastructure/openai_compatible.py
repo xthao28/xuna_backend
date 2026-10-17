@@ -35,13 +35,22 @@ class OpenAICompatibleTextGenerator:
         model: str,
         api_key: str = "",
         transport: httpx.AsyncBaseTransport | None = None,
+        api_key_header: str = "authorization",
         provider_label: str = NAME,
     ) -> None:
         if not base_url.startswith(("http://", "https://")) or not model:
             raise ValueError("base_url (http/https) and model are required")
         self._url = base_url.rstrip("/") + "/chat/completions"
         self._model = model
-        self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        header = api_key_header.strip().lower()
+        if not header.replace("-", "").isalnum():
+            raise ValueError("invalid api_key_header")
+        if not api_key:
+            self._headers: dict[str, str] = {}
+        elif header == "authorization":
+            self._headers = {"Authorization": f"Bearer {api_key}"}
+        else:
+            self._headers = {header: api_key}  # e.g. Bifrost virtual key x-bf-vk
         self._transport = transport
         self._label = provider_label
 
@@ -128,6 +137,7 @@ def register(registry: ProviderRegistry) -> None:
             base_url=str(options.get("base_url", "")),
             model=str(options.get("model", "")),
             api_key=str(options.get("api_key", "")),
+            api_key_header=str(options.get("api_key_header", "authorization")),
         )
 
     registry.register(Capability.TEXT, NAME, text)

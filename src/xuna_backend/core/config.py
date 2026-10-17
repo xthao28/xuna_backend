@@ -32,6 +32,9 @@ class Settings:
     text_base_url: str = ""
     text_model: str = ""
     text_api_key: str = ""
+    # Header carrying the key: "authorization" (Bearer, default) or a gateway
+    # header such as Bifrost's "x-bf-vk" (raw key).
+    text_api_key_header: str = "authorization"
     text_timeout_s: float = 30.0
 
     @classmethod
@@ -52,6 +55,7 @@ class Settings:
             text_base_url=source.get("XUNA_TEXT_BASE_URL", ""),
             text_model=source.get("XUNA_TEXT_MODEL", ""),
             text_api_key=source.get("XUNA_TEXT_API_KEY", ""),
+            text_api_key_header=source.get("XUNA_TEXT_API_KEY_HEADER", "authorization"),
             text_timeout_s=float(source.get("XUNA_TEXT_TIMEOUT_S", "30")),
         )
 

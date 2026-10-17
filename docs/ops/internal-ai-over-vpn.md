@@ -19,6 +19,13 @@ XUNA_TEXT_API_KEY=<if required>                      # env/secret store only
 XUNA_TEXT_TIMEOUT_S=30
 ```
 
+## Bifrost gateway
+
+The owner's internal endpoint is a Bifrost gateway (provider label `SDS-AI`). It requires a
+**virtual key** in the `x-bf-vk` header: set `XUNA_TEXT_API_KEY_HEADER=x-bf-vk`. Keep the key
+and the internal address in `backend/.env.local` (gitignored, mode 600); `.env.example` shows the shape.
+Load it with `set -a; source .env.local; set +a` before running the API or the benchmark.
+
 ## Development (now)
 
 1. Connect the dev machine with the normal OpenVPN client (Tunnelblick / OpenVPN Connect).
