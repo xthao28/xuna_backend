@@ -1,0 +1,59 @@
+{
+  "format": "xuna.export.v1",
+  "sha256": "fede139d26cc3aef0377d9c37f20018d19d908efb001b4d427f7b6544258c1f8",
+  "payload": {
+    "exportedAtUtc": "2026-10-17T14:27:22.000Z",
+    "app": {
+      "version": "1.0.0+1"
+    },
+    "capabilities": {
+      "statedPreference": true,
+      "timeSync": true,
+      "identity": true
+    },
+    "identity": {
+      "petId": "d945c77026fd4f4a8a899bbff4aeed86",
+      "origin": "migrated_from_v1",
+      "snapshotGeneration": 38
+    },
+    "life": {
+      "activeSeconds": 7930,
+      "feedbackCount": 5,
+      "decisionId": 2,
+      "context": "quiet",
+      "action": "happy",
+      "quietChoice": "happy",
+      "playChoice": "idle",
+      "canFeedback": true,
+      "memoryCount": 5
+    },
+    "memories": [
+      {
+        "context": "quiet",
+        "action": "happy",
+        "approved": true,
+        "source": "button"
+      },
+      {
+        "context": "play",
+        "action": "idle",
+        "approved": true,
+        "source": "text"
+      }
+    ],
+    "explanation": {
+      "interaction": "quiet",
+      "dayPart": "evening",
+      "action": "happy",
+      "reason": "highest_estimate",
+      "fine": false,
+      "rated": 3,
+      "probabilityQ8": 203,
+      "effectiveMassQ8": 717,
+      "positiveQ8": 717,
+      "negativeQ8": 0,
+      "statedPositiveQ8": 0,
+      "statedNegativeQ8": 0
+    }
+  }
+}
