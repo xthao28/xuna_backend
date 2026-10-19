@@ -52,10 +52,12 @@ class Life(_Strict):
 
 
 class Memory(_Strict):
-    context: Context
+    # "greeting" and "reaction" (owner pet / shoo on the device) since the
+    # 2026-10-19 reaction learning (D6 revised); older exports stay valid.
+    context: Literal["quiet", "play", "greeting"]
     action: Action
     approved: bool
-    source: Literal["button", "text"]
+    source: Literal["button", "text", "reaction"]
 
 
 Q8 = Field(ge=0, le=0xFFFF)

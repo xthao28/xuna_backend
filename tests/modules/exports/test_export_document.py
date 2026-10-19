@@ -75,6 +75,20 @@ def test_rehashed_but_invalid_payload_is_rejected(mutate: object) -> None:
         verify_export(_rewrite(apply))
 
 
+def test_reaction_and_greeting_memories_are_accepted() -> None:
+    # Device-button learning (D6 revised 2026-10-19): source "reaction" and
+    # context "greeting" appear in mobile exports from then on.
+    def add(envelope: dict[str, object]) -> None:
+        envelope["payload"]["memories"].append(  # type: ignore[index]
+            {"context": "greeting", "action": "curious", "approved": False, "source": "reaction"}
+        )
+        _rehash(envelope)
+
+    export = verify_export(_rewrite(add))
+    assert export.memories[-1].source == "reaction"
+    assert export.memories[-1].context == "greeting"
+
+
 @pytest.mark.parametrize(
     "document",
     ["not json", "[]", '{"format":"xuna.export.v2","sha256":"","payload":{}}', '{"format":1}'],
