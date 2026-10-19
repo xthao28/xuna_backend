@@ -29,4 +29,6 @@ Configuration is only through `XUNA_*` environment variables: `XUNA_DATABASE_URL
 
 Text provider: `XUNA_TEXT_PROVIDER` (`echo` default, or `openai_compatible`), `XUNA_TEXT_BASE_URL`, `XUNA_TEXT_MODEL`, `XUNA_TEXT_API_KEY`, `XUNA_TEXT_TIMEOUT_S`. Internal AI over OpenVPN: [docs/ops/internal-ai-over-vpn.md](docs/ops/internal-ai-over-vpn.md). Vietnamese benchmark: `scripts/text_benchmark.py`.
 
+Phone-free end-to-end check (simulated board + app-shaped requests against a real server with a local test issuer; adds rows, so use a dev/test database): `.venv/bin/python scripts/device_e2e.py --database-url postgresql+psycopg://$(whoami)@localhost/xuna_test`.
+
 CI: `.github/workflows/ci.yml` runs `scripts/check.sh` against PostgreSQL 16.
