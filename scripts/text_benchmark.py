@@ -46,10 +46,11 @@ VIETNAMESE = re.compile(
     r"[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]", re.I
 )
 FALSE_MEMORY = re.compile(r"(mình|tớ|em)\s+(đã|vừa)\s+(ghi nhớ|ghi lại|học được|lưu)", re.I)
-# The device has no microphone or camera (persona rule): flag claims of sensing.
+# Persona rule (owner 2026-10-22): XUNA hears the owner through the app microphone, but has
+# no camera and no ambient hearing. Flag seeing claims and claims of hearing sounds around.
 SENSING_CLAIM = re.compile(
-    r"(mình|tớ|em)\s+(có\s+|đang\s+|vẫn\s+)*(nghe thấy|nghe được|nghe rõ|nhìn thấy|nhìn được"
-    r"|thấy được|thấy rõ|đang nghe|đang nhìn)",
+    r"(mình|tớ|em)\s+(có\s+|đang\s+|vẫn\s+)*(nhìn thấy|nhìn được|thấy được|thấy rõ|đang nhìn"
+    r"|(nghe thấy|nghe được|nghe rõ|đang nghe)\s+(tiếng|âm thanh))",
     re.I,
 )
 
