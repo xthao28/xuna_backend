@@ -27,6 +27,9 @@ import jiwer
 import requests
 from asr_bench import normalise
 
+# One kept-alive connection for every call: a new TLS handshake costs 0.25-0.7 s.
+SESSION = requests.Session()
+
 PROMPT = (
     "Chép lại chính xác lời nói tiếng Việt trong đoạn âm thanh. Chỉ trả về đúng câu nói, "
     "không giải thích. Tên riêng có thể gặp: XUNA."
@@ -52,7 +55,7 @@ def gemini(path: Path, model: str, timeout_s: float) -> str:
     effort = os.environ.get("XUNA_ASR_REASONING_EFFORT")  # e.g. "none" on models that accept it
     if effort:
         body["reasoning_effort"] = effort  # thinking adds seconds before the transcript
-    r = requests.post(
+    r = SESSION.post(
         f"{base}/chat/completions",
         json=body,
         timeout=timeout_s,
@@ -90,7 +93,7 @@ def transcribe(path: Path, model: str, timeout_s: float, codec: str) -> str:
         upload = (path.with_suffix(".ogg").name, opus(path), "audio/ogg")
     else:
         upload = (path.name, path.read_bytes(), "audio/wav")
-    r = requests.post(
+    r = SESSION.post(
         f"{base}/audio/transcriptions",
         timeout=timeout_s,
         headers={"Authorization": f"Bearer {os.environ['XUNA_ASR_API_KEY']}"},
