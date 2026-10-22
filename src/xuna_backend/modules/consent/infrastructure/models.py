@@ -18,5 +18,6 @@ class ConsentRow(Base):
     aggregate_metrics: Mapped[bool] = mapped_column(Boolean)
     experience_events: Mapped[bool] = mapped_column(Boolean)
     conversation_text: Mapped[bool] = mapped_column(Boolean)
+    conversation_voice: Mapped[bool] = mapped_column(Boolean, server_default="false")
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     policy: Mapped[str] = mapped_column(String(32))

@@ -22,10 +22,20 @@ from xuna_backend.modules.accounts.infrastructure.oidc import (
 from xuna_backend.modules.accounts.infrastructure.repository import SqlOwnerRepository
 from xuna_backend.modules.audit.api.routes import router as audit_router
 from xuna_backend.modules.audit.infrastructure.repository import SqlAuditLog
-from xuna_backend.modules.cognition.application.ports import TextGenerator
+from xuna_backend.modules.cognition.application.ports import (
+    SpeechRecognizer,
+    SpeechSynthesizer,
+    TextGenerator,
+)
 from xuna_backend.modules.cognition.application.registry import ProviderRegistry
 from xuna_backend.modules.cognition.domain.types import Capability
-from xuna_backend.modules.cognition.infrastructure import echo, openai_compatible
+from xuna_backend.modules.cognition.infrastructure import (
+    echo,
+    edge_tts_adapter,
+    openai_compatible,
+    openai_transcription,
+    piper_adapter,
+)
 from xuna_backend.modules.consent.api.routes import router as consent_router
 from xuna_backend.modules.consent.infrastructure.repository import SqlConsentRepository
 from xuna_backend.modules.conversation.api.routes import router as conversation_router
@@ -62,11 +72,49 @@ def text_generator(settings: Settings) -> TextGenerator:
     return cast(TextGenerator, registry.create(Capability.TEXT, settings.text_provider, options))
 
 
+def speech_recognizer(settings: Settings) -> SpeechRecognizer | None:
+    """None when voice is off; fails at startup on an unknown/misconfigured provider."""
+    if not settings.asr_provider:
+        return None
+    registry = ProviderRegistry()
+    openai_transcription.register(registry)
+    options = {
+        "base_url": settings.asr_base_url,
+        "model": settings.asr_model,
+        "api_key": settings.asr_api_key,
+        "timeout_s": settings.asr_timeout_s,
+    }
+    return cast(
+        SpeechRecognizer,
+        registry.create(Capability.SPEECH_RECOGNITION, settings.asr_provider, options),
+    )
+
+
+def speech_synthesizer(settings: Settings) -> SpeechSynthesizer | None:
+    """None when spoken replies are off (text replies still work)."""
+    if not settings.tts_provider:
+        return None
+    registry = ProviderRegistry()
+    edge_tts_adapter.register(registry)
+    piper_adapter.register(registry)
+    options = {
+        "voice": settings.tts_voice,
+        "model_path": settings.tts_piper_model,
+        "timeout_s": settings.tts_timeout_s,
+    }
+    return cast(
+        SpeechSynthesizer,
+        registry.create(Capability.SPEECH_SYNTHESIS, settings.tts_provider, options),
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     *,
     verifier: TokenVerifier | None = None,
     generator: TextGenerator | None = None,
+    recognizer: SpeechRecognizer | None = None,
+    synthesizer: SpeechSynthesizer | None = None,
 ) -> FastAPI:
     resolved = settings or Settings.from_env()
     configure_logging(resolved.log_level)
@@ -78,6 +126,9 @@ def create_app(
             yield
         finally:
             await app.state.database.dispose()
+            close = getattr(app.state.speech_recognizer, "aclose", None)
+            if close is not None:
+                await close()
 
     app = FastAPI(title="XUNA Cloud", version=__version__, lifespan=lifespan)
     app.state.settings = resolved
@@ -89,6 +140,8 @@ def create_app(
     app.state.audit_log = SqlAuditLog
     app.state.consent_repository = SqlConsentRepository
     app.state.text_generator = generator or text_generator(resolved)
+    app.state.speech_recognizer = recognizer or speech_recognizer(resolved)
+    app.state.speech_synthesizer = synthesizer or speech_synthesizer(resolved)
     install_error_handlers(app)
     install_request_context(app)
     app.include_router(health_router)

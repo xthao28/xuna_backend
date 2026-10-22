@@ -39,6 +39,8 @@ class ConsentBody(BaseModel):
     experienceEvents: bool
     conversationText: bool
     expectedVersion: int = Field(ge=0)
+    # Optional for clients that predate voice; omitted keeps the current value.
+    conversationVoice: bool | None = None
 
 
 def _repo(request: Request, session: object) -> ConsentRepository:
@@ -51,6 +53,7 @@ def _body(consent: ConsentState) -> dict[str, Any]:
         "aggregateMetrics": consent.aggregate_metrics,
         "experienceEvents": consent.experience_events,
         "conversationText": consent.conversation_text,
+        "conversationVoice": consent.conversation_voice,
         "version": consent.version,
         "updatedAt": consent.updated_at.astimezone(UTC).isoformat() if consent.updated_at else None,
     }
@@ -80,6 +83,7 @@ async def put_consents(
         experience_events=body.experienceEvents,
         conversation_text=body.conversationText,
         expected_version=body.expectedVersion,
+        conversation_voice=body.conversationVoice,
     )
 
     async def action() -> StoredResponse:

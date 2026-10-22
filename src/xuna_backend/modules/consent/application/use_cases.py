@@ -22,6 +22,8 @@ class UpdateConsent:
     experience_events: bool
     conversation_text: bool
     expected_version: int
+    # None keeps the current value: clients that predate voice never revoke it.
+    conversation_voice: bool | None = None
 
 
 async def require_consent(
@@ -48,6 +50,11 @@ async def update_consent(
         aggregate_metrics=command.aggregate_metrics,
         experience_events=command.experience_events,
         conversation_text=command.conversation_text,
+        conversation_voice=(
+            current.conversation_voice
+            if command.conversation_voice is None
+            else command.conversation_voice
+        ),
         version=current.version + 1,
         updated_at=now,
     )

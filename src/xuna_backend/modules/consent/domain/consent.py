@@ -11,6 +11,9 @@ class ConsentClass(StrEnum):
     AGGREGATE_METRICS = "aggregate_metrics"  # U1
     EXPERIENCE_EVENTS = "experience_events"  # U2
     CONVERSATION_TEXT = "conversation_text"  # U3 (per provider call, not retained)
+    # U3V (owner D16, 2026-10-22): speech sent to the ASR provider per call; raw
+    # audio and transcripts are never stored. Separate from U3: hearing is not reading.
+    CONVERSATION_VOICE = "conversation_voice"
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +21,7 @@ class ConsentState:
     aggregate_metrics: bool = False
     experience_events: bool = False
     conversation_text: bool = False
+    conversation_voice: bool = False
     version: int = 0  # 0 = never recorded (U0 default)
     updated_at: datetime | None = None
 
@@ -29,6 +33,8 @@ class ConsentState:
                 return self.experience_events
             case ConsentClass.CONVERSATION_TEXT:
                 return self.conversation_text
+            case ConsentClass.CONVERSATION_VOICE:
+                return self.conversation_voice
 
     def changed(self, other: "ConsentState") -> list[ConsentClass]:
         return [c for c in ConsentClass if self.allows(c) != other.allows(c)]

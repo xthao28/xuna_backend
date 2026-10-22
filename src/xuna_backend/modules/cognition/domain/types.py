@@ -107,8 +107,10 @@ class AudioChunk:
     """Opus or PCM16 frame. Raw audio is never stored (D23)."""
 
     data: bytes
-    codec: str  # "opus" | "pcm16"
-    sample_rate: int
+    # Frames: "opus" | "pcm16" | "mp3". Whole uploads (ASR input): "ogg_opus" |
+    # "m4a_aac" | "wav" (container formats a phone records directly).
+    codec: str
+    sample_rate: int  # 0 when the container carries it
 
 
 @dataclass(frozen=True, slots=True)

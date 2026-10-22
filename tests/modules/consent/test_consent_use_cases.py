@@ -32,13 +32,14 @@ class MemoryConsents:
 
 
 def update(
-    repo: MemoryConsents, audit: MemoryAuditLog, version: int, **flags: bool
+    repo: MemoryConsents, audit: MemoryAuditLog, version: int, **flags: bool | None
 ) -> ConsentState:
     command = UpdateConsent(
-        aggregate_metrics=flags.get("u1", False),
-        experience_events=flags.get("u2", False),
-        conversation_text=flags.get("u3", False),
+        aggregate_metrics=bool(flags.get("u1", False)),
+        experience_events=bool(flags.get("u2", False)),
+        conversation_text=bool(flags.get("u3", False)),
         expected_version=version,
+        conversation_voice=flags.get("voice"),
     )
     return asyncio.run(update_consent(repo, audit, OWNER, command, NOW, "req12345"))
 
@@ -68,6 +69,22 @@ def test_history_is_appended_and_withdrawal_takes_effect() -> None:
     with pytest.raises(ConsentError):
         asyncio.run(require_consent(repo, OWNER, ConsentClass.CONVERSATION_TEXT))
     assert len(audit.events) == 2
+
+
+def test_voice_is_its_own_opt_in_and_omitting_it_keeps_it() -> None:
+    repo, audit = MemoryConsents(), MemoryAuditLog()
+    update(repo, audit, 0, u3=True)
+    with pytest.raises(ConsentError):
+        asyncio.run(require_consent(repo, OWNER, ConsentClass.CONVERSATION_VOICE))
+    update(repo, audit, 1, u3=True, voice=True)
+    asyncio.run(require_consent(repo, OWNER, ConsentClass.CONVERSATION_VOICE))
+    assert audit.events[-1].metadata == {"version": 2, "conversationvoice": True}
+    # A client that predates voice (field omitted) changes text consent only.
+    kept = update(repo, audit, 2, u3=False)
+    assert kept.conversation_voice is True
+    assert kept.conversation_text is False
+    withdrawn = update(repo, audit, 3, voice=False)
+    assert withdrawn.conversation_voice is False
 
 
 def test_stale_version_conflicts_and_no_change_records_nothing() -> None:

@@ -94,6 +94,7 @@ def test_u0_default_and_guard(client: TestClient, issuer: LocalIssuer) -> None:
         "aggregateMetrics": False,
         "experienceEvents": False,
         "conversationText": False,
+        "conversationVoice": False,
         "version": 0,
         "updatedAt": None,
     }
@@ -123,6 +124,28 @@ def test_opt_in_enables_only_that_class_and_is_audited(
         ("consent.changed", {"version": 1, "experienceevents": True}),
     ]
     assert client.get("/v1/audit-events", headers=auth(issuer, "other")).json() == {"items": []}
+
+
+def test_voice_opt_in_survives_a_put_without_the_field(
+    client: TestClient, issuer: LocalIssuer
+) -> None:
+    headers = auth(issuer, "voice-owner")
+    on = client.put(
+        "/v1/consents",
+        json={**body(0, u3=True), "conversationVoice": True},
+        headers={**headers, **idem()},
+    )
+    assert on.status_code == 200, on.text
+    assert on.json()["conversationVoice"] is True
+    legacy = client.put("/v1/consents", json=body(1), headers={**headers, **idem()})
+    assert legacy.json()["conversationVoice"] is True
+    assert legacy.json()["conversationText"] is False
+    bad = client.put(
+        "/v1/consents",
+        json={**body(2), "conversationVoice": "yes"},
+        headers={**headers, **idem()},
+    )
+    assert bad.status_code == 422
 
 
 def test_consent_is_per_owner(client: TestClient, issuer: LocalIssuer) -> None:

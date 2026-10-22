@@ -24,7 +24,7 @@
 4. **No device actuation from the cloud.** Device behaviour changes only through typed, signed, bounded, expiring, replay-protected suggestions that the device `ActionGate` re-validates. A device action is never a model tool.
 5. **Privacy (D23):** U0 (no upload) is the default; U1/U2/U3 are separate opt-ins checked server-side before storing anything. Every route that stores or forwards owner data of a class **must** declare `Annotated[Owner, RequireConsent(ConsentClass.X)]` (`consent.api.routes`) or call `require_consent` in its use case. Raw audio is never stored. Conversation text is not retained after the provider call unless U3 is on. Confirmed facts are correctable, exportable, deletable; deletion writes a tombstone that blocks resurrection.
 6. **Offline-first:** a provider or service outage degrades features; it must never break identity or require the device to change behaviour.
-7. **Gates:** storing device-data projections (CLD-14+) needs Cloud gate (a)–(c). Choosing a vendor needs CLD-13 evidence (D11a open). Voice capabilities (VAD/ASR/TTS adapters) are interface-only until VOICE-01–04.
+7. **Gates:** storing device-data projections (CLD-14+) needs Cloud gate (a)–(c). Choosing a vendor needs CLD-13 evidence (D11a open). Voice capabilities (VAD/ASR/TTS adapters) are interface-only until VOICE-01–04, **except phone voice V1** (owner D16, 2026-10-22): the `openai_transcription` ASR adapter and the `edge` / `piper` TTS adapters serve the app path, behind consent U3V (`conversation_voice`). Device audio transport stays gated.
 
 ## 2. Structure and the dependency rule
 

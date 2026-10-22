@@ -39,6 +39,19 @@ class Settings:
     # Optional OpenAI `reasoning_effort` (e.g. "none"/"low") for thinking models,
     # whose hidden reasoning otherwise eats short output budgets. Empty = not sent.
     text_reasoning_effort: str = ""
+    # Phone voice V1 (owner D16, 2026-10-22). Empty provider = voice off (the
+    # endpoints answer 503 voice_unavailable). ASR `openai_transcription` = any
+    # OpenAI-style /audio/transcriptions server (Groq Whisper in V0).
+    asr_provider: str = ""
+    asr_base_url: str = ""
+    asr_model: str = ""
+    asr_api_key: str = ""
+    asr_timeout_s: float = 10.0
+    # TTS `edge` (free online voices) or `piper` (local, optional GPL extra).
+    tts_provider: str = ""
+    tts_voice: str = ""
+    tts_piper_model: str = ""
+    tts_timeout_s: float = 10.0
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -61,11 +74,21 @@ class Settings:
             text_api_key_header=source.get("XUNA_TEXT_API_KEY_HEADER", "authorization"),
             text_timeout_s=float(source.get("XUNA_TEXT_TIMEOUT_S", "30")),
             text_reasoning_effort=source.get("XUNA_TEXT_REASONING_EFFORT", ""),
+            asr_provider=source.get("XUNA_ASR_PROVIDER", ""),
+            asr_base_url=source.get("XUNA_ASR_BASE_URL", ""),
+            asr_model=source.get("XUNA_ASR_MODEL", ""),
+            asr_api_key=source.get("XUNA_ASR_API_KEY", ""),
+            asr_timeout_s=float(source.get("XUNA_ASR_TIMEOUT_S", "10")),
+            tts_provider=source.get("XUNA_TTS_PROVIDER", ""),
+            tts_voice=source.get("XUNA_TTS_VOICE", ""),
+            tts_piper_model=source.get("XUNA_TTS_PIPER_MODEL", ""),
+            tts_timeout_s=float(source.get("XUNA_TTS_TIMEOUT_S", "10")),
         )
 
     def __repr__(self) -> str:
         # Never print secrets (database password, API key) in logs or errors.
         return (
             f"Settings(environment={self.environment.value!r}, "
-            f"text_provider={self.text_provider!r})"
+            f"text_provider={self.text_provider!r}, asr_provider={self.asr_provider!r}, "
+            f"tts_provider={self.tts_provider!r})"
         )

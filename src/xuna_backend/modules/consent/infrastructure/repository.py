@@ -27,6 +27,7 @@ class SqlConsentRepository:
             aggregate_metrics=row.aggregate_metrics,
             experience_events=row.experience_events,
             conversation_text=row.conversation_text,
+            conversation_voice=row.conversation_voice,
             version=row.version,
             updated_at=row.recorded_at,
         )
@@ -40,6 +41,7 @@ class SqlConsentRepository:
                 aggregate_metrics=state.aggregate_metrics,
                 experience_events=state.experience_events,
                 conversation_text=state.conversation_text,
+                conversation_voice=state.conversation_voice,
                 recorded_at=state.updated_at,
                 policy=POLICY_VERSION,
             )
