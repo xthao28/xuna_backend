@@ -30,11 +30,20 @@ Keep runs small on weak machines (`--limit`, `--threads`).
 # Cloud ASR, free tiers. Keys only from the environment; never print or commit them.
 set -a; source ../../.env.gemini; set +a        # existing Gemini key (XUNA_TEXT_*)
 .venv/bin/python asr_cloud_bench.py --provider gemini --model gemini-3.5-flash-lite --limit 10
-XUNA_ASR_BASE_URL=https://api.groq.com/openai/v1 XUNA_ASR_API_KEY=... \
-  .venv/bin/python asr_cloud_bench.py --provider transcribe --model whisper-large-v3-turbo --limit 10
+# Groq Whisper: put the key in backend/.env.groq (gitignored; template below)
+set -a; source ../../.env.groq; set +a
+.venv/bin/python asr_cloud_bench.py --provider transcribe --model "$XUNA_ASR_MODEL" --limit 10
 
 # Edge TTS first-audio latency and failure rate
 .venv/bin/python tts_bench.py --runs 1
+```
+
+`backend/.env.groq` is not in Git, so create it on each machine (mode 600):
+
+```sh
+XUNA_ASR_BASE_URL=https://api.groq.com/openai/v1
+XUNA_ASR_MODEL=whisper-large-v3-turbo
+XUNA_ASR_API_KEY=<key from https://console.groq.com/keys>
 ```
 
 ## Files
