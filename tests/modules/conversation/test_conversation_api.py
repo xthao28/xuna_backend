@@ -184,3 +184,33 @@ def test_rejects_oversized_text(
     opt_in_u3(client, h)
     assert turn(client, h, "a" * 501).status_code == 422  # type: ignore[attr-defined]
     assert generator.requests == []
+
+
+def test_turn_context_reaches_the_prompt_and_bad_context_is_rejected(
+    setup: tuple[TestClient, RecordingGenerator], issuer: LocalIssuer
+) -> None:
+    # Owner 2026-10-23: time, earlier lines and the device's view of XUNA.
+    client, generator = setup
+    h = headers(issuer)
+    bind(client, h)
+    opt_in_u3(client, h)
+    url = f"/v1/conversations/{PET}/turns"
+    body = {
+        "schemaVersion": 1,
+        "text": "hôm nay thứ mấy?",
+        "clientTime": "2026-10-23T21:05:00+07:00",
+        "history": [{"role": "owner", "text": "chào"}, {"role": "xuna", "text": "Chào bạn!"}],
+        "pet": {"activeSeconds": 7200, "learnedEvents": 3, "quietChoice": "idle"},
+    }
+    assert client.post(url, json=body, headers=h).status_code == 200
+    sent = generator.requests[-1]
+    assert "thứ Sáu, ngày 23/10/2026" in sent.messages[0].content
+    assert "khi yên tĩnh bạn thích nằm nghỉ" in sent.messages[0].content
+    assert [m.role for m in sent.messages] == [Role.SYSTEM, Role.USER, Role.ASSISTANT, Role.USER]
+    for bad in (
+        {"clientTime": "2026-10-23T21:05:00"},
+        {"history": [{"role": "owner", "text": "a"}] * 13},
+        {"pet": {"current": "dancing"}},
+        {"pet": {"name": "Bob"}},
+    ):
+        assert client.post(url, json={**body, **bad}, headers=h).status_code == 422

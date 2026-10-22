@@ -7,7 +7,9 @@ through owner confirmation + device commit).
 """
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
 
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
@@ -22,12 +24,17 @@ from xuna_backend.modules.cognition.domain.types import (
 )
 
 MAX_INPUT_CHARS = 500
+MAX_HISTORY_LINES = 12
 
 PERSONA_VI = (
     "Bạn là XUNA, một thú cưng pixel sống trong một thiết bị nhỏ. Xưng 'mình', gọi người "
-    "dùng là 'bạn'. Trả lời bằng tiếng Việt, ngắn gọn (tối đa 3 câu), ấm áp và tò mò. "
-    "Không nói rằng bạn đã ghi nhớ, đã học hay đã thay đổi điều gì: việc ghi nhớ chỉ xảy ra "
-    "khi người dùng xác nhận trong app. Không bịa sự kiện đã xảy ra với thiết bị. "
+    "dùng là 'bạn'. Trả lời bằng tiếng Việt, ấm áp, tò mò và thông minh: trả lời đúng điều "
+    "được hỏi, kể cả câu hỏi kiến thức, rồi mới thêm một chút cá tính. Thường 1-3 câu; khi "
+    "cần giải thích thì tối đa 5 câu. Câu trả lời sẽ được đọc thành tiếng: không dùng emoji, "
+    "markdown hay gạch đầu dòng. "
+    "Không nói rằng cuộc trò chuyện này làm bạn ghi nhớ, học hay thay đổi điều gì: việc ghi "
+    "nhớ chỉ xảy ra khi người dùng xác nhận trong app. Bạn chỉ nhớ các câu trước trong cuộc "
+    "trò chuyện này. Không bịa sự kiện đã xảy ra với thiết bị. "
     # Owner 2026-10-22 (phone voice V1): XUNA may say it hears the owner, because the
     # app's microphone carries their voice; it still cannot see or hear the room.
     "Bạn nghe được người dùng qua micro điện thoại khi họ bấm nút nói trong app, và đọc "
@@ -39,6 +46,110 @@ PERSONA_VI = (
 )
 
 
+class PetAction(StrEnum):
+    """Device actions as the app reports them (wire strings)."""
+
+    IDLE = "idle"
+    HAPPY = "happy"
+    CURIOUS = "curious"
+
+
+_ACTION_VI = {
+    PetAction.IDLE: "nằm nghỉ thư giãn",
+    PetAction.HAPPY: "nhảy nhót vui vẻ",
+    PetAction.CURIOUS: "tò mò ngó nghiêng",
+}
+_WEEKDAY_VI = ("thứ Hai", "thứ Ba", "thứ Tư", "thứ Năm", "thứ Sáu", "thứ Bảy", "Chủ nhật")
+
+
+@dataclass(frozen=True, slots=True)
+class PetSelf:
+    """What the device says about XUNA, read by the app over BLE (owner 2026-10-23).
+
+    Prompt context for this call only; never stored. Device data, so untrusted
+    but bounded: closed action sets and integer ranges, no free text.
+    """
+
+    active_seconds: int = 0
+    learned_events: int = 0
+    current: PetAction | None = None
+    quiet_choice: PetAction | None = None
+    play_choice: PetAction | None = None
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.active_seconds < 2**32 or not 0 <= self.learned_events < 2**32:
+            raise ValueError("pet counters out of range")
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryLine:
+    """One earlier line of this conversation, kept by the app in memory only."""
+
+    from_owner: bool
+    text: str
+
+    def __post_init__(self) -> None:
+        if not self.text.strip() or len(self.text) > MAX_INPUT_CHARS:
+            raise ValueError("history text must be 1..500 characters")
+
+
+@dataclass(frozen=True, slots=True)
+class TurnContext:
+    """Phone-supplied context for one turn (owner 2026-10-23: "smart like Xiaozhi")."""
+
+    local_time: datetime | None = None
+    history: tuple[HistoryLine, ...] = field(default_factory=tuple)
+    pet: PetSelf | None = None
+
+    def __post_init__(self) -> None:
+        if self.local_time is not None and self.local_time.utcoffset() is None:
+            raise ValueError("local_time needs a UTC offset")
+        if len(self.history) > MAX_HISTORY_LINES:
+            raise ValueError("history too long")
+
+
+def _span(seconds: int) -> str:
+    if seconds < 3600:
+        return f"{max(1, seconds // 60)} phút"
+    if seconds < 2 * 86400:
+        return f"{seconds // 3600} giờ"
+    return f"{seconds // 86400} ngày"
+
+
+def describe_context(context: TurnContext) -> str:
+    """System-prompt lines for the turn context (Vietnamese)."""
+    lines: list[str] = []
+    if context.local_time is None:
+        lines.append("Bạn không biết bây giờ là mấy giờ hay ngày nào; nếu được hỏi hãy nói thật.")
+    else:
+        t = context.local_time
+        lines.append(
+            f"Bây giờ là {t:%H:%M}, {_WEEKDAY_VI[t.weekday()]}, ngày {t.day}/{t.month}/{t.year} "
+            "theo giờ điện thoại của bạn ấy."
+        )
+    pet = context.pet
+    if pet is not None:
+        lines.append(
+            f"Thiết bị của bạn đã bật tổng cộng khoảng {_span(pet.active_seconds)} "
+            "(thời gian sống của bạn tính theo lúc máy chạy)."
+        )
+        if pet.current is not None:
+            lines.append(f"Lúc này bạn đang {_ACTION_VI[pet.current]} trên màn hình.")
+        if pet.learned_events and (pet.quiet_choice or pet.play_choice):
+            liked = []
+            if pet.quiet_choice is not None:
+                liked.append(f"khi yên tĩnh bạn thích {_ACTION_VI[pet.quiet_choice]}")
+            if pet.play_choice is not None:
+                liked.append(f"khi chơi đùa bạn thích {_ACTION_VI[pet.play_choice]}")
+            lines.append(
+                "Sở thích thật của bạn, do thiết bị học từ phản ứng của chủ qua "
+                f"{pet.learned_events} lần: " + "; ".join(liked) + "."
+            )
+        else:
+            lines.append("Bạn chưa có sở thích rõ ràng: chủ chưa dạy bạn lần nào.")
+    return " ".join(lines)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderFailed:
     """Terminal event: the app falls back to its local templates."""
@@ -46,14 +157,26 @@ class ProviderFailed:
     code: str = "provider_unavailable"
 
 
-def build_request(user_text: str, locale: Locale, timeout_s: float = 30.0) -> ChatRequest:
+def build_request(
+    user_text: str,
+    locale: Locale,
+    timeout_s: float = 30.0,
+    context: TurnContext | None = None,
+) -> ChatRequest:
     text = user_text.strip()
     if not text or len(text) > MAX_INPUT_CHARS:
         raise ValueError("text must be 1..500 characters")
+    system = PERSONA_VI if context is None else f"{PERSONA_VI} {describe_context(context)}"
+    earlier = () if context is None else context.history
     return ChatRequest(
-        messages=(Message(Role.SYSTEM, PERSONA_VI), Message(Role.USER, text)),
+        messages=(
+            Message(Role.SYSTEM, system),
+            *(Message(Role.USER if h.from_owner else Role.ASSISTANT, h.text) for h in earlier),
+            Message(Role.USER, text),
+        ),
         locale=locale,
-        max_output_tokens=256,
+        # Reasoning models count their thinking here; 5 short sentences fit well.
+        max_output_tokens=400,
         timeout_s=timeout_s,
     )
 

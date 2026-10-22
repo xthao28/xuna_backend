@@ -11,7 +11,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.accounts.api.dependencies import Session, state
@@ -31,8 +31,13 @@ from xuna_backend.modules.cognition.domain.types import (
 from xuna_backend.modules.consent.api.routes import RequireConsent
 from xuna_backend.modules.consent.domain.consent import ConsentClass
 from xuna_backend.modules.conversation.application.chat_turn import (
+    MAX_HISTORY_LINES,
     MAX_INPUT_CHARS,
+    HistoryLine,
+    PetAction,
+    PetSelf,
     ProviderFailed,
+    TurnContext,
     build_request,
     chat_turn,
 )
@@ -52,6 +57,25 @@ U3Owner = Annotated[Owner, RequireConsent(ConsentClass.CONVERSATION_TEXT)]
 VoiceOwner = Annotated[Owner, RequireConsent(ConsentClass.CONVERSATION_VOICE)]
 
 
+class HistoryLineBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    role: Literal["owner", "xuna"]
+    text: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
+
+
+class PetSelfBody(BaseModel):
+    """Device-read facts about XUNA (owner 2026-10-23); prompt context only."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    activeSeconds: int = Field(default=0, ge=0, lt=2**32)
+    learnedEvents: int = Field(default=0, ge=0, lt=2**32)
+    current: PetAction | None = None
+    quietChoice: PetAction | None = None
+    playChoice: PetAction | None = None
+
+
 class TurnBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -60,6 +84,30 @@ class TurnBody(BaseModel):
     locale: Locale = Locale.VI
     # Phone voice V1: also stream the reply as audio, sentence by sentence.
     speak: bool = False
+    # Turn context (owner 2026-10-23), all optional and never stored: the phone's
+    # local time, earlier lines of this conversation, and what the device says
+    # about XUNA. Old apps omit them and get the context-free prompt.
+    clientTime: AwareDatetime | None = None
+    history: list[HistoryLineBody] | None = Field(default=None, max_length=MAX_HISTORY_LINES)
+    pet: PetSelfBody | None = None
+
+    def context(self) -> TurnContext | None:
+        if self.clientTime is None and self.history is None and self.pet is None:
+            return None
+        pet = self.pet
+        return TurnContext(
+            local_time=self.clientTime,
+            history=tuple(HistoryLine(h.role == "owner", h.text) for h in self.history or ()),
+            pet=None
+            if pet is None
+            else PetSelf(
+                active_seconds=pet.activeSeconds,
+                learned_events=pet.learnedEvents,
+                current=pet.current,
+                quiet_choice=pet.quietChoice,
+                play_choice=pet.playChoice,
+            ),
+        )
 
 
 class TranscriptionBody(BaseModel):
@@ -87,7 +135,7 @@ async def turn(
     await session.close()  # release the DB connection before a long provider call
     try:
         chat_request = build_request(
-            body.text, body.locale, state(request, "settings").text_timeout_s
+            body.text, body.locale, state(request, "settings").text_timeout_s, body.context()
         )
     except ValueError as error:
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text") from error
