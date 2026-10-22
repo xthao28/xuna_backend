@@ -36,6 +36,11 @@ set -a; source ../../.env.groq; set +a
 
 # Edge TTS first-audio latency and failure rate
 .venv/bin/python tts_bench.py --runs 1
+
+# Piper local TTS fallback (download the voice once into models/, gitignored)
+mkdir -p models && for f in vi_VN-vais1000-medium.onnx vi_VN-vais1000-medium.onnx.json; do
+  curl -sSfL -o models/$f https://huggingface.co/rhasspy/piper-voices/resolve/main/vi/vi_VN/vais1000/medium/$f; done
+.venv/bin/python piper_bench.py --limit 6 --check-asr   # --check-asr uses backend/.env.groq
 ```
 
 `backend/.env.groq` is not in Git, so create it on each machine (mode 600):
@@ -55,6 +60,7 @@ XUNA_ASR_API_KEY=<key from https://console.groq.com/keys>
 | `asr_bench.py` | Local faster-whisper WER (normalised) and decode time |
 | `asr_cloud_bench.py` | Gemini audio input or any OpenAI-compatible `/audio/transcriptions` |
 | `tts_bench.py` | Edge TTS first audio / total time / failures (no retries on purpose) |
+| `piper_bench.py` | Piper local TTS (vi_VN vais1000 medium) latency; optional ASR round trip as intelligibility proxy |
 
 Free tiers may use inputs to improve their products: use the synthetic corpus only,
 never owner audio without consent.
