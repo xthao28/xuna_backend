@@ -18,6 +18,7 @@ import base64
 import json
 import os
 import statistics
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -48,7 +49,7 @@ def gemini(path: Path, model: str, timeout_s: float) -> str:
         ],
         "temperature": 0,
     }
-    effort = os.environ.get("XUNA_ASR_REASONING_EFFORT", "none")
+    effort = os.environ.get("XUNA_ASR_REASONING_EFFORT")  # e.g. "none" on models that accept it
     if effort:
         body["reasoning_effort"] = effort  # thinking adds seconds before the transcript
     r = requests.post(
@@ -61,16 +62,41 @@ def gemini(path: Path, model: str, timeout_s: float) -> str:
     return str(r.json()["choices"][0]["message"]["content"]).strip()
 
 
-def transcribe(path: Path, model: str, timeout_s: float) -> str:
+def opus(path: Path) -> bytes:
+    """WAV → Ogg/Opus 16 kb/s: ~10x smaller upload (the device would send Opus too)."""
+    return subprocess.run(  # noqa: S603 - fixed argv, dev-only script
+        [  # noqa: S607 - ffmpeg from PATH, documented requirement
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-i",
+            str(path),
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "16k",
+            "-f",
+            "ogg",
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+
+
+def transcribe(path: Path, model: str, timeout_s: float, codec: str) -> str:
     base = os.environ["XUNA_ASR_BASE_URL"].rstrip("/")
-    with path.open("rb") as f:
-        r = requests.post(
-            f"{base}/audio/transcriptions",
-            timeout=timeout_s,
-            headers={"Authorization": f"Bearer {os.environ['XUNA_ASR_API_KEY']}"},
-            files={"file": (path.name, f, "audio/wav")},
-            data={"model": model, "language": "vi", "prompt": "XUNA", "temperature": "0"},
-        )
+    if codec == "opus":
+        upload = (path.with_suffix(".ogg").name, opus(path), "audio/ogg")
+    else:
+        upload = (path.name, path.read_bytes(), "audio/wav")
+    r = requests.post(
+        f"{base}/audio/transcriptions",
+        timeout=timeout_s,
+        headers={"Authorization": f"Bearer {os.environ['XUNA_ASR_API_KEY']}"},
+        files={"file": upload},
+        data={"model": model, "language": "vi", "prompt": "XUNA", "temperature": "0"},
+    )
     r.raise_for_status()
     return str(r.json()["text"]).strip()
 
@@ -85,15 +111,22 @@ def main() -> None:
         "--pause", type=float, default=2.0, help="seconds between calls (rate limits)"
     )
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument(
+        "--codec", choices=["wav", "opus"], default="wav", help="upload format (transcribe only)"
+    )
     parser.add_argument("--out", type=Path, default=None)
     args = parser.parse_args()
-    call = gemini if args.provider == "gemini" else transcribe
     items = json.loads((args.corpus / "manifest.json").read_text())[: args.limit]
     rows = []
     for item in items:
         t0 = time.perf_counter()
+        path = args.corpus / item["path"]
         try:
-            hyp, error = call(args.corpus / item["path"], args.model, args.timeout), None
+            if args.provider == "transcribe":
+                hyp = transcribe(path, args.model, args.timeout, args.codec)
+            else:
+                hyp = gemini(path, args.model, args.timeout)
+            error = None
         except Exception as exc:  # status code only, never the response body
             hyp = ""
             code = getattr(getattr(exc, "response", None), "status_code", None)
@@ -114,6 +147,7 @@ def main() -> None:
     summary: dict[str, Any] = {
         "provider": args.provider,
         "model": args.model,
+        "codec": args.codec,
         "calls": len(rows),
         "failures": len(rows) - len(ok),
         "errors": sorted({r["error"] for r in rows if r["error"]}),
@@ -131,7 +165,7 @@ def main() -> None:
             ),
             "latencyMsMedian": statistics.median(r["latencyMs"] for r in sel),
         }
-    out = args.out or Path(f"results/asr_{args.provider}_{args.model}.json")
+    out = args.out or Path(f"results/asr_{args.provider}_{args.model}_{args.codec}.json")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"summary": summary, "rows": rows}, ensure_ascii=False, indent=1))
     print(json.dumps(summary, ensure_ascii=False))  # noqa: T201 - CLI output
