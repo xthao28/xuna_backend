@@ -145,10 +145,13 @@ class _Voice:
                 self._seq = -1  # report the missing provider once
                 yield _sse("speech_unavailable", {"code": "voice_unavailable"})
             return
+        text = speakable(sentence)
+        if not text:
+            return
         audio = b""
         codec, rate = "", 0
         try:
-            async for chunk in self._synthesizer.synthesize(speakable(sentence), self._locale):
+            async for chunk in self._synthesizer.synthesize(text, self._locale):
                 audio += chunk.data
                 codec, rate = chunk.codec, chunk.sample_rate
         except ProviderUnavailableError:

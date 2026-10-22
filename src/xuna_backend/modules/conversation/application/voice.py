@@ -7,6 +7,7 @@ by sentence. Audio and transcripts are never stored; transcripts are untrusted.
 """
 
 import struct
+import unicodedata
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import StrEnum
@@ -96,10 +97,19 @@ class SentenceSplitter:
 _PRONUNCIATION = {"XUNA": "Xu Na", "Xuna": "Xu Na"}
 
 
+# Emoji joiners and presentation selectors; other combining marks are Vietnamese tones.
+_EMOJI_GLUE = {"\u200d", "\ufe0e", "\ufe0f"}
+
+
+def _is_emoji(char: str) -> bool:
+    return char in _EMOJI_GLUE or unicodedata.category(char) in {"So", "Sk", "Cs"}
+
+
 def speakable(sentence: str) -> str:
+    """Text for TTS: name spelled as said, emojis dropped ("" = nothing to say)."""
     for written, spoken in _PRONUNCIATION.items():
         sentence = sentence.replace(written, spoken)
-    return sentence
+    return " ".join("".join(c for c in sentence if not _is_emoji(c)).split())
 
 
 def wav_container(pcm16: bytes, sample_rate: int) -> bytes:

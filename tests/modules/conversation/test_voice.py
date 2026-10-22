@@ -90,6 +90,8 @@ def test_a_sentence_without_punctuation_is_cut_at_a_space_when_too_long() -> Non
 
 def test_pronunciation_and_wav_framing() -> None:
     assert speakable("Chào XUNA, Xuna ơi") == "Chào Xu Na, Xu Na ơi"
+    assert speakable("Mình vui lắm 🌟 nhé! 👍🏽❤️") == "Mình vui lắm nhé!"
+    assert speakable("🌤️🚀") == ""
     with wave.open(io.BytesIO(WAV)) as w:
         assert (w.getnchannels(), w.getsampwidth(), w.getframerate(), w.getnframes()) == (
             1,
