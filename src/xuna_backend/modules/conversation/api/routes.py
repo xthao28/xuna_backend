@@ -41,13 +41,17 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     build_request,
     chat_turn,
 )
+from xuna_backend.modules.conversation.application.spoken_turn import (
+    SpeechUnavailable,
+    SpokenAudio,
+    SpokenFinished,
+    SpokenTurnEvent,
+    spoken_turn,
+)
 from xuna_backend.modules.conversation.application.voice import (
     MAX_AUDIO_BYTES,
     AudioFormat,
-    SentenceSplitter,
-    speakable,
     transcribe_once,
-    wav_container,
 )
 from xuna_backend.modules.identity.application.use_cases import IdentityError, get_owned_pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
@@ -141,34 +145,36 @@ async def turn(
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text") from error
     generator: TextGenerator = state(request, "text_generator")
     synthesizer: SpeechSynthesizer | None = state(request, "speech_synthesizer")
-    voice = _Voice(synthesizer, body.locale) if body.speak else None
 
     async def events() -> AsyncIterator[str]:
-        splitter = SentenceSplitter()
-        async for event in chat_turn(generator, chat_request):
+        text_events = chat_turn(generator, chat_request)
+        stream: AsyncIterator[SpokenTurnEvent] = (
+            spoken_turn(text_events, synthesizer, body.locale) if body.speak else text_events
+        )
+        async for event in stream:
             match event:
                 case TextDelta(text=text):
                     yield _sse("delta", {"text": text})
-                    if voice is not None:
-                        for sentence in splitter.feed(text):
-                            async for frame in voice.speak(sentence):
-                                yield frame
                 case ToolCallRequested():
                     continue  # no server tools enabled yet
                 case ChatFinished() as done:
-                    if voice is not None:
-                        for sentence in splitter.flush():
-                            async for frame in voice.speak(sentence):
-                                yield frame
+                    yield _sse("finished", _finished(done))
+                case SpokenFinished(finished=done, spoken=spoken, first_audio_ms=first_ms):
+                    timing = {} if first_ms is None else {"firstAudioMs": first_ms}
+                    yield _sse("finished", _finished(done) | {"spoken": spoken} | timing)
+                case SpokenAudio() as audio:
                     yield _sse(
-                        "finished",
+                        "audio",
                         {
-                            "provider": done.provider,
-                            "model": done.model,
-                            "latencyMs": done.latency_ms,
-                        }
-                        | ({} if voice is None else {"spoken": voice.spoken}),
+                            "seq": audio.seq,
+                            "text": audio.text,
+                            "format": audio.codec,
+                            "sampleRate": audio.sample_rate,
+                            "data": base64.b64encode(audio.data).decode("ascii"),
+                        },
                     )
+                case SpeechUnavailable(code=code):
+                    yield _sse("speech_unavailable", {"code": code})
                 case ProviderFailed(code=code):
                     yield _sse("error", {"code": code})
 
@@ -177,50 +183,8 @@ async def turn(
     )
 
 
-class _Voice:
-    """Speaks reply sentences in order. After a TTS failure it stops speaking and
-    reports `speech_unavailable` once; the text reply always continues."""
-
-    def __init__(self, synthesizer: SpeechSynthesizer | None, locale: Locale) -> None:
-        self._synthesizer = synthesizer
-        self._locale = locale
-        self._seq = 0
-        self.spoken = synthesizer is not None
-
-    async def speak(self, sentence: str) -> AsyncIterator[str]:
-        if self._synthesizer is None or not self.spoken:
-            if self._synthesizer is None and self._seq == 0:
-                self._seq = -1  # report the missing provider once
-                yield _sse("speech_unavailable", {"code": "voice_unavailable"})
-            return
-        text = speakable(sentence)
-        if not text:
-            return
-        audio = b""
-        codec, rate = "", 0
-        try:
-            async for chunk in self._synthesizer.synthesize(text, self._locale):
-                audio += chunk.data
-                codec, rate = chunk.codec, chunk.sample_rate
-        except ProviderUnavailableError:
-            self.spoken = False
-            yield _sse("speech_unavailable", {"code": "provider_unavailable"})
-            return
-        if not audio:
-            return
-        if codec == "pcm16":
-            audio, codec = wav_container(audio, rate), "wav"
-        self._seq += 1
-        yield _sse(
-            "audio",
-            {
-                "seq": self._seq,
-                "text": sentence,
-                "format": codec,
-                "sampleRate": rate,
-                "data": base64.b64encode(audio).decode("ascii"),
-            },
-        )
+def _finished(done: ChatFinished) -> dict[str, Any]:
+    return {"provider": done.provider, "model": done.model, "latencyMs": done.latency_ms}
 
 
 @router.post("/speech/transcriptions")

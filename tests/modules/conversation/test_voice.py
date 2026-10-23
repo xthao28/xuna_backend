@@ -39,6 +39,8 @@ def test_accepts_matching_containers(data: bytes, audio_format: AudioFormat) -> 
         (WAV, AudioFormat.M4A_AAC),
         (b"OggS" + b"\0" * MAX_AUDIO_BYTES, AudioFormat.OGG_OPUS),
     ],
+    # Short IDs: pytest puts the ID in an environment variable, which Windows caps.
+    ids=["empty", "ogg_as_wav", "wav_as_m4a", "oversized"],
 )
 def test_rejects_empty_oversized_or_mislabelled_audio(
     data: bytes, audio_format: AudioFormat
@@ -80,6 +82,22 @@ def test_sentences_are_cut_as_the_reply_streams() -> None:
     assert splitter.feed(" quá…\nThật") == ["Vui quá…"]
     assert splitter.flush() == ["Thật"]
     assert splitter.flush() == []
+
+
+def test_the_first_piece_may_end_at_a_comma_once_long_enough() -> None:
+    splitter = SentenceSplitter(first_clause_chars=16)
+    assert splitter.feed("Ừ, lá cây đổi màu vào mùa thu, vì diệp lục, ") == [
+        "Ừ, lá cây đổi màu vào mùa thu,"  # "Ừ," alone is too short to cut
+    ]
+    # Only the first piece: later commas wait for the end of the sentence.
+    assert splitter.feed("giảm dần. Đẹp, ") == ["vì diệp lục, giảm dần."]
+    assert splitter.flush() == ["Đẹp,"]
+
+
+def test_a_decimal_comma_is_not_a_clause_mark() -> None:
+    splitter = SentenceSplitter(first_clause_chars=4)
+    assert splitter.feed("Giá là 3,5 nghìn đồng") == []
+    assert splitter.feed(". ") == ["Giá là 3,5 nghìn đồng."]
 
 
 def test_a_sentence_without_punctuation_is_cut_at_a_space_when_too_long() -> None:

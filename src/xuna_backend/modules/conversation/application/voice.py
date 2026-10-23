@@ -64,28 +64,41 @@ async def transcribe_once(
 
 @dataclass
 class SentenceSplitter:
-    """Cuts streamed reply text into sentences so speech starts early."""
+    """Cuts streamed reply text into sentences so speech starts early.
 
+    With `first_clause_chars`, the first piece may end at a clause mark
+    (", " "; " ": ") once it is that long, so the first audio is short and
+    arrives sooner; later pieces are whole sentences.
+    """
+
+    first_clause_chars: int = 0
     _buffer: str = ""
+    _emitted: bool = False
 
     def feed(self, text: str) -> list[str]:
         self._buffer += text
         sentences: list[str] = []
         start = 0
         for index, char in enumerate(self._buffer):
-            # Wait for the following character: "3." may still become "3.5".
-            end_of_sentence = char == "\n" or (
-                char in ".!?…"
-                and index + 1 < len(self._buffer)
-                and self._buffer[index + 1].isspace()
+            # Wait for the following character: "3." may still become "3.5", "3," "3,5".
+            followed_by_space = index + 1 < len(self._buffer) and self._buffer[index + 1].isspace()
+            end_of_sentence = char == "\n" or (char in ".!?…" and followed_by_space)
+            first_clause = (
+                self.first_clause_chars > 0
+                and not self._emitted
+                and not sentences
+                and char in ",;:"
+                and followed_by_space
+                and index - start + 1 >= self.first_clause_chars
             )
             too_long = index - start + 1 >= MAX_SENTENCE_CHARS and char.isspace()
-            if end_of_sentence or too_long:
+            if end_of_sentence or first_clause or too_long:
                 sentence = self._buffer[start : index + 1].strip()
                 if sentence:
                     sentences.append(sentence)
                 start = index + 1
         self._buffer = self._buffer[start:]
+        self._emitted = self._emitted or bool(sentences)
         return sentences
 
     def flush(self) -> list[str]:

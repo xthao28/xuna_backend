@@ -119,6 +119,8 @@ XUNA_TEST_DATABASE_URL=postgresql+psycopg://<user>@localhost/xuna_test scripts/c
 
   It runs `ruff format --check`, `ruff check`, `mypy --strict`, `alembic upgrade head` and `pytest`. All must pass. Report anything skipped.
 
+  The owner has two machines with **separate** PostgreSQL servers (Mac 14.15, user `$(whoami)`, no password; Windows 16.15, user `xuna`/`xuna`, `.venv/Scripts`). Check which machine you are on (`uname` / platform) and use the matching URL from the table in [README.md](README.md#owner-machines-mac-vs-windows-do-not-mix-them-up); say which machine ran the checks in every report.
+
 ## 10. Style
 
 - Type hints everywhere (`mypy --strict`). `from __future__` not needed on 3.12; use `X | None`, `list[...]`.

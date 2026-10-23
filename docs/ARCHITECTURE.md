@@ -43,7 +43,7 @@ Planned (Cloud plan §8): `consent`, `conversation`, `memory`, `backup`, `sugges
 | Provider selection | `selected_module` in `config.yaml` → class lookup | `ProviderRegistry`: typed factory per `(capability, name)`, unknown/duplicate names fail at startup |
 | Interfaces | ABC base classes with sync generators, threads per connection | `typing.Protocol` ports, `async` streams, typed events (`TextDelta`, `ToolCallRequested`, `ChatFinished`) |
 | Tools | plugin functions + MCP (server/device/endpoint) | `Tool` port with JSON-Schema `ToolSpec`; MCP can be an adapter. **Device actions are never tools**: they go through device-validated suggestions |
-| Session handling | one large `ConnectionHandler` (~1,800 lines) owning audio, ASR, LLM, TTS, memory, reports | Per-module use cases; the future voice/chat session orchestrator composes ports and stays small and testable |
+| Session handling | one large `ConnectionHandler` (~1,800 lines) owning audio, ASR, LLM, TTS, memory, reports | Per-module use cases; the future voice/chat session orchestrator composes ports and stays small and testable. `conversation.application.spoken_turn` (2026-10-23) overlaps TTS with the text stream (≤ 2 parallel, in-order audio, cancel on close) |
 | Memory | provider writes memory directly (mem0, local) | Model output is untrusted; memory is confirmed by owner + durable device commit, projected with `(PetId, generation)`, deletable with tombstones |
 | Privacy | report/record features optional | U0 default, opt-in classes checked server-side, no raw audio, no conversation text retention by default, content-free logs |
 | Device transport | WebSocket/MQTT audio streaming from the device | Phone gateway HTTPS first; device MQTT/TLS after E14, voice after VOICE-01–04 |
