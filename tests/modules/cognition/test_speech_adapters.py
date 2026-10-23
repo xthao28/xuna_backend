@@ -91,24 +91,36 @@ def test_transcription_rejects_unknown_or_mixed_codecs() -> None:
 
 
 class _FakeCommunicate:
-    plan: ClassVar[list[Any]] = []
+    """One plan per call: each call (attempt) plays the next list."""
+
+    plans: ClassVar[list[list[Any]]] = []
+    calls: ClassVar[int] = 0
 
     def __init__(self, text: str, voice: str) -> None:
         self.voice = voice
+        self.plan = self.plans[min(_FakeCommunicate.calls, len(self.plans) - 1)]
+        _FakeCommunicate.calls += 1
 
     async def stream(self) -> AsyncIterator[dict[str, Any]]:
         for item in self.plan:
             if isinstance(item, Exception):
                 raise item
+            if isinstance(item, float):
+                await asyncio.sleep(item)
+                continue
             yield item
 
 
-def _speak(monkeypatch: pytest.MonkeyPatch, plan: list[Any]) -> list[AudioChunk]:
-    _FakeCommunicate.plan = plan
+def _speak(
+    monkeypatch: pytest.MonkeyPatch, *plans: list[Any], timeout_s: float = 10.0
+) -> list[AudioChunk]:
+    _FakeCommunicate.plans = list(plans)
+    _FakeCommunicate.calls = 0
     monkeypatch.setattr(edge_tts_adapter.edge_tts, "Communicate", _FakeCommunicate)
 
     async def go() -> list[AudioChunk]:
-        return [c async for c in EdgeSpeechSynthesizer().synthesize("Chào", Locale.VI)]
+        synth = EdgeSpeechSynthesizer(timeout_s=timeout_s)
+        return [c async for c in synth.synthesize("Chào", Locale.VI)]
 
     return asyncio.run(go())
 
@@ -126,11 +138,38 @@ def test_edge_yields_mp3_frames(monkeypatch: pytest.MonkeyPatch) -> None:
         (b"ID3a", "mp3", 24000),
         (b"b", "mp3", 24000),
     ]
+    assert _FakeCommunicate.calls == 1
 
 
-def test_edge_failure_before_audio_is_unavailable_after_audio_is_quiet(
+def test_edge_retries_no_audio_and_a_stream_cut_mid_sentence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    chunks = _speak(
+        monkeypatch,
+        [RuntimeError("No audio was received")],
+        [{"type": "audio", "data": b"half"}, RuntimeError("cut")],
+        [{"type": "audio", "data": b"whole"}],
+    )
+    # The cut attempt's half sentence is never yielded.
+    assert [c.data for c in chunks] == [b"whole"]
+    assert _FakeCommunicate.calls == 3
+
+
+def test_edge_is_unavailable_after_the_last_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(ProviderUnavailableError):
         _speak(monkeypatch, [RuntimeError("403")])
-    assert len(_speak(monkeypatch, [{"type": "audio", "data": b"a"}, RuntimeError("cut")])) == 1
+    assert _FakeCommunicate.calls == edge_tts_adapter.MAX_ATTEMPTS
+    with pytest.raises(ProviderUnavailableError):
+        _speak(monkeypatch, [{"type": "WordBoundary"}])  # never any audio
+    assert _FakeCommunicate.calls == edge_tts_adapter.MAX_ATTEMPTS
+
+
+def test_edge_attempts_share_one_time_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(ProviderUnavailableError, match="TimeoutError"):
+        _speak(monkeypatch, [0.2, {"type": "audio", "data": b"late"}], timeout_s=0.05)
+    assert _FakeCommunicate.calls == 1
+
+
+def test_edge_rejects_zero_attempts() -> None:
+    with pytest.raises(ValueError):
+        EdgeSpeechSynthesizer(max_attempts=0)
