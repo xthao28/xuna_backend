@@ -1,6 +1,6 @@
 # Voice V0 benchmark tools
 
-Research tools for the [voice parity plan](../../../docs/roadmap/voice-parity-plan-2026-10-22.md)
+Research tools for the [voice parity plan](../../../docs/roadmap/voice/voice-parity-plan-2026-10-22.md)
 (Phase V0). Not part of the backend package: own venv, own `requirements.txt`. The
 corpus is synthetic (Edge TTS voices); `corpus/` and `results/` are gitignored and
 are rebuilt on each machine.
