@@ -200,17 +200,27 @@ def test_turn_context_reaches_the_prompt_and_bad_context_is_rejected(
         "text": "hôm nay thứ mấy?",
         "clientTime": "2026-10-23T21:05:00+07:00",
         "history": [{"role": "owner", "text": "chào"}, {"role": "xuna", "text": "Chào bạn!"}],
-        "pet": {"activeSeconds": 7200, "learnedEvents": 3, "quietChoice": "idle"},
+        "pet": {
+            "activeSeconds": 7200,
+            "learnedEvents": 3,
+            "quietChoice": "idle",
+            "personality": "affectionate",
+            "mood": "glad",
+        },
     }
     assert client.post(url, json=body, headers=h).status_code == 200
     sent = generator.requests[-1]
     assert "thứ Sáu, ngày 23/10/2026" in sent.messages[0].content
     assert "khi yên tĩnh bạn thích nằm nghỉ" in sent.messages[0].content
+    assert "là quấn chủ" in sent.messages[0].content
+    assert "Tâm trạng của bạn lúc này là vui" in sent.messages[0].content
     assert [m.role for m in sent.messages] == [Role.SYSTEM, Role.USER, Role.ASSISTANT, Role.USER]
     for bad in (
         {"clientTime": "2026-10-23T21:05:00"},
         {"history": [{"role": "owner", "text": "a"}] * 13},
         {"pet": {"current": "dancing"}},
         {"pet": {"name": "Bob"}},
+        {"pet": {"personality": "grumpy"}},
+        {"pet": {"mood": "angry"}},
     ):
         assert client.post(url, json={**body, **bad}, headers=h).status_code == 422

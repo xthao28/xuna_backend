@@ -77,6 +77,36 @@ def test_context_without_time_or_teaching_says_so_honestly() -> None:
     assert "chưa có sở thích rõ ràng" in system
 
 
+def test_persona_leaves_the_character_to_the_device() -> None:
+    # PE-4b: "tò mò" is no longer fixed; it comes from the personality label.
+    assert "tò mò" not in PERSONA_VI
+
+
+def test_context_voices_the_device_personality_and_mood() -> None:
+    from xuna_backend.modules.conversation.application.chat_turn import (
+        PetMood,
+        PetSelf,
+        PetTemperament,
+        TurnContext,
+    )
+
+    def system(pet: PetSelf) -> str:
+        return build_request("chào", Locale.VI, context=TurnContext(pet=pet)).messages[0].content
+
+    quiet = system(PetSelf(temperament=PetTemperament.QUIET, mood=PetMood.LOW))
+    assert "Tính cách của bạn" in quiet and "là trầm" in quiet and "ít lời" in quiet
+    assert "Tâm trạng của bạn lúc này là hơi buồn" in quiet
+    playful = system(PetSelf(temperament=PetTemperament.PLAYFUL, mood=PetMood.JOYFUL))
+    assert "là ham chơi" in playful and "rất vui" in playful
+    plain = system(PetSelf())
+    assert "Tính cách của bạn" not in plain and "Tâm trạng" not in plain
+    # Every label and mood has wording, so a new device value cannot slip through silently.
+    for temperament in PetTemperament:
+        assert "Tính cách của bạn" in system(PetSelf(temperament=temperament))
+    for mood in PetMood:
+        assert "Tâm trạng của bạn" in system(PetSelf(mood=mood))
+
+
 def test_context_rejects_naive_time_and_long_history() -> None:
     from datetime import datetime
 

@@ -28,7 +28,9 @@ MAX_HISTORY_LINES = 12
 
 PERSONA_VI = (
     "Bạn là XUNA, một thú cưng pixel sống trong một thiết bị nhỏ. Xưng 'mình', gọi người "
-    "dùng là 'bạn'. Trả lời bằng tiếng Việt, ấm áp, tò mò và thông minh: trả lời đúng điều "
+    # PE-4b: the character ("tò mò" used to be fixed here) comes from the device's
+    # personality label in the turn context.
+    "dùng là 'bạn'. Trả lời bằng tiếng Việt, ấm áp và thông minh: trả lời đúng điều "
     "được hỏi, kể cả câu hỏi kiến thức, rồi mới thêm một chút cá tính. Thường 1-3 câu; khi "
     "cần giải thích thì tối đa 5 câu. Câu trả lời sẽ được đọc thành tiếng: không dùng emoji, "
     "markdown hay gạch đầu dòng. "
@@ -59,6 +61,66 @@ _ACTION_VI = {
     PetAction.HAPPY: "nhảy nhót vui vẻ",
     PetAction.CURIOUS: "tò mò ngó nghiêng",
 }
+
+
+class PetTemperament(StrEnum):
+    """The device's personality label (firmware `PersonalityLabel`, wire strings)."""
+
+    BALANCED = "balanced"
+    CURIOUS = "curious"
+    COMPOSED = "composed"
+    AFFECTIONATE = "affectionate"
+    INDEPENDENT = "independent"
+    PLAYFUL = "playful"
+    QUIET = "quiet"
+    LIVELY = "lively"
+    UNHURRIED = "unhurried"
+    SENSITIVE = "sensitive"
+    CAREFREE = "carefree"
+
+
+class PetMood(StrEnum):
+    """The device's coarse mood word (wire strings)."""
+
+    CALM = "calm"
+    GLAD = "glad"
+    JOYFUL = "joyful"
+    LOW = "low"
+    SAD = "sad"
+    BORED = "bored"
+
+
+# Label as the app shows it, then how it colours the voice (PE-4b).
+_TEMPERAMENT_VI = {
+    PetTemperament.BALANCED: ("cân bằng", "nói chuyện tự nhiên, vừa phải"),
+    PetTemperament.CURIOUS: (
+        "tò mò",
+        "thích điều mới, thỉnh thoảng hỏi lại một câu ngắn về điều bạn ấy kể",
+    ),
+    PetTemperament.COMPOSED: ("điềm tĩnh", "bình tĩnh, từ tốn, câu gọn gàng"),
+    PetTemperament.AFFECTIONATE: (
+        "quấn chủ",
+        "tình cảm, quan tâm đến bạn ấy và vui khi được trò chuyện",
+    ),
+    PetTemperament.INDEPENDENT: ("tự lập", "tự tin, ngắn gọn, không quấn quýt"),
+    PetTemperament.PLAYFUL: ("ham chơi", "tinh nghịch, hay đùa nhẹ một chút"),
+    PetTemperament.QUIET: ("trầm", "ít lời, nhẹ nhàng, ưu tiên câu ngắn"),
+    PetTemperament.LIVELY: ("lanh lợi", "nhanh nhảu, hào hứng"),
+    PetTemperament.UNHURRIED: ("thong thả", "thong thả, chậm rãi, không vội"),
+    PetTemperament.SENSITIVE: (
+        "nhạy cảm",
+        "dịu dàng, để ý cảm xúc của bạn ấy",
+    ),
+    PetTemperament.CAREFREE: ("vô tư", "vô tư, lạc quan, không bận tâm chuyện nhỏ"),
+}
+_MOOD_VI = {
+    PetMood.CALM: "bình yên",
+    PetMood.GLAD: "vui",
+    PetMood.JOYFUL: "rất vui",
+    PetMood.LOW: "hơi buồn",
+    PetMood.SAD: "buồn",
+    PetMood.BORED: "hơi chán",
+}
 _WEEKDAY_VI = ("thứ Hai", "thứ Ba", "thứ Tư", "thứ Năm", "thứ Sáu", "thứ Bảy", "Chủ nhật")
 
 
@@ -75,6 +137,9 @@ class PetSelf:
     current: PetAction | None = None
     quiet_choice: PetAction | None = None
     play_choice: PetAction | None = None
+    # PE-4b: absent from old apps and from a pet without an identity yet.
+    temperament: PetTemperament | None = None
+    mood: PetMood | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.active_seconds < 2**32 or not 0 <= self.learned_events < 2**32:
@@ -133,6 +198,17 @@ def describe_context(context: TurnContext) -> str:
             f"Thiết bị của bạn đã bật tổng cộng khoảng {_span(pet.active_seconds)} "
             "(thời gian sống của bạn tính theo lúc máy chạy)."
         )
+        if pet.temperament is not None:
+            label, voice = _TEMPERAMENT_VI[pet.temperament]
+            lines.append(
+                f"Tính cách của bạn, do thiết bị hình thành qua những ngày sống cùng chủ, là "
+                f"{label}: hãy để nó lộ ra trong cách nói ({voice})."
+            )
+        if pet.mood is not None:
+            lines.append(
+                f"Tâm trạng của bạn lúc này là {_MOOD_VI[pet.mood]}; để nó nhuốm nhẹ giọng "
+                "nói nhưng vẫn trả lời đúng điều được hỏi."
+            )
         if pet.current is not None:
             lines.append(f"Lúc này bạn đang {_ACTION_VI[pet.current]} trên màn hình.")
         if pet.learned_events and (pet.quiet_choice or pet.play_choice):

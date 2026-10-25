@@ -35,7 +35,9 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     MAX_INPUT_CHARS,
     HistoryLine,
     PetAction,
+    PetMood,
     PetSelf,
+    PetTemperament,
     ProviderFailed,
     TurnContext,
     build_request,
@@ -78,6 +80,8 @@ class PetSelfBody(BaseModel):
     current: PetAction | None = None
     quietChoice: PetAction | None = None
     playChoice: PetAction | None = None
+    personality: PetTemperament | None = None
+    mood: PetMood | None = None
 
 
 class TurnBody(BaseModel):
@@ -110,6 +114,8 @@ class TurnBody(BaseModel):
                 current=pet.current,
                 quiet_choice=pet.quietChoice,
                 play_choice=pet.playChoice,
+                temperament=pet.personality,
+                mood=pet.mood,
             ),
         )
 
