@@ -136,6 +136,7 @@ def test_requires_u3_consent_then_streams(
     text = response.text  # type: ignore[attr-defined]
     assert 'event: delta\ndata: {"text": "chào"}' in text
     assert "event: finished" in text
+    assert '"signals": []' in text  # PE-4c: plain greeting, no tag
     sent = generator.requests[0]
     assert sent.messages[0].role is Role.SYSTEM
     assert "XUNA" in sent.messages[0].content
@@ -224,3 +225,19 @@ def test_turn_context_reaches_the_prompt_and_bad_context_is_rejected(
         {"pet": {"mood": "angry"}},
     ):
         assert client.post(url, json={**body, **bad}, headers=h).status_code == 422
+
+
+def test_finished_carries_the_conversation_tags(
+    setup: tuple[TestClient, RecordingGenerator], issuer: LocalIssuer
+) -> None:
+    # PE-4c: closed tags from the owner's words travel with `finished` only.
+    client, _ = setup
+    h = headers(issuer)
+    bind(client, h)
+    opt_in_u3(client, h)
+    response = client.post(
+        f"/v1/conversations/{PET}/turns",
+        json={"schemaVersion": 1, "text": "XUNA giỏi quá, thương ghê"},
+        headers=h,
+    )
+    assert '"signals": ["praise", "affection"]' in response.text

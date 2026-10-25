@@ -55,6 +55,7 @@ from xuna_backend.modules.conversation.application.voice import (
     AudioFormat,
     transcribe_once,
 )
+from xuna_backend.modules.conversation.domain.signals import conversation_signals
 from xuna_backend.modules.identity.application.use_cases import IdentityError, get_owned_pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
 
@@ -151,6 +152,9 @@ async def turn(
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text") from error
     generator: TextGenerator = state(request, "text_generator")
     synthesizer: SpeechSynthesizer | None = state(request, "speech_synthesizer")
+    # PE-4c: closed tags from the owner's words, sent with `finished` only;
+    # the app forwards them to the device. Never stored.
+    signals = {"signals": list(conversation_signals(body.text, len(body.history or ())))}
 
     async def events() -> AsyncIterator[str]:
         text_events = chat_turn(generator, chat_request)
@@ -164,10 +168,10 @@ async def turn(
                 case ToolCallRequested():
                     continue  # no server tools enabled yet
                 case ChatFinished() as done:
-                    yield _sse("finished", _finished(done))
+                    yield _sse("finished", _finished(done) | signals)
                 case SpokenFinished(finished=done, spoken=spoken, first_audio_ms=first_ms):
                     timing = {} if first_ms is None else {"firstAudioMs": first_ms}
-                    yield _sse("finished", _finished(done) | {"spoken": spoken} | timing)
+                    yield _sse("finished", _finished(done) | {"spoken": spoken} | timing | signals)
                 case SpokenAudio() as audio:
                     yield _sse(
                         "audio",
