@@ -1,0 +1,23 @@
+"""Ports for backup, restore, and tombstone persistence (CLD-20)."""
+
+import uuid
+from typing import Protocol
+
+from xuna_backend.modules.backups.domain.entities import BackupManifest, DeletionTombstone
+from xuna_backend.modules.identity.domain.pet_id import PetId
+
+
+class BackupRepository(Protocol):
+    async def add_backup(self, manifest: BackupManifest) -> None: ...
+
+    async def get_backup(self, backup_id: uuid.UUID) -> BackupManifest | None: ...
+
+    async def list_backups(self, pet_id: PetId, limit: int = 50) -> list[BackupManifest]: ...
+
+    async def delete_backup(self, backup_id: uuid.UUID) -> None: ...
+
+    async def add_tombstone(self, tombstone: DeletionTombstone) -> None: ...
+
+    async def list_tombstones(self, pet_id: PetId, limit: int = 100) -> list[DeletionTombstone]: ...
+
+    async def is_tombstoned(self, pet_id: PetId, item_type: str, item_id: str) -> bool: ...

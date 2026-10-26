@@ -52,6 +52,8 @@ class Settings:
     tts_voice: str = ""
     tts_piper_model: str = ""
     tts_timeout_s: float = 10.0
+    # Backup encryption key (Phase 2, CLD-20). Empty = derives deterministic fallback.
+    backup_encryption_key: str = ""
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -83,6 +85,7 @@ class Settings:
             tts_voice=source.get("XUNA_TTS_VOICE", ""),
             tts_piper_model=source.get("XUNA_TTS_PIPER_MODEL", ""),
             tts_timeout_s=float(source.get("XUNA_TTS_TIMEOUT_S", "10")),
+            backup_encryption_key=source.get("XUNA_BACKUP_ENCRYPTION_KEY", ""),
         )
 
     def __repr__(self) -> str:

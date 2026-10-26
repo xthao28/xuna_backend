@@ -22,6 +22,8 @@ from xuna_backend.modules.accounts.infrastructure.oidc import (
 from xuna_backend.modules.accounts.infrastructure.repository import SqlOwnerRepository
 from xuna_backend.modules.audit.api.routes import router as audit_router
 from xuna_backend.modules.audit.infrastructure.repository import SqlAuditLog
+from xuna_backend.modules.backups.api.routes import router as backups_router
+from xuna_backend.modules.backups.infrastructure.repository import SqlBackupRepository
 from xuna_backend.modules.cognition.application.ports import (
     SpeechRecognizer,
     SpeechSynthesizer,
@@ -142,6 +144,7 @@ def create_app(
     app.state.audit_log = SqlAuditLog
     app.state.consent_repository = SqlConsentRepository
     app.state.memory_repository = SqlMemoryRepository
+    app.state.backup_repository = SqlBackupRepository
     app.state.text_generator = generator or text_generator(resolved)
     app.state.speech_recognizer = recognizer or speech_recognizer(resolved)
     app.state.speech_synthesizer = synthesizer or speech_synthesizer(resolved)
@@ -154,6 +157,7 @@ def create_app(
     app.include_router(audit_router)
     app.include_router(conversation_router)
     app.include_router(memory_router)
+    app.include_router(backups_router)
     return app
 
 

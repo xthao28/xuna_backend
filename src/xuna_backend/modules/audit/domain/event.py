@@ -25,6 +25,10 @@ class AuditAction(StrEnum):
     PROJECTION_REJECTED = "projection.rejected"
     MEMORY_CANDIDATE_CONFIRMED = "memory.candidate_confirmed"
     MEMORY_CANDIDATE_REJECTED = "memory.candidate_rejected"
+    BACKUP_CREATED = "backup.created"
+    BACKUP_RESTORED = "backup.restored"
+    TOMBSTONE_CREATED = "tombstone.created"
+    PET_FORGOTTEN = "pet.forgotten"
 
 
 @dataclass(frozen=True, slots=True)

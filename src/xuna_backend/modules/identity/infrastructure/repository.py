@@ -116,6 +116,52 @@ class SqlIdentityRepository:
         )
         await self._session.flush()
 
+    async def rebind_device(self, pet_id: PetId, public_key: bytes, now: datetime) -> Pet:
+        await self._session.execute(
+            update(DeviceRow)
+            .where((DeviceRow.pet_id == pet_id.value) & (DeviceRow.revoked_at.is_(None)))
+            .values(revoked_at=now)
+        )
+        new_device_id = uuid.uuid4()
+        self._session.add(
+            DeviceRow(
+                device_id=new_device_id,
+                pet_id=pet_id.value,
+                public_key=public_key,
+                bound_at=now,
+                revoked_at=None,
+            )
+        )
+        await self._session.flush()
+        pet = await self.get_pet(pet_id)
+        if pet is None:
+            raise RuntimeError(f"pet {pet_id.value} missing after rebind")
+        return pet
+
+    async def rotate_brain(self, pet_id: PetId, now: datetime) -> Pet:
+        await self._session.execute(
+            update(BrainRow)
+            .where(
+                (BrainRow.pet_id == pet_id.value)
+                & (BrainRow.status == BrainStatus.ACTIVE.value)
+            )
+            .values(status=BrainStatus.ARCHIVED.value)
+        )
+        new_brain_id = uuid.uuid4()
+        self._session.add(
+            BrainRow(
+                brain_id=new_brain_id,
+                pet_id=pet_id.value,
+                status=BrainStatus.ACTIVE.value,
+                started_at=now,
+            )
+        )
+        await self._session.flush()
+        pet = await self.get_pet(pet_id)
+        if pet is None:
+            raise RuntimeError(f"pet {pet_id.value} missing after brain rotation")
+        return pet
+
     async def _pets(self, condition: object) -> list[Pet]:
         result = await self._session.execute(
             select(PetRow, BrainRow, DeviceRow)

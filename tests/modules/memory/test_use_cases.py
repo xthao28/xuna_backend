@@ -132,6 +132,36 @@ class FakeIdentityRepo:
                 bound_at=pet.bound_at,
             )
 
+    async def rebind_device(self, pet_id: PetId, public_key: bytes, now: datetime) -> Pet:
+        pet = self.pets[pet_id.value]
+        updated = Pet(
+            pet_id=pet.pet_id,
+            owner_id=pet.owner_id,
+            origin=pet.origin,
+            active_brain_id=pet.active_brain_id,
+            device_id=uuid.uuid4(),
+            device_public_key=public_key,
+            last_generation=pet.last_generation,
+            bound_at=now,
+        )
+        self.pets[pet_id.value] = updated
+        return updated
+
+    async def rotate_brain(self, pet_id: PetId, now: datetime) -> Pet:
+        pet = self.pets[pet_id.value]
+        updated = Pet(
+            pet_id=pet.pet_id,
+            owner_id=pet.owner_id,
+            origin=pet.origin,
+            active_brain_id=uuid.uuid4(),
+            device_id=pet.device_id,
+            device_public_key=pet.device_public_key,
+            last_generation=pet.last_generation,
+            bound_at=now,
+        )
+        self.pets[pet_id.value] = updated
+        return updated
+
 
 def golden_envelope() -> dict[str, object]:
     return json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
