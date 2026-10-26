@@ -165,6 +165,8 @@ class TurnContext:
     local_time: datetime | None = None
     history: tuple[HistoryLine, ...] = field(default_factory=tuple)
     pet: PetSelf | None = None
+    # Layer B: confirmed facts recall (CLD-14, D17)
+    confirmed_facts: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.local_time is not None and self.local_time.utcoffset() is None:
@@ -223,6 +225,27 @@ def describe_context(context: TurnContext) -> str:
             )
         else:
             lines.append("Bạn chưa có sở thích rõ ràng: chủ chưa dạy bạn lần nào.")
+
+    if context.confirmed_facts:
+        lines.append(
+            "Những điều bạn biết chắc chắn về người bạn đang trò chuyện cùng "
+            "(do bạn ấy đã chia sẻ và xác nhận): "
+            + "; ".join(context.confirmed_facts)
+            + ". Hãy ghi nhớ những điều này để trò chuyện thân mật, tự nhiên và "
+            "nhắc đến khi phù hợp."
+        )
+        owner_name = None
+        for fact in context.confirmed_facts:
+            if fact.startswith("Tên của bạn ấy là "):
+                owner_name = fact[len("Tên của bạn ấy là ") :].strip()
+                break
+        if owner_name:
+            lines.append(
+                f"Người bạn đang nói chuyện cùng tên là {owner_name}. "
+                f"Khi xưng hô, bạn có thể gọi bạn ấy là {owner_name} hoặc bạn {owner_name} "
+                "một cách thân thiện."
+            )
+
     return " ".join(lines)
 
 

@@ -297,3 +297,82 @@ def test_conversation_extracts_candidate_and_deduplicates(
     assert len(candidates_res3.json()["items"]) == 2
 
 
+def test_conversation_injects_confirmed_facts_into_prompt(
+    setup: tuple[TestClient, RecordingGenerator], issuer: LocalIssuer
+) -> None:
+    # Layer B: confirmed facts recall into system prompt (CLD-14, D17)
+    client, generator = setup
+    h = headers(issuer)
+    bind(client, h)
+    opt_in_u3(client, h)
+
+    # 1. Turn creates a fact candidate
+    res1 = client.post(
+        f"/v1/conversations/{PET}/turns",
+        json={"schemaVersion": 1, "text": "tên mình là Thảo"},
+        headers=h,
+    )
+    assert res1.status_code == 200
+    # Before confirmation, the first turn does NOT have confirmed facts injected
+    assert "Tên của bạn ấy là Thảo" not in generator.requests[-1].messages[0].content
+
+    # 2. Get the candidate and confirm + commit it
+    candidates = client.get(f"/v1/memory-candidates?petId={PET}", headers=h).json()["items"]
+    fact_candidate = next(c for c in candidates if c["candidateType"] == "fact")
+    cand_id = fact_candidate["candidateId"]
+
+    patch_res = client.patch(
+        f"/v1/memory-candidates/{cand_id}",
+        json={"schemaVersion": 1, "action": "confirm"},
+        headers={**h, **idem()},
+    )
+    assert patch_res.status_code == 200
+
+    commit_res = client.patch(
+        f"/v1/memory-candidates/{cand_id}",
+        json={"schemaVersion": 1, "action": "commit", "committedGeneration": 1},
+        headers={**h, **idem()},
+    )
+    assert commit_res.status_code == 200
+
+    # Also add a favorite color fact directly and confirm + commit
+    post_fact = client.post(
+        "/v1/memory-candidates",
+        json={
+            "schemaVersion": 1,
+            "petId": PET,
+            "source": "owner_input",
+            "candidateType": "fact",
+            "content": {
+                "fact": "favorite_color",
+                "value": "xanh ngọc",
+                "summary": "Màu yêu thích của bạn là xanh ngọc",
+            },
+        },
+        headers={**h, **idem()},
+    )
+    assert post_fact.status_code == 201
+    color_cand_id = post_fact.json()["candidateId"]
+    client.patch(
+        f"/v1/memory-candidates/{color_cand_id}",
+        json={"schemaVersion": 1, "action": "confirm"},
+        headers={**h, **idem()},
+    )
+    client.patch(
+        f"/v1/memory-candidates/{color_cand_id}",
+        json={"schemaVersion": 1, "action": "commit", "committedGeneration": 2},
+        headers={**h, **idem()},
+    )
+
+    # 3. Next turn: generator should receive the confirmed facts in the system prompt!
+    res2 = client.post(
+        f"/v1/conversations/{PET}/turns",
+        json={"schemaVersion": 1, "text": "bạn có nhớ mình là ai không?"},
+        headers=h,
+    )
+    assert res2.status_code == 200
+    system_prompt = generator.requests[-1].messages[0].content
+    assert "Những điều bạn biết chắc chắn về người bạn đang trò chuyện cùng" in system_prompt
+    assert "Tên của bạn ấy là Thảo" in system_prompt
+    assert "Màu yêu thích của bạn ấy là xanh ngọc" in system_prompt
+    assert "Người bạn đang nói chuyện cùng tên là Thảo" in system_prompt

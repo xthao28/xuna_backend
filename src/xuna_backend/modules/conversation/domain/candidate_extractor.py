@@ -54,12 +54,8 @@ _HYPOTHETICAL_PATTERNS = (
 )
 
 # Polarity patterns
-_DISLIKE_PATTERN = re.compile(
-    r"\b(không thích|chẳng thích|chả thích|đừng|ghét|bực|không muốn)\b"
-)
-_LIKE_PATTERN = re.compile(
-    r"\b(thích|rất thích|yêu thích|mê|muốn|khoái|ưa)\b"
-)
+_DISLIKE_PATTERN = re.compile(r"\b(không thích|chẳng thích|chả thích|đừng|ghét|bực|không muốn)\b")
+_LIKE_PATTERN = re.compile(r"\b(thích|rất thích|yêu thích|mê|muốn|khoái|ưa)\b")
 
 # Action patterns
 _ACTION_PATTERNS: tuple[tuple[PreferenceAction, re.Pattern[str]], ...] = (

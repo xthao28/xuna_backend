@@ -64,6 +64,7 @@ from xuna_backend.modules.identity.domain.pet_id import PetId
 from xuna_backend.modules.memory.application.ports import MemoryRepository
 from xuna_backend.modules.memory.domain.entities import (
     CandidateStatus,
+    CandidateType,
     MemoryCandidate,
 )
 
@@ -108,8 +109,13 @@ class TurnBody(BaseModel):
     history: list[HistoryLineBody] | None = Field(default=None, max_length=MAX_HISTORY_LINES)
     pet: PetSelfBody | None = None
 
-    def context(self) -> TurnContext | None:
-        if self.clientTime is None and self.history is None and self.pet is None:
+    def context(self, confirmed_facts: tuple[str, ...] = ()) -> TurnContext | None:
+        if (
+            self.clientTime is None
+            and self.history is None
+            and self.pet is None
+            and not confirmed_facts
+        ):
             return None
         pet = self.pet
         return TurnContext(
@@ -126,6 +132,7 @@ class TurnBody(BaseModel):
                 temperament=pet.personality,
                 mood=pet.mood,
             ),
+            confirmed_facts=confirmed_facts,
         )
 
 
@@ -140,6 +147,38 @@ class TranscriptionBody(BaseModel):
 
 def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _format_fact(content: dict[str, Any]) -> str | None:
+    """Format a confirmed fact for inclusion in the conversation context."""
+    fact_key = content.get("fact")
+    value = content.get("value")
+    if isinstance(value, str) and value.strip():
+        v = value.strip()
+        if fact_key == "owner_name":
+            return f"Tên của bạn ấy là {v}"
+        if fact_key == "favorite_color":
+            return f"Màu yêu thích của bạn ấy là {v}"
+        if fact_key == "favorite_food":
+            return f"Món ăn yêu thích của bạn ấy là {v}"
+        if fact_key == "birthday":
+            return f"Sinh nhật của bạn ấy là ngày {v}"
+        if fact_key == "pet_companion":
+            return f"Bạn ấy có nuôi {v}"
+
+    raw_summary = content.get("summary") or content.get("text")
+    if raw_summary and isinstance(raw_summary, str) and raw_summary.strip():
+        s = str(raw_summary).strip()
+        if s.startswith("Tên của bạn là "):
+            return f"Tên của bạn ấy là {s[len('Tên của bạn là ') :]}"
+        if s.startswith("Màu yêu thích của bạn là "):
+            return f"Màu yêu thích của bạn ấy là {s[len('Màu yêu thích của bạn là ') :]}"
+        if s.startswith("Món ăn yêu thích của bạn là "):
+            return f"Món ăn yêu thích của bạn ấy là {s[len('Món ăn yêu thích của bạn là ') :]}"
+        if s.startswith("Sinh nhật của bạn là "):
+            return f"Sinh nhật của bạn ấy là {s[len('Sinh nhật của bạn là ') :]}"
+        return s
+    return None
 
 
 @router.post("/conversations/{pet_id}/turns")
@@ -157,10 +196,32 @@ async def turn(
     # Strict safety rules apply: credentials/door codes/chit-chat return None and are never saved.
     extracted = extract_candidate(body.text)
     candidate_info: dict[str, Any] | None = None
-    if extracted is not None:
-        try:
-            mem_factory: Callable[[object], MemoryRepository] = state(request, "memory_repository")
-            mem_repo = mem_factory(session)
+    confirmed_facts: list[str] = []
+
+    try:
+        mem_factory: Callable[[object], MemoryRepository] = state(request, "memory_repository")
+        mem_repo = mem_factory(session)
+
+        # Layer B: Query confirmed facts for this pet
+        confirmed_candidates = await mem_repo.list_candidates(
+            PetId(pet_id), status=CandidateStatus.CONFIRMED
+        )
+        seen_facts: set[str] = set()
+        for cand in confirmed_candidates:
+            if cand.candidate_type != CandidateType.FACT:
+                continue
+            fact_key = cand.content.get("fact")
+            dedup_key = str(fact_key) if fact_key else str(cand.content.get("summary", ""))
+            if dedup_key in seen_facts:
+                continue
+            seen_facts.add(dedup_key)
+            formatted = _format_fact(cand.content)
+            if formatted:
+                confirmed_facts.append(formatted)
+            if len(confirmed_facts) >= 10:
+                break
+
+        if extracted is not None:
             existing = await mem_repo.list_candidates(
                 PetId(pet_id), status=CandidateStatus.AWAITING_OWNER_CONFIRMATION
             )
@@ -188,14 +249,17 @@ async def turn(
                     "type": cand.candidate_type.value,
                     "summary": cand.content.get("summary", ""),
                 }
-        except Exception:  # noqa: S110
-            # Candidate extraction is best-effort and prospective; must not fail turn
-            pass
+    except Exception:  # noqa: S110
+        # Candidate extraction and fact lookup are best-effort; must not fail turn
+        pass
 
     await session.close()  # release the DB connection before a long provider call
     try:
         chat_request = build_request(
-            body.text, body.locale, state(request, "settings").text_timeout_s, body.context()
+            body.text,
+            body.locale,
+            state(request, "settings").text_timeout_s,
+            body.context(confirmed_facts=tuple(confirmed_facts)),
         )
     except ValueError as error:
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text") from error

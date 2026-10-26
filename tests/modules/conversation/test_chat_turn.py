@@ -119,3 +119,33 @@ def test_context_rejects_naive_time_and_long_history() -> None:
         TurnContext(local_time=datetime(2026, 10, 23, 21, 5))
     with pytest.raises(ValueError):
         TurnContext(history=tuple(HistoryLine(True, "a") for _ in range(13)))
+
+
+def test_context_injects_confirmed_facts_and_personal_name() -> None:
+    from xuna_backend.modules.conversation.application.chat_turn import TurnContext
+
+    context = TurnContext(
+        confirmed_facts=(
+            "Tên của bạn ấy là Thảo",
+            "Màu yêu thích của bạn ấy là xanh dương",
+            "Món ăn yêu thích của bạn ấy là phở bò",
+        )
+    )
+    request = build_request("chào", Locale.VI, context=context)
+    system = request.messages[0].content
+    assert "Những điều bạn biết chắc chắn về người bạn đang trò chuyện cùng" in system
+    assert "Tên của bạn ấy là Thảo" in system
+    assert "Màu yêu thích của bạn ấy là xanh dương" in system
+    assert "Món ăn yêu thích của bạn ấy là phở bò" in system
+    assert "Người bạn đang nói chuyện cùng tên là Thảo" in system
+    assert "gọi bạn ấy là Thảo hoặc bạn Thảo" in system
+
+
+def test_context_without_confirmed_facts_has_no_fact_injection() -> None:
+    from xuna_backend.modules.conversation.application.chat_turn import TurnContext
+
+    context = TurnContext(confirmed_facts=())
+    request = build_request("chào", Locale.VI, context=context)
+    system = request.messages[0].content
+    assert "Những điều bạn biết chắc chắn" not in system
+    assert "Người bạn đang nói chuyện cùng tên là" not in system
