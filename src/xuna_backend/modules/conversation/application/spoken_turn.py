@@ -3,8 +3,10 @@
 The reply text keeps streaming while finished sentences are synthesised, up to
 `max_parallel` at a time, instead of the text waiting for each sentence's TTS.
 Audio still reaches the app in sentence order, and the first piece may end at
-a comma so the first sound comes sooner. After a TTS failure speech stops
-(reported once) and the text continues. Nothing is stored.
+a comma so the first sound comes sooner. A sentence whose TTS fails is skipped
+(reported once) and the later sentences are still spoken: the free Edge voice
+fails now and then, and one miss used to silence the rest of the reply
+(owner 2026-10-26). Nothing is stored.
 """
 
 import asyncio
@@ -49,8 +51,9 @@ class SpokenAudio:
 
 @dataclass(frozen=True, slots=True)
 class SpeechUnavailable:
-    """Sent at most once: `voice_unavailable` (no TTS configured) or
-    `provider_unavailable` (TTS failed); the text reply continues."""
+    """Sent at most once: `voice_unavailable` (no TTS configured, nothing is
+    spoken) or `provider_unavailable` (a sentence's TTS failed and was skipped;
+    later sentences are still spoken); the text reply continues."""
 
     code: str
 
@@ -60,6 +63,7 @@ class SpokenFinished:
     """Replaces `ChatFinished` on a spoken turn, after the last audio."""
 
     finished: ChatFinished
+    # False when nothing could be spoken or at least one sentence was skipped.
     spoken: bool
     # Turn start → first audio ready on the server; None when nothing was spoken.
     first_audio_ms: int | None
@@ -147,9 +151,10 @@ async def spoken_turn(
                 try:
                     audio, codec, rate = await task
                 except ProviderUnavailableError:
-                    state.speech_off = True
+                    # Skip this sentence only; report the first miss once.
+                    if not state.speech_failed:
+                        out.put_nowait(SpeechUnavailable("provider_unavailable"))
                     state.speech_failed = True
-                    out.put_nowait(SpeechUnavailable("provider_unavailable"))
                     continue
                 if not audio:
                     continue

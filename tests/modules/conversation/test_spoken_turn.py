@@ -119,16 +119,29 @@ def test_at_most_max_parallel_syntheses_run_at_once() -> None:
     assert synth.max_active == 2
 
 
-def test_tts_failure_is_reported_once_and_later_audio_is_dropped() -> None:
+def test_a_failed_sentence_is_skipped_reported_once_and_later_ones_spoken() -> None:
     synth = Synth(fail_on="Hai.")
     events = collect(spoken_turn(reply("Một. ", "Hai. ", "Ba."), synth, Locale.VI))
-    assert [e.text for e in events if isinstance(e, SpokenAudio)] == ["Một."]
+    audio = [e for e in events if isinstance(e, SpokenAudio)]
+    assert [(a.seq, a.text) for a in audio] == [(1, "Một."), (2, "Ba.")]
     assert [e for e in events if isinstance(e, SpeechUnavailable)] == [
         SpeechUnavailable("provider_unavailable")
     ]
     assert kinds(events).count("TextDelta") == 3
     finished = events[-1]
     assert isinstance(finished, SpokenFinished) and finished.spoken is False
+
+
+def test_several_failed_sentences_are_still_reported_once() -> None:
+    class Flaky(Synth):
+        async def synthesize(self, text: str, locale: Locale) -> AsyncIterator[AudioChunk]:
+            if text != "Ba.":
+                raise ProviderUnavailableError("tts down")
+            yield AudioChunk(text.encode(), "mp3", 24000)
+
+    events = collect(spoken_turn(reply("Một. ", "Hai. ", "Ba."), Flaky(), Locale.VI))
+    assert [e.text for e in events if isinstance(e, SpokenAudio)] == ["Ba."]
+    assert kinds(events).count("SpeechUnavailable") == 1
 
 
 def test_no_synthesizer_reports_voice_unavailable_once() -> None:
