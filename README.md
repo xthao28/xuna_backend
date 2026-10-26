@@ -1,6 +1,6 @@
 # xuna_backend
 
-Optional Cloud Brain for XUNA. The device stays authoritative; the cloud is a projection, backup and cognitive service (ADR-0008). Status: **CLD-10 scaffold + CLD-11 identity + CLD-12 consent/audit + CLD-13 text provider adapter and conversation turn** — health probes, OIDC owner auth, device-proof (ECDSA P-256) pet binding with Pet/Brain/Device records, idempotency, `xuna.export.v1` verification and cognition provider ports. No device-data projection is stored yet (CLD-14 needs gate c).
+Optional Cloud Brain for XUNA. The device stays authoritative; the cloud is a projection, backup and cognitive service (ADR-0008). Status: **CLD-10 scaffold + CLD-11 identity + CLD-12 consent/audit + CLD-13 text/voice providers + CLD-14 projections & memory candidates** — health probes, OIDC owner auth, device-proof (ECDSA P-256) pet binding with Pet/Brain/Device records, idempotency, `xuna.export.v1` projection ingestion with consent enforcement, memory candidate-confirmation lifecycle, and cognition provider ports.
 
 Read [AGENTS.md](AGENTS.md) before coding and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the design.
 

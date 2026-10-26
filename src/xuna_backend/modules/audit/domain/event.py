@@ -21,6 +21,10 @@ class AuditAction(StrEnum):
     PET_BOUND = "pet.bound"
     PET_BIND_REJECTED = "pet.bind_rejected"
     CONSENT_CHANGED = "consent.changed"
+    PROJECTION_INGESTED = "projection.ingested"
+    PROJECTION_REJECTED = "projection.rejected"
+    MEMORY_CANDIDATE_CONFIRMED = "memory.candidate_confirmed"
+    MEMORY_CANDIDATE_REJECTED = "memory.candidate_rejected"
 
 
 @dataclass(frozen=True, slots=True)

@@ -27,7 +27,8 @@ Async end to end: cloud AI work is dominated by waiting on providers, so routers
 | `conversation` | `POST /v1/conversations/{petId}/turns` SSE (`delta`/`finished`/`error`, plus `audio`/`speech_unavailable` with `speak`), XUNA Vietnamese persona, U3 guard, own-pet check, nothing stored, `provider_unavailable` fallback event; `POST /v1/speech/transcriptions` (U3V guard, container check, audio never stored) | Text implemented; phone voice V1 slice 1 (2026-10-22) |
 
 | `consent` | U0 default, append-only history (version per change, policy tag), optimistic `expectedVersion`, `GET/PUT /v1/consents`, `RequireConsent` route guard; U3V `conversation_voice` (migration 0004) | CLD-12 implemented; U3V 2026-10-22 |
-| `audit` | Append-only `audit_events` (DB trigger), content-free typed metadata, `GET /v1/audit-events` for the owner's own trail; binding and consent changes recorded | CLD-12 implemented |
+| `memory` | Projections (`PUT /v1/pets/{petId}/projections/{generation}`, `GET /v1/pets/{petId}/projections/latest`, `GET /v1/pets/{petId}/projections`), Memory candidates (`POST /v1/memory-candidates`, `GET /v1/memory-candidates`, `PATCH /v1/memory-candidates/{id}`); consent U1/U2 enforcement, envelope hash check, ECDSA P-256 device proof verification, ordering via `ProjectionKey` | CLD-14 implemented (2026-10-26) |
+| `audit` | Append-only `audit_events` (DB trigger), content-free typed metadata, `GET /v1/audit-events` for the owner's own trail; binding, projection and candidate changes recorded | CLD-12/14 implemented |
 
 Cross-cutting in `core`: `idempotency` (24 h `Idempotency-Key` replay store), `db` (UTC sessions, `DbSession`, `commit_or_conflict`).
 

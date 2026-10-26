@@ -110,6 +110,12 @@ class SqlIdentityRepository:
             bound_at=now,
         )
 
+    async def update_generation(self, pet_id: PetId, generation: int) -> None:
+        await self._session.execute(
+            update(PetRow).where(PetRow.pet_id == pet_id.value).values(last_generation=generation)
+        )
+        await self._session.flush()
+
     async def _pets(self, condition: object) -> list[Pet]:
         result = await self._session.execute(
             select(PetRow, BrainRow, DeviceRow)

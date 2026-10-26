@@ -11,7 +11,8 @@ import xuna_backend.core.idempotency
 import xuna_backend.modules.accounts.infrastructure.models
 import xuna_backend.modules.audit.infrastructure.models
 import xuna_backend.modules.consent.infrastructure.models
-import xuna_backend.modules.identity.infrastructure.models  # noqa: F401
+import xuna_backend.modules.identity.infrastructure.models
+import xuna_backend.modules.memory.infrastructure.models  # noqa: F401
 from xuna_backend.core.db import Base
 
 config = context.config
