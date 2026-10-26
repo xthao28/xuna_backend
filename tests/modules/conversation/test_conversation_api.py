@@ -241,3 +241,59 @@ def test_finished_carries_the_conversation_tags(
         headers=h,
     )
     assert '"signals": ["praise", "affection"]' in response.text
+
+
+def test_conversation_extracts_candidate_and_deduplicates(
+    setup: tuple[TestClient, RecordingGenerator], issuer: LocalIssuer
+) -> None:
+    client, _ = setup
+    h = headers(issuer)
+    bind(client, h)
+    opt_in_u3(client, h)
+
+    # 1. Stated preference creates candidate in awaiting_owner_confirmation
+    res = client.post(
+        f"/v1/conversations/{PET}/turns",
+        json={"schemaVersion": 1, "text": "mình thích XUNA nhảy nhót khi chơi đùa"},
+        headers=h,
+    )
+    assert res.status_code == 200
+    assert '"candidate"' in res.text
+    assert '"type": "stated_preference"' in res.text
+    assert "nhảy nhót vui vẻ" in res.text
+
+    # Verify candidate is in database via memory API
+    candidates_res = client.get(f"/v1/memory-candidates?petId={PET}", headers=h)
+    assert candidates_res.status_code == 200
+    candidates = candidates_res.json()["items"]
+    assert len(candidates) == 1
+    assert candidates[0]["candidateType"] == "stated_preference"
+    assert candidates[0]["status"] == "awaiting_owner_confirmation"
+    assert candidates[0]["source"] == "conversation"
+
+    # 2. Duplicate turn does not produce another candidate
+    res2 = client.post(
+        f"/v1/conversations/{PET}/turns",
+        json={"schemaVersion": 1, "text": "mình thích XUNA nhảy nhót khi chơi đùa"},
+        headers=h,
+    )
+    assert res2.status_code == 200
+    assert '"candidate"' not in res2.text  # already exists, skipped
+
+    candidates_res2 = client.get(f"/v1/memory-candidates?petId={PET}", headers=h)
+    assert len(candidates_res2.json()["items"]) == 1
+
+    # 3. Personal fact creates candidate
+    res3 = client.post(
+        f"/v1/conversations/{PET}/turns",
+        json={"schemaVersion": 1, "text": "tên mình là Thảo"},
+        headers=h,
+    )
+    assert res3.status_code == 200
+    assert '"candidate"' in res3.text
+    assert '"type": "fact"' in res3.text
+
+    candidates_res3 = client.get(f"/v1/memory-candidates?petId={PET}", headers=h)
+    assert len(candidates_res3.json()["items"]) == 2
+
+

@@ -5,7 +5,9 @@ import base64
 import binascii
 import json
 import time
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Callable
+from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Annotated, Any, Literal
 
@@ -55,9 +57,15 @@ from xuna_backend.modules.conversation.application.voice import (
     AudioFormat,
     transcribe_once,
 )
+from xuna_backend.modules.conversation.domain.candidate_extractor import extract_candidate
 from xuna_backend.modules.conversation.domain.signals import conversation_signals
 from xuna_backend.modules.identity.application.use_cases import IdentityError, get_owned_pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
+from xuna_backend.modules.memory.application.ports import MemoryRepository
+from xuna_backend.modules.memory.domain.entities import (
+    CandidateStatus,
+    MemoryCandidate,
+)
 
 router = APIRouter(prefix="/v1", tags=["conversation"])
 U3Owner = Annotated[Owner, RequireConsent(ConsentClass.CONVERSATION_TEXT)]
@@ -143,6 +151,47 @@ async def turn(
         await get_owned_pet(repo, owner.owner_id, PetId(pet_id))
     except (ValueError, IdentityError) as error:
         raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
+
+    # CLD-14: Extract prospective memory candidates (stated preferences, facts).
+    # Extracted candidates are saved in awaiting_owner_confirmation so the owner can review.
+    # Strict safety rules apply: credentials/door codes/chit-chat return None and are never saved.
+    extracted = extract_candidate(body.text)
+    candidate_info: dict[str, Any] | None = None
+    if extracted is not None:
+        try:
+            mem_factory: Callable[[object], MemoryRepository] = state(request, "memory_repository")
+            mem_repo = mem_factory(session)
+            existing = await mem_repo.list_candidates(
+                PetId(pet_id), status=CandidateStatus.AWAITING_OWNER_CONFIRMATION
+            )
+            if not any(
+                c.candidate_type == extracted.candidate_type
+                and c.content.get("summary") == extracted.content.get("summary")
+                for c in existing
+            ):
+                now = datetime.now(UTC)
+                cand = MemoryCandidate(
+                    candidate_id=uuid.uuid4(),
+                    owner_id=owner.owner_id,
+                    pet_id=PetId(pet_id),
+                    source=extracted.source,
+                    candidate_type=extracted.candidate_type,
+                    content=extracted.content,
+                    status=CandidateStatus.AWAITING_OWNER_CONFIRMATION,
+                    created_at=now,
+                    updated_at=now,
+                )
+                await mem_repo.add_candidate(cand)
+                await session.commit()
+                candidate_info = {
+                    "candidateId": str(cand.candidate_id),
+                    "type": cand.candidate_type.value,
+                    "summary": cand.content.get("summary", ""),
+                }
+        except Exception:  # noqa: S110
+            # Candidate extraction is best-effort and prospective; must not fail turn
+            pass
+
     await session.close()  # release the DB connection before a long provider call
     try:
         chat_request = build_request(
@@ -155,6 +204,7 @@ async def turn(
     # PE-4c: closed tags from the owner's words, sent with `finished` only;
     # the app forwards them to the device. Never stored.
     signals = {"signals": list(conversation_signals(body.text, len(body.history or ())))}
+    candidate_payload = {"candidate": candidate_info} if candidate_info is not None else {}
 
     async def events() -> AsyncIterator[str]:
         text_events = chat_turn(generator, chat_request)
@@ -168,10 +218,13 @@ async def turn(
                 case ToolCallRequested():
                     continue  # no server tools enabled yet
                 case ChatFinished() as done:
-                    yield _sse("finished", _finished(done) | signals)
+                    yield _sse("finished", _finished(done) | signals | candidate_payload)
                 case SpokenFinished(finished=done, spoken=spoken, first_audio_ms=first_ms):
                     timing = {} if first_ms is None else {"firstAudioMs": first_ms}
-                    yield _sse("finished", _finished(done) | {"spoken": spoken} | timing | signals)
+                    yield _sse(
+                        "finished",
+                        _finished(done) | {"spoken": spoken} | timing | signals | candidate_payload,
+                    )
                 case SpokenAudio() as audio:
                     yield _sse(
                         "audio",
