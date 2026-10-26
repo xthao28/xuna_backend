@@ -32,6 +32,7 @@ from xuna_backend.modules.cognition.domain.types import (
 )
 from xuna_backend.modules.consent.api.routes import RequireConsent
 from xuna_backend.modules.consent.domain.consent import ConsentClass
+from xuna_backend.modules.conversation.api.websocket import router as ws_router
 from xuna_backend.modules.conversation.application.chat_turn import (
     MAX_HISTORY_LINES,
     MAX_INPUT_CHARS,
@@ -69,6 +70,7 @@ from xuna_backend.modules.memory.domain.entities import (
 )
 
 router = APIRouter(prefix="/v1", tags=["conversation"])
+router.include_router(ws_router)
 U3Owner = Annotated[Owner, RequireConsent(ConsentClass.CONVERSATION_TEXT)]
 VoiceOwner = Annotated[Owner, RequireConsent(ConsentClass.CONVERSATION_VOICE)]
 
