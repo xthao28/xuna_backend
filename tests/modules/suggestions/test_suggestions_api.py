@@ -1,4 +1,7 @@
-"""Integration API tests for suggestions and sleep learning against PostgreSQL (CLD-30, CLD-31, H1-H8)."""
+"""Integration API tests for suggestions and sleep learning against PostgreSQL.
+
+Covers CLD-30, CLD-31, H1-H8.
+"""
 
 import base64
 import os
@@ -22,8 +25,8 @@ pytestmark = pytest.mark.postgres
 ROOT = Path(__file__).resolve().parents[3]
 PET = "d945c77026fd4f4a8a899bbff4aeed86"
 TABLES = (
-    "cloud_suggestions, deletion_tombstones, backup_manifests, memory_candidates, memory_projections, "
-    "idempotency_keys, device_challenges, devices, brains, pets, owners"
+    "cloud_suggestions, deletion_tombstones, backup_manifests, memory_candidates, "
+    "memory_projections, idempotency_keys, device_challenges, devices, brains, pets, owners"
 )
 
 
