@@ -49,6 +49,9 @@ from xuna_backend.modules.memory.api.routes import router as memory_router
 from xuna_backend.modules.memory.infrastructure.repository import SqlMemoryRepository
 from xuna_backend.modules.suggestions.api.routes import router as suggestions_router
 from xuna_backend.modules.suggestions.infrastructure.repository import SqlSuggestionRepository
+from xuna_backend.modules.transport.api.routes import router as transport_router
+from xuna_backend.modules.transport.infrastructure.memory_broker import InMemoryMqttBroker
+from xuna_backend.modules.transport.infrastructure.repository import SqlTransportStatusRepository
 
 
 def token_verifier(settings: Settings) -> TokenVerifier:
@@ -148,6 +151,8 @@ def create_app(
     app.state.memory_repository = SqlMemoryRepository
     app.state.backup_repository = SqlBackupRepository
     app.state.suggestion_repository = SqlSuggestionRepository
+    app.state.transport_status_repository = SqlTransportStatusRepository
+    app.state.mqtt_publisher = InMemoryMqttBroker()
     app.state.text_generator = generator or text_generator(resolved)
     app.state.speech_recognizer = recognizer or speech_recognizer(resolved)
     app.state.speech_synthesizer = synthesizer or speech_synthesizer(resolved)
@@ -162,6 +167,7 @@ def create_app(
     app.include_router(memory_router)
     app.include_router(backups_router)
     app.include_router(suggestions_router)
+    app.include_router(transport_router)
     return app
 
 

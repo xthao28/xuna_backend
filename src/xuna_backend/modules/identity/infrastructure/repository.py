@@ -56,6 +56,10 @@ class SqlIdentityRepository:
         rows = await self._pets(PetRow.pet_id == pet_id.value)
         return rows[0] if rows else None
 
+    async def get_pet_by_device(self, device_id: uuid.UUID) -> Pet | None:
+        rows = await self._pets(DeviceRow.device_id == device_id)
+        return rows[0] if rows else None
+
     async def list_pets(self, owner_id: uuid.UUID) -> list[Pet]:
         return await self._pets(PetRow.owner_id == owner_id)
 

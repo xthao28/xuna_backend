@@ -33,6 +33,9 @@ class AuditAction(StrEnum):
     SUGGESTION_APPLIED = "suggestion.applied"
     SUGGESTION_REJECTED = "suggestion.rejected"
     SUGGESTION_REVERTED = "suggestion.reverted"
+    DEVICE_STATUS_CHANGED = "device.status_changed"
+    DEVICE_EVENT_INGESTED = "device.event_ingested"
+    DEVICE_COMMAND_SENT = "device.command_sent"
 
 
 @dataclass(frozen=True, slots=True)
