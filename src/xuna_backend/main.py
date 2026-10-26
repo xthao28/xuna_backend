@@ -47,6 +47,8 @@ from xuna_backend.modules.identity.infrastructure.p256 import P256SignatureVerif
 from xuna_backend.modules.identity.infrastructure.repository import SqlIdentityRepository
 from xuna_backend.modules.memory.api.routes import router as memory_router
 from xuna_backend.modules.memory.infrastructure.repository import SqlMemoryRepository
+from xuna_backend.modules.suggestions.api.routes import router as suggestions_router
+from xuna_backend.modules.suggestions.infrastructure.repository import SqlSuggestionRepository
 
 
 def token_verifier(settings: Settings) -> TokenVerifier:
@@ -145,6 +147,7 @@ def create_app(
     app.state.consent_repository = SqlConsentRepository
     app.state.memory_repository = SqlMemoryRepository
     app.state.backup_repository = SqlBackupRepository
+    app.state.suggestion_repository = SqlSuggestionRepository
     app.state.text_generator = generator or text_generator(resolved)
     app.state.speech_recognizer = recognizer or speech_recognizer(resolved)
     app.state.speech_synthesizer = synthesizer or speech_synthesizer(resolved)
@@ -158,6 +161,7 @@ def create_app(
     app.include_router(conversation_router)
     app.include_router(memory_router)
     app.include_router(backups_router)
+    app.include_router(suggestions_router)
     return app
 
 

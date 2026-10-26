@@ -29,6 +29,10 @@ class AuditAction(StrEnum):
     BACKUP_RESTORED = "backup.restored"
     TOMBSTONE_CREATED = "tombstone.created"
     PET_FORGOTTEN = "pet.forgotten"
+    SUGGESTION_CONSOLIDATED = "suggestion.consolidated"
+    SUGGESTION_APPLIED = "suggestion.applied"
+    SUGGESTION_REJECTED = "suggestion.rejected"
+    SUGGESTION_REVERTED = "suggestion.reverted"
 
 
 @dataclass(frozen=True, slots=True)
