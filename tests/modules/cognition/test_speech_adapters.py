@@ -95,9 +95,11 @@ class _FakeCommunicate:
 
     plans: ClassVar[list[list[Any]]] = []
     calls: ClassVar[int] = 0
+    last_voice: ClassVar[str] = ""
 
     def __init__(self, text: str, voice: str) -> None:
         self.voice = voice
+        _FakeCommunicate.last_voice = voice
         self.plan = self.plans[min(_FakeCommunicate.calls, len(self.plans) - 1)]
         _FakeCommunicate.calls += 1
 
@@ -173,3 +175,50 @@ def test_edge_attempts_share_one_time_budget(monkeypatch: pytest.MonkeyPatch) ->
 def test_edge_rejects_zero_attempts() -> None:
     with pytest.raises(ValueError):
         EdgeSpeechSynthesizer(max_attempts=0)
+
+
+def test_transcription_auto_detect_omits_language() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"text": "Hello XUNA"})
+
+    recognizer = OpenAITranscriptionRecognizer(
+        "https://asr.example/v1",
+        "whisper-large-v3-turbo",
+        transport=httpx.MockTransport(handler),
+    )
+
+    async def go() -> list[Transcript]:
+        try:
+            return [
+                t
+                async for t in recognizer.transcribe(
+                    _chunks(AudioChunk(b"OggS", "ogg_opus", 0)), None
+                )
+            ]
+        finally:
+            await recognizer.aclose()
+
+    out = asyncio.run(go())
+    assert out == [Transcript("Hello XUNA", final=True)]
+    request = seen[0]
+    assert b'name="language"' not in request.content
+
+
+def test_edge_auto_selects_english_voice_for_english_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    _FakeCommunicate.plans = [[{"type": "audio", "data": b"voice_audio"}]]
+    _FakeCommunicate.calls = 0
+    _FakeCommunicate.last_voice = ""
+    monkeypatch.setattr(edge_tts_adapter.edge_tts, "Communicate", _FakeCommunicate)
+
+    async def go() -> list[AudioChunk]:
+        synth = EdgeSpeechSynthesizer(voice="vi-VN-HoaiMyNeural")
+        return [c async for c in synth.synthesize("Hello, nice to meet you!")]
+
+    chunks = asyncio.run(go())
+    assert len(chunks) == 1
+    # Even though default voice is vi-VN-HoaiMyNeural, English text triggers en-US-AriaNeural
+    assert _FakeCommunicate.last_voice == "en-US-AriaNeural"
+

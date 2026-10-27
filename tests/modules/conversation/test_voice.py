@@ -55,7 +55,7 @@ class FakeRecognizer:
         self.received: list[AudioChunk] = []
 
     async def transcribe(
-        self, audio: AsyncIterator[AudioChunk], locale: Locale
+        self, audio: AsyncIterator[AudioChunk], locale: Locale | None = None
     ) -> AsyncIterator[Transcript]:
         self.received += [chunk async for chunk in audio]
         for index, text in enumerate(self.texts):

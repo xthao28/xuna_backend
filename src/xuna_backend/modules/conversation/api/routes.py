@@ -111,7 +111,7 @@ class TurnBody(BaseModel):
 
     schemaVersion: Literal[1]
     text: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
-    locale: Locale = Locale.VI
+    locale: Locale | None = None
     # Phone voice V1: also stream the reply as audio, sentence by sentence.
     speak: bool = False
     # Turn context (owner 2026-10-23), all optional and never stored: the phone's
@@ -163,7 +163,7 @@ class TranscriptionBody(BaseModel):
     schemaVersion: Literal[1]
     audio: str = Field(min_length=4, max_length=(MAX_AUDIO_BYTES * 4) // 3 + 4)  # base64
     format: AudioFormat
-    locale: Locale = Locale.VI
+    locale: Locale | None = None
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
@@ -422,8 +422,10 @@ async def transcription(
     except (binascii.Error, ValueError) as error:
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "audio") from error
     started = time.perf_counter()
+    settings = state(request, "settings")
+    locale = None if settings.asr_auto_detect else body.locale
     try:
-        text = await transcribe_once(recognizer, audio, body.format, body.locale)
+        text = await transcribe_once(recognizer, audio, body.format, locale)
     except ValueError as error:
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "audio") from error
     except ProviderUnavailableError as error:

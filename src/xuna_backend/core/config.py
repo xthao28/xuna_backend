@@ -47,6 +47,7 @@ class Settings:
     asr_model: str = ""
     asr_api_key: str = ""
     asr_timeout_s: float = 10.0
+    asr_auto_detect: bool = True
     # TTS `edge` (free online voices) or `piper` (local, optional GPL extra).
     tts_provider: str = ""
     tts_voice: str = ""
@@ -88,6 +89,8 @@ class Settings:
             asr_model=source.get("XUNA_ASR_MODEL", ""),
             asr_api_key=source.get("XUNA_ASR_API_KEY", ""),
             asr_timeout_s=float(source.get("XUNA_ASR_TIMEOUT_S", "10")),
+            asr_auto_detect=source.get("XUNA_ASR_AUTO_DETECT", "true").lower()
+            in ("true", "1", "yes"),
             tts_provider=source.get("XUNA_TTS_PROVIDER", ""),
             tts_voice=source.get("XUNA_TTS_VOICE", ""),
             tts_piper_model=source.get("XUNA_TTS_PIPER_MODEL", ""),

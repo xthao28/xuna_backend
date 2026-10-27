@@ -18,6 +18,7 @@ import edge_tts
 
 from xuna_backend.modules.cognition.application.ports import ProviderUnavailableError
 from xuna_backend.modules.cognition.application.registry import ProviderRegistry
+from xuna_backend.modules.cognition.domain.language_detector import detect_text_language
 from xuna_backend.modules.cognition.domain.types import AudioChunk, Capability, Locale
 
 NAME = "edge"
@@ -38,8 +39,22 @@ class EdgeSpeechSynthesizer:
         self._timeout_s = timeout_s
         self._max_attempts = max_attempts
 
-    async def synthesize(self, text: str, locale: Locale) -> AsyncIterator[AudioChunk]:
-        voice = self._voice or _DEFAULT_VOICES[locale]
+    async def synthesize(
+        self, text: str, locale: Locale | None = None
+    ) -> AsyncIterator[AudioChunk]:
+        target_locale = detect_text_language(text, default=locale or Locale.VI)
+        if target_locale == Locale.EN:
+            voice = (
+                self._voice
+                if (self._voice and self._voice.startswith("en-"))
+                else _DEFAULT_VOICES[Locale.EN]
+            )
+        else:
+            voice = (
+                self._voice
+                if (self._voice and not self._voice.startswith("en-"))
+                else _DEFAULT_VOICES[Locale.VI]
+            )
         audio: list[bytes] = []
         last: Exception | None = None
         try:

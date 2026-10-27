@@ -149,3 +149,13 @@ def test_context_without_confirmed_facts_has_no_fact_injection() -> None:
     system = request.messages[0].content
     assert "Những điều bạn biết chắc chắn" not in system
     assert "Người bạn đang nói chuyện cùng tên là" not in system
+
+
+def test_build_request_auto_detects_language_when_locale_omitted() -> None:
+    req_vi = build_request("Chào bạn, hôm nay thế nào?")
+    assert req_vi.locale == Locale.VI
+    assert "Bạn là XUNA" in req_vi.messages[0].content
+
+    req_en = build_request("Hello, can you help me with Python?")
+    assert req_en.locale == Locale.EN
+    assert "when speaking English" in req_en.messages[0].content

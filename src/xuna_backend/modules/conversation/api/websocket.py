@@ -183,6 +183,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
     audio_params = hello.get("audio", {})
     sample_rate = int(audio_params.get("sampleRate", 16000))
 
+    asr_auto_detect = getattr(getattr(app.state, "settings", None), "asr_auto_detect", True)
     session = VoiceSession(
         session_id=session_id,
         pet_id=pet_id,
@@ -190,7 +191,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
         recognizer=getattr(app.state, "speech_recognizer", None),
         generator=app.state.text_generator,
         synthesizer=getattr(app.state, "speech_synthesizer", None),
-        locale=Locale.VI,
+        locale=None if asr_auto_detect else Locale.VI,
         speak=bool(hello.get("speak", True)),
         sample_rate=sample_rate,
     )

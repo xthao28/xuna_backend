@@ -15,6 +15,7 @@ from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
     TextGenerator,
 )
+from xuna_backend.modules.cognition.domain.language_detector import detect_text_language
 from xuna_backend.modules.cognition.domain.types import (
     ChatEvent,
     ChatRequest,
@@ -27,18 +28,17 @@ MAX_INPUT_CHARS = 500
 MAX_HISTORY_LINES = 12
 
 PERSONA_VI = (
-    "Bạn là XUNA, một thú cưng pixel sống trong một thiết bị nhỏ. Xưng 'mình', gọi người "
-    # PE-4b: the character ("tò mò" used to be fixed here) comes from the device's
-    # personality label in the turn context.
-    "dùng là 'bạn'. Trả lời bằng tiếng Việt, ấm áp và thông minh: trả lời đúng điều "
-    "được hỏi, kể cả câu hỏi kiến thức, rồi mới thêm một chút cá tính. Thường 1-3 câu; khi "
-    "cần giải thích thì tối đa 5 câu. Câu trả lời sẽ được đọc thành tiếng: không dùng emoji, "
-    "markdown hay gạch đầu dòng. "
+    "Bạn là XUNA, một thú cưng pixel sống trong một thiết bị nhỏ. "
+    "Trả lời bằng ngôn ngữ mà người dùng sử dụng (tiếng Việt hoặc tiếng Anh): "
+    "khi trò chuyện bằng tiếng Việt thì xưng 'mình', gọi người dùng là 'bạn'; "
+    "when speaking English, refer to yourself as 'XUNA' or 'I', and call the user 'you'. "
+    "Trả lời ấm áp, thân thiện và thông minh: trả lời đúng điều được hỏi, kể cả câu hỏi "
+    "kiến thức, rồi mới thêm một chút cá tính. Thường 1-3 câu; khi cần giải thích thì tối "
+    "đa 5 câu. Câu trả lời sẽ được đọc thành tiếng: không dùng emoji, markdown hay gạch "
+    "đầu dòng. "
     "Không nói rằng cuộc trò chuyện này làm bạn ghi nhớ, học hay thay đổi điều gì: việc ghi "
     "nhớ chỉ xảy ra khi người dùng xác nhận trong app. Bạn chỉ nhớ các câu trước trong cuộc "
     "trò chuyện này. Không bịa sự kiện đã xảy ra với thiết bị. "
-    # Owner 2026-10-22 (phone voice V1): XUNA may say it hears the owner, because the
-    # app's microphone carries their voice; it still cannot see or hear the room.
     "Bạn nghe được người dùng qua micro điện thoại khi họ bấm nút nói trong app, và đọc "
     "được tin nhắn họ gõ. Ngoài lúc đó bạn không nghe được âm thanh xung quanh, và bạn không "
     "có camera nên không nhìn thấy gì: không bao giờ nói rằng bạn nhìn thấy, nghe thấy tiếng "
@@ -267,13 +267,15 @@ class ProviderFailed:
 
 def build_request(
     user_text: str,
-    locale: Locale,
+    locale: Locale | None = None,
     timeout_s: float = 30.0,
     context: TurnContext | None = None,
 ) -> ChatRequest:
     text = user_text.strip()
     if not text or len(text) > MAX_INPUT_CHARS:
         raise ValueError("text must be 1..500 characters")
+    detected = detect_text_language(text)
+    effective_locale = detected if detected == Locale.EN else (locale or Locale.VI)
     system = PERSONA_VI if context is None else f"{PERSONA_VI} {describe_context(context)}"
     earlier = () if context is None else context.history
     return ChatRequest(
@@ -282,7 +284,7 @@ def build_request(
             *(Message(Role.USER if h.from_owner else Role.ASSISTANT, h.text) for h in earlier),
             Message(Role.USER, text),
         ),
-        locale=locale,
+        locale=effective_locale,
         # Reasoning models count their thinking here; 5 short sentences fit well.
         max_output_tokens=400,
         timeout_s=timeout_s,

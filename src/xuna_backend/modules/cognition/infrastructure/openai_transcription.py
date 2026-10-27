@@ -58,7 +58,7 @@ class OpenAITranscriptionRecognizer:
         await self._client.aclose()
 
     async def transcribe(
-        self, audio: AsyncIterator[AudioChunk], locale: Locale
+        self, audio: AsyncIterator[AudioChunk], locale: Locale | None = None
     ) -> AsyncIterator[Transcript]:
         data = b""
         codec = ""
@@ -70,17 +70,19 @@ class OpenAITranscriptionRecognizer:
         upload = _UPLOADS.get(codec)
         if upload is None or not data:
             raise ValueError("unsupported or empty audio")
+        request_data: dict[str, str] = {
+            "model": self._model,
+            "prompt": _PROMPT,
+            "temperature": "0",
+        }
+        if locale is not None:
+            request_data["language"] = locale.value
         try:
             response = await self._client.post(
                 self._url,
                 headers=self._headers,
                 files={"file": (upload[0], data, upload[1])},
-                data={
-                    "model": self._model,
-                    "language": locale.value,
-                    "prompt": _PROMPT,
-                    "temperature": "0",
-                },
+                data=request_data,
             )
         except httpx.HTTPError as error:
             raise ProviderUnavailableError(type(error).__name__) from error

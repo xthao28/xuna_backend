@@ -62,7 +62,7 @@ class VoiceSession:
         recognizer: SpeechRecognizer | None,
         generator: TextGenerator,
         synthesizer: SpeechSynthesizer | None,
-        locale: Locale = Locale.VI,
+        locale: Locale | None = None,
         speak: bool = True,
         sample_rate: int = 16000,
     ) -> None:

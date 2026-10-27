@@ -78,7 +78,7 @@ _Job = tuple[str, asyncio.Task[tuple[bytes, str, int]]]
 async def spoken_turn(
     events: AsyncIterator[ChatEvent | ProviderFailed],
     synthesizer: SpeechSynthesizer | None,
-    locale: Locale,
+    locale: Locale | None = None,
     *,
     max_parallel: int = MAX_PARALLEL_TTS,
     first_clause_chars: int = FIRST_CLAUSE_CHARS,

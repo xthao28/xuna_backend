@@ -36,14 +36,16 @@ class SpeechRecognizer(Protocol):
     """Streaming ASR: audio in, partial then final transcripts out."""
 
     def transcribe(
-        self, audio: AsyncIterator[AudioChunk], locale: Locale
+        self, audio: AsyncIterator[AudioChunk], locale: Locale | None = None
     ) -> AsyncIterator[Transcript]: ...
 
 
 class SpeechSynthesizer(Protocol):
     """Streaming TTS: text in, audio frames out."""
 
-    def synthesize(self, text: str, locale: Locale) -> AsyncIterator[AudioChunk]: ...
+    def synthesize(
+        self, text: str, locale: Locale | None = None
+    ) -> AsyncIterator[AudioChunk]: ...
 
 
 class Tool(Protocol):

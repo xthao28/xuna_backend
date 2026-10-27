@@ -31,7 +31,7 @@ class FakeRecognizer:
         self.calls = 0
 
     async def transcribe(
-        self, audio: AsyncIterator[AudioChunk], locale: Locale
+        self, audio: AsyncIterator[AudioChunk], locale: Locale | None = None
     ) -> AsyncIterator[Transcript]:
         self.calls += 1
         _ = [chunk async for chunk in audio]
@@ -46,7 +46,9 @@ class FakeSynthesizer:
         self.fail_from = fail_from
         self.pcm = pcm
 
-    async def synthesize(self, text: str, locale: Locale) -> AsyncIterator[AudioChunk]:
+    async def synthesize(
+        self, text: str, locale: Locale | None = None
+    ) -> AsyncIterator[AudioChunk]:
         self.texts.append(text)
         if len(self.texts) >= self.fail_from:
             raise ProviderUnavailableError("tts down")

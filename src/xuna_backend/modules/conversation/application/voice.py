@@ -46,7 +46,10 @@ async def _one(chunk: AudioChunk) -> AsyncIterator[AudioChunk]:
 
 
 async def transcribe_once(
-    recognizer: SpeechRecognizer, data: bytes, audio_format: AudioFormat, locale: Locale
+    recognizer: SpeechRecognizer,
+    data: bytes,
+    audio_format: AudioFormat,
+    locale: Locale | None = None,
 ) -> str:
     """Final transcript of one push-to-talk utterance ("" = nothing heard).
 
