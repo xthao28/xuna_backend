@@ -13,6 +13,10 @@ from xuna_backend.modules.knowledge.application.schemas import (
     TeachKnowledgeResponse,
     UpdateDomainRequest,
 )
+from xuna_backend.modules.knowledge.application.suggest import (
+    ExpireKnowledgeSuggestionsUseCase,
+    GenerateKnowledgeSuggestionUseCase,
+)
 from xuna_backend.modules.knowledge.application.use_cases import (
     CreateDomainUseCase,
     DecideSuggestionUseCase,
@@ -29,6 +33,8 @@ __all__ = [
     "DecideSuggestionRequest",
     "DecideSuggestionUseCase",
     "DomainResponse",
+    "ExpireKnowledgeSuggestionsUseCase",
+    "GenerateKnowledgeSuggestionUseCase",
     "GetDomainUseCase",
     "KnowledgeCandidatePort",
     "KnowledgeRepository",

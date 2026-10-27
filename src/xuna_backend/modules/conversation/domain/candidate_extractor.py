@@ -103,7 +103,7 @@ _CONTEXT_LABELS = {
 
 # Personal Fact Patterns
 _NAME_PATTERN = re.compile(
-    r"\b(?:tên (?:mình|tôi|em|anh|chị) là|gọi (?:mình|tôi|em|anh|chị) là|"
+    r"\b(?:tên (?:của )?(?:mình|tôi|em|anh|chị) là|gọi (?:mình|tôi|em|anh|chị) là|"
     r"(?:mình|tôi|em|anh|chị) tên là)\s+([A-ZÀ-Ỹa-zà-ỹ\s]{2,30})\b",
     re.IGNORECASE,
 )
@@ -292,3 +292,61 @@ def extract_candidate(text: str) -> ExtractedCandidate | None:
         )
 
     return None
+
+
+_QUESTION_PATTERN = re.compile(
+    r"\?|\b(?:tại sao|vì sao|làm sao|thế nào|bao nhiêu|mấy|ai|ở đâu|"
+    r"khi nào|được không|phải không|hả|nhỉ|chăng)\b",
+    re.IGNORECASE,
+)
+_GREETING_OR_CHITCHAT_PATTERN = re.compile(
+    r"^(?:chào|hello|hi|tạm biệt|bye|chúc ngủ ngon|cảm ơn|thank|thanks|"
+    r"xin lỗi|dạ|vâng|ừ|ok|oke|okie)\b|"
+    r"\b(?:hôm nay thời tiết|vui quá|buồn quá|mệt quá)\b",
+    re.IGNORECASE,
+)
+_CREDENTIAL_PATTERN = re.compile(
+    r"\b(?:mật khẩu|password|pass|wifi|mã pin|mã cửa|mã mở cửa|tài khoản|stk|số tài khoản|otp)\b",
+    re.IGNORECASE,
+)
+_PERSONAL_PATTERN = re.compile(
+    r"\b(?:tên (?:của )?(?:mình|tôi|em|anh|chị)|(?:mình|tôi|em) tên là|"
+    r"sinh nhật (?:của )?(?:mình|tôi|em)|(?:mình|tôi|em) (?:rất )?(?:thích|ghét)|"
+    r"món (?:ăn )?yêu thích|màu yêu thích|(?:mình|tôi|em) (?:có )?nuôi)\b",
+    re.IGNORECASE,
+)
+
+
+def extract_knowledge_candidate(text: str) -> ExtractedCandidate | None:
+    """Extracts a prospective Knowledge candidate from owner text (plan §6.3.7, Q3).
+
+    Deterministic, pure, and safe:
+    - Filters passwords, door codes, credentials.
+    - Filters questions, casual chit-chat, greetings.
+    - Filters stated preferences and personal facts (handled by extract_candidate).
+    - Requires 10 <= len <= 280 and at least 3 words.
+    """
+    cleaned = unicodedata.normalize("NFC", text).strip()
+    if len(cleaned) < 10 or len(cleaned) > 280:
+        return None
+    if len(cleaned.split()) < 3:
+        return None
+    if _has_guard_violation(cleaned):
+        return None
+    if _CREDENTIAL_PATTERN.search(cleaned):
+        return None
+    if _PERSONAL_PATTERN.search(cleaned):
+        return None
+    if _QUESTION_PATTERN.search(cleaned):
+        return None
+    if _GREETING_OR_CHITCHAT_PATTERN.search(cleaned):
+        return None
+    # Check if it was already a stated preference or personal fact
+    if extract_candidate(cleaned) is not None:
+        return None
+
+    return ExtractedCandidate(
+        candidate_type=CandidateType.KNOWLEDGE,
+        content={"text": cleaned, "summary": cleaned},
+        source="conversation",
+    )

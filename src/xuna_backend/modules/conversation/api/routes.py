@@ -4,6 +4,7 @@ phone voice V1: `POST /v1/speech/transcriptions` plus spoken replies (`speak`)."
 import base64
 import binascii
 import json
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -58,16 +59,25 @@ from xuna_backend.modules.conversation.application.voice import (
     AudioFormat,
     transcribe_once,
 )
-from xuna_backend.modules.conversation.domain.candidate_extractor import extract_candidate
+from xuna_backend.modules.conversation.domain.candidate_extractor import (
+    extract_candidate,
+    extract_knowledge_candidate,
+)
 from xuna_backend.modules.conversation.domain.signals import conversation_signals
 from xuna_backend.modules.identity.application.use_cases import IdentityError, get_owned_pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
+from xuna_backend.modules.knowledge.domain.entities import DomainStatus, compute_fact_key
+from xuna_backend.modules.knowledge.domain.lexical_matcher import (
+    compute_lexical_similarity,
+)
 from xuna_backend.modules.memory.application.ports import MemoryRepository
 from xuna_backend.modules.memory.domain.entities import (
     CandidateStatus,
     CandidateType,
     MemoryCandidate,
 )
+
+_logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["conversation"])
 router.include_router(ws_router)
@@ -112,6 +122,7 @@ class TurnBody(BaseModel):
     pet: PetSelfBody | None = None
 
     knowledge: list[dict[str, Any]] | None = None
+    extractKnowledge: bool = True
 
     def context(
         self,
@@ -201,10 +212,12 @@ async def turn(
     except (ValueError, IdentityError) as error:
         raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
 
-    # CLD-14: Extract prospective memory candidates (stated preferences, facts).
+    # CLD-14, KD-4: Extract prospective memory candidates (stated preferences, facts, knowledge).
     # Extracted candidates are saved in awaiting_owner_confirmation so the owner can review.
     # Strict safety rules apply: credentials/door codes/chit-chat return None and are never saved.
     extracted = extract_candidate(body.text)
+    if extracted is None and body.extractKnowledge:
+        extracted = extract_knowledge_candidate(body.text)
     candidate_info: dict[str, Any] | None = None
     confirmed_facts: list[str] = []
 
@@ -220,8 +233,10 @@ async def turn(
         knowledge_items: list[str] = []
         for cand in confirmed_candidates:
             if cand.candidate_type == CandidateType.FACT:
-                fact_key = cand.content.get("fact")
-                dedup_key = str(fact_key) if fact_key else str(cand.content.get("summary", ""))
+                raw_fact_key = cand.content.get("fact")
+                dedup_key = (
+                    str(raw_fact_key) if raw_fact_key else str(cand.content.get("summary", ""))
+                )
                 if dedup_key in seen_facts:
                     continue
                 seen_facts.add(dedup_key)
@@ -239,12 +254,70 @@ async def turn(
             existing = await mem_repo.list_candidates(
                 PetId(pet_id), status=CandidateStatus.AWAITING_OWNER_CONFIRMATION
             )
-            if not any(
+            is_dup = any(
                 c.candidate_type == extracted.candidate_type
-                and c.content.get("summary") == extracted.content.get("summary")
+                and (
+                    c.content.get("summary") == extracted.content.get("summary")
+                    or (
+                        c.candidate_type == CandidateType.KNOWLEDGE
+                        and c.content.get("text") == extracted.content.get("text")
+                    )
+                )
                 for c in existing
-            ):
+            )
+            if not is_dup:
                 now = datetime.now(UTC)
+                domain_id: uuid.UUID | None = None
+                relation: str | None = None
+                fact_key: int | None = None
+
+                if extracted.candidate_type == CandidateType.KNOWLEDGE:
+                    text_content = str(extracted.content.get("text", ""))
+                    fact_key = compute_fact_key(text_content)
+                    try:
+                        k_factory = getattr(request.app.state, "knowledge_repository", None)
+                        if k_factory is not None:
+                            k_repo = k_factory(session)
+                            domains = await k_repo.list_domains(
+                                PetId(pet_id), include_deleted=False
+                            )
+                            active = [d for d in domains if d.status != DomainStatus.DELETED]
+                            best_domain = None
+                            best_sim = 0.0
+                            for dom in active:
+                                sim = compute_lexical_similarity(
+                                    text_content, [dom.name, dom.description]
+                                )
+                                if sim > best_sim:
+                                    best_sim = sim
+                                    best_domain = dom
+                            if best_domain is not None and best_sim >= 0.20:
+                                domain_id = best_domain.domain_id
+                                cand_factory = getattr(
+                                    request.app.state, "knowledge_candidate_adapter", None
+                                )
+                                if cand_factory is not None:
+                                    c_port = cand_factory(session)
+                                    domain_cands = await c_port.list_candidates_by_domain(
+                                        domain_id, confirmed_only=True
+                                    )
+                                    for dc in domain_cands:
+                                        if (
+                                            compute_lexical_similarity(
+                                                text_content, [str(dc.content.get("text", ""))]
+                                            )
+                                            >= 0.60
+                                        ):
+                                            relation = "refines"
+                                            break
+                                if relation is None:
+                                    relation = "new"
+                    except Exception:
+                        _logger.debug(
+                            "Failed to resolve domain/relation for candidate",
+                            exc_info=True,
+                        )
+
                 cand = MemoryCandidate(
                     candidate_id=uuid.uuid4(),
                     owner_id=owner.owner_id,
@@ -255,13 +328,16 @@ async def turn(
                     status=CandidateStatus.AWAITING_OWNER_CONFIRMATION,
                     created_at=now,
                     updated_at=now,
+                    domain_id=domain_id,
+                    relation=relation,
+                    fact_key=fact_key,
                 )
                 await mem_repo.add_candidate(cand)
                 await session.commit()
                 candidate_info = {
                     "candidateId": str(cand.candidate_id),
                     "type": cand.candidate_type.value,
-                    "summary": cand.content.get("summary", ""),
+                    "summary": cand.content.get("summary") or cand.content.get("text", ""),
                 }
     except Exception:  # noqa: S110
         # Candidate extraction and fact lookup are best-effort; must not fail turn

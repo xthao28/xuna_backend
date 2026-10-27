@@ -52,6 +52,13 @@ class Settings:
     tts_voice: str = ""
     tts_piper_model: str = ""
     tts_timeout_s: float = 10.0
+    # Embedding adapter (KD-4, optional). Empty provider = embedding off (lexical fallback).
+    embedding_provider: str = ""
+    embedding_base_url: str = ""
+    embedding_model: str = ""
+    embedding_api_key: str = ""
+    embedding_api_key_header: str = "authorization"
+    embedding_timeout_s: float = 10.0
     # Backup encryption key (Phase 2, CLD-20). Empty = derives deterministic fallback.
     backup_encryption_key: str = ""
 
@@ -85,6 +92,12 @@ class Settings:
             tts_voice=source.get("XUNA_TTS_VOICE", ""),
             tts_piper_model=source.get("XUNA_TTS_PIPER_MODEL", ""),
             tts_timeout_s=float(source.get("XUNA_TTS_TIMEOUT_S", "10")),
+            embedding_provider=source.get("XUNA_EMBEDDING_PROVIDER", ""),
+            embedding_base_url=source.get("XUNA_EMBEDDING_BASE_URL", ""),
+            embedding_model=source.get("XUNA_EMBEDDING_MODEL", ""),
+            embedding_api_key=source.get("XUNA_EMBEDDING_API_KEY", ""),
+            embedding_api_key_header=source.get("XUNA_EMBEDDING_API_KEY_HEADER", "authorization"),
+            embedding_timeout_s=float(source.get("XUNA_EMBEDDING_TIMEOUT_S", "10")),
             backup_encryption_key=source.get("XUNA_BACKUP_ENCRYPTION_KEY", ""),
         )
 

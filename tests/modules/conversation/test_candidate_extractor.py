@@ -5,6 +5,7 @@ from xuna_backend.modules.conversation.domain.candidate_extractor import (
     PreferenceContext,
     PreferencePolarity,
     extract_candidate,
+    extract_knowledge_candidate,
 )
 from xuna_backend.modules.memory.domain.entities import CandidateType
 
@@ -135,3 +136,45 @@ def test_safety_and_ignored_messages() -> None:
 
     # Oversized text
     assert extract_candidate("thích nhảy " * 30) is None
+
+
+def test_extract_knowledge_candidate_positive() -> None:
+    text = "Trứng luộc 6 phút có lòng đào dẻo béo ngậy"
+    cand = extract_knowledge_candidate(text)
+    assert cand is not None
+    assert cand.candidate_type == CandidateType.KNOWLEDGE
+    assert cand.source == "conversation"
+    assert cand.content["text"] == text
+
+    text2 = "Python dùng cú pháp thụt lề 4 dấu cách"
+    cand2 = extract_knowledge_candidate(text2)
+    assert cand2 is not None
+    assert cand2.candidate_type == CandidateType.KNOWLEDGE
+
+
+def test_extract_knowledge_candidate_filters() -> None:
+    # Too short (< 10 chars or < 3 words)
+    assert extract_knowledge_candidate("ngắn") is None
+    assert extract_knowledge_candidate("rất ngắn") is None
+
+    # Credentials
+    assert extract_knowledge_candidate("mật khẩu wifi phòng khách là 12345678") is None
+    assert extract_knowledge_candidate("mã cửa vào nhà là 9988") is None
+
+    # Questions
+    assert extract_knowledge_candidate("trứng luộc mấy phút thì chín?") is None
+    assert extract_knowledge_candidate("tại sao bầu trời lại có màu xanh") is None
+    assert extract_knowledge_candidate("nấu phở như thế nào vậy bạn") is None
+
+    # Chit-chat / Greetings
+    assert extract_knowledge_candidate("chào buổi sáng bạn nhé XUNA") is None
+    assert extract_knowledge_candidate("hôm nay thời tiết đẹp quá bạn ơi") is None
+    assert extract_knowledge_candidate("cảm ơn bạn nhiều nha") is None
+
+    # Personal facts (handled by extract_candidate, not knowledge)
+    assert extract_knowledge_candidate("tên của mình là Thảo") is None
+    assert extract_knowledge_candidate("mình rất thích màu tím") is None
+
+    # Guard violation
+    assert extract_knowledge_candidate('"Trứng luộc 6 phút"') is None
+    assert extract_knowledge_candidate("giả sử luộc trứng 10 phút") is None

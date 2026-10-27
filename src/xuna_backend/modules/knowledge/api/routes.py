@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from datetime import UTC
 from http import HTTPStatus
 from typing import Annotated
 
@@ -28,6 +29,9 @@ from xuna_backend.modules.knowledge.application.schemas import (
     TeachKnowledgeRequest,
     TeachKnowledgeResponse,
     UpdateDomainRequest,
+)
+from xuna_backend.modules.knowledge.application.suggest import (
+    GenerateKnowledgeSuggestionUseCase,
 )
 from xuna_backend.modules.knowledge.application.use_cases import (
     CreateDomainUseCase,
@@ -217,3 +221,39 @@ async def decide_suggestion(
         return await use_case.execute(suggestion_id, body)
     except ValueError as err:
         raise _map_error(err) from err
+
+
+@router.post(
+    "/pets/{pet_id}/knowledge-suggestions/generate",
+    response_model=KnowledgeSuggestionResponse | None,
+)
+async def generate_suggestion(
+    pet_id: str,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+) -> KnowledgeSuggestionResponse | None:
+    try:
+        identity_repo = state(request, "identity_repository")(session)
+        await get_owned_pet(identity_repo, owner.owner_id, PetId(pet_id))
+    except (ValueError, IdentityError) as err:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND) from err
+
+    repo = _repo(request, session)
+    candidate_port = _candidate_port(request, session)
+    embedder = getattr(request.app.state, "embedder", None)
+    use_case = GenerateKnowledgeSuggestionUseCase(repo, candidate_port, embedder)
+    suggestion = await use_case.execute(PetId(pet_id), owner.owner_id)
+    if suggestion is None:
+        return None
+    return KnowledgeSuggestionResponse(
+        suggestion_id=suggestion.suggestion_id,
+        pet_id=str(suggestion.pet_id),
+        kind=suggestion.kind.value,
+        proposed_name=suggestion.proposed_name,
+        proposed_description=suggestion.proposed_description,
+        member_candidate_ids=suggestion.member_candidate_ids,
+        target_domain_id=suggestion.target_domain_id,
+        status=suggestion.status.value,
+        created_at=suggestion.created_at.astimezone(UTC).isoformat(),
+    )

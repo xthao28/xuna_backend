@@ -13,6 +13,8 @@ from xuna_backend.modules.cognition.domain.types import (
     AudioChunk,
     ChatEvent,
     ChatRequest,
+    EmbeddingRequest,
+    EmbeddingResult,
     Locale,
     ToolCall,
     ToolSpec,
@@ -52,3 +54,9 @@ class Tool(Protocol):
     def spec(self) -> ToolSpec: ...
 
     async def invoke(self, call: ToolCall) -> str: ...
+
+
+class Embedder(Protocol):
+    """Embedding provider. Takes batch of texts, returns vector representations."""
+
+    async def embed(self, request: EmbeddingRequest) -> EmbeddingResult: ...

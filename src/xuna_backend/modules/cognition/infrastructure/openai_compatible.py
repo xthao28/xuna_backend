@@ -20,6 +20,8 @@ from xuna_backend.modules.cognition.domain.types import (
     ChatEvent,
     ChatFinished,
     ChatRequest,
+    EmbeddingRequest,
+    EmbeddingResult,
     TextDelta,
     ToolCall,
     ToolCallRequested,
@@ -137,6 +139,68 @@ class OpenAICompatibleTextGenerator:
         )
 
 
+class OpenAICompatibleEmbedder:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str = "",
+        transport: httpx.AsyncBaseTransport | None = None,
+        api_key_header: str = "authorization",
+        provider_label: str = NAME,
+        timeout_s: float = 10.0,
+    ) -> None:
+        if not base_url.startswith(("http://", "https://")) or not model:
+            raise ValueError("base_url (http/https) and model are required")
+        self._url = base_url.rstrip("/") + "/embeddings"
+        self._model = model
+        header = api_key_header.strip().lower()
+        if not header.replace("-", "").isalnum():
+            raise ValueError("invalid api_key_header")
+        if not api_key:
+            self._headers: dict[str, str] = {}
+        elif header == "authorization":
+            self._headers = {"Authorization": f"Bearer {api_key}"}
+        else:
+            self._headers = {header: api_key}
+        self._transport = transport
+        self._label = provider_label
+        self._timeout_s = timeout_s
+
+    async def embed(self, request: EmbeddingRequest) -> EmbeddingResult:
+        payload = {
+            "model": self._model,
+            "input": list(request.texts),
+        }
+        timeout = min(request.timeout_s, self._timeout_s)
+        try:
+            async with httpx.AsyncClient(
+                transport=self._transport, timeout=timeout, headers=self._headers
+            ) as client:
+                response = await client.post(self._url, json=payload)
+                response.raise_for_status()
+                data = response.json()
+        except (httpx.HTTPError, json.JSONDecodeError) as error:
+            raise ProviderUnavailableError(type(error).__name__) from error
+
+        items = data.get("data")
+        if not isinstance(items, list):
+            raise ProviderUnavailableError("invalid embedding response format")
+
+        embeddings: list[tuple[float, ...]] = []
+        for item in items:
+            vec = item.get("embedding")
+            if isinstance(vec, list):
+                embeddings.append(tuple(float(x) for x in vec))
+            else:
+                embeddings.append(())
+
+        return EmbeddingResult(
+            embeddings=tuple(embeddings),
+            model=str(data.get("model") or self._model),
+        )
+
+
 def register(registry: ProviderRegistry) -> None:
     def text(options: Mapping[str, Any]) -> object:
         return OpenAICompatibleTextGenerator(
@@ -147,4 +211,14 @@ def register(registry: ProviderRegistry) -> None:
             reasoning_effort=str(options.get("reasoning_effort", "")),
         )
 
+    def embedding(options: Mapping[str, Any]) -> object:
+        return OpenAICompatibleEmbedder(
+            base_url=str(options.get("base_url", "")),
+            model=str(options.get("model", "")),
+            api_key=str(options.get("api_key", "")),
+            api_key_header=str(options.get("api_key_header", "authorization")),
+            timeout_s=float(options.get("timeout_s", 10.0)),
+        )
+
     registry.register(Capability.TEXT, NAME, text)
+    registry.register(Capability.EMBEDDING, NAME, embedding)

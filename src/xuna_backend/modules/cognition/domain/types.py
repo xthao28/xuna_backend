@@ -21,6 +21,7 @@ class Capability(StrEnum):
     SPEECH_DETECTION = "speech_detection"  # VAD (VOICE-gated)
     SPEECH_RECOGNITION = "speech_recognition"  # ASR (VOICE-gated)
     SPEECH_SYNTHESIS = "speech_synthesis"  # TTS (VOICE-gated)
+    EMBEDDING = "embedding"  # text embedding vector calculation (KD-4)
 
 
 class Role(StrEnum):
@@ -118,3 +119,25 @@ class Transcript:
     text: str
     final: bool
     untrusted: bool = field(default=True, init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingRequest:
+    """Request embedding vectors for a batch of text strings (KD-4)."""
+
+    texts: tuple[str, ...]
+    timeout_s: float = 10.0
+
+    def __post_init__(self) -> None:
+        if not self.texts:
+            raise ValueError("texts must not be empty")
+        if not 0 < self.timeout_s <= 60:
+            raise ValueError("timeout_s out of range")
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingResult:
+    """Result vector for each requested input text."""
+
+    embeddings: tuple[tuple[float, ...], ...]
+    model: str = ""

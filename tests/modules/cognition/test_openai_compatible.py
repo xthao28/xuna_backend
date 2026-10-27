@@ -11,6 +11,7 @@ from xuna_backend.modules.cognition.domain.types import (
     ChatEvent,
     ChatFinished,
     ChatRequest,
+    EmbeddingRequest,
     Message,
     Role,
     TextDelta,
@@ -19,6 +20,7 @@ from xuna_backend.modules.cognition.domain.types import (
 )
 from xuna_backend.modules.cognition.infrastructure import openai_compatible
 from xuna_backend.modules.cognition.infrastructure.openai_compatible import (
+    OpenAICompatibleEmbedder,
     OpenAICompatibleTextGenerator,
 )
 
@@ -169,3 +171,65 @@ def test_reasoning_effort_is_sent_only_when_configured() -> None:
     assert bodies[1]["reasoning_effort"] == "none"
     with pytest.raises(ValueError):
         OpenAICompatibleTextGenerator("http://gw/v1", "m", reasoning_effort="x; y")
+
+
+def test_embedder_returns_vectors() -> None:
+    seen: dict[str, object] = {}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        data = {
+            "model": "text-embedding-3-small",
+            "data": [
+                {"index": 0, "embedding": [0.1, 0.2, 0.3]},
+                {"index": 1, "embedding": [0.4, 0.5, 0.6]},
+            ],
+        }
+        return httpx.Response(200, json=data)
+
+    embedder = OpenAICompatibleEmbedder(
+        "http://ai.internal:8000/v1",
+        "text-embedding-3-small",
+        api_key="k",
+        transport=httpx.MockTransport(handle),
+    )
+    req = EmbeddingRequest(texts=("xin chào", "tạm biệt"))
+    res = asyncio.run(embedder.embed(req))
+
+    assert str(seen["url"]) == "http://ai.internal:8000/v1/embeddings"
+    assert seen["auth"] == "Bearer k"
+    assert seen["body"] == {
+        "model": "text-embedding-3-small",
+        "input": ["xin chào", "tạm biệt"],
+    }
+    assert res.model == "text-embedding-3-small"
+    assert len(res.embeddings) == 2
+    assert res.embeddings[0] == (0.1, 0.2, 0.3)
+    assert res.embeddings[1] == (0.4, 0.5, 0.6)
+
+
+def test_embedder_maps_http_error_to_provider_unavailable() -> None:
+    def handle(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"Internal Server Error")
+
+    embedder = OpenAICompatibleEmbedder(
+        "http://ai.internal:8000/v1",
+        "embed-v1",
+        transport=httpx.MockTransport(handle),
+    )
+    req = EmbeddingRequest(texts=("test",))
+    with pytest.raises(ProviderUnavailableError):
+        asyncio.run(embedder.embed(req))
+
+
+def test_registry_creates_embedder() -> None:
+    registry = ProviderRegistry()
+    openai_compatible.register(registry)
+    embedder_inst = registry.create(
+        Capability.EMBEDDING,
+        "openai_compatible",
+        {"base_url": "http://ai:8000/v1", "model": "m1"},
+    )
+    assert isinstance(embedder_inst, OpenAICompatibleEmbedder)

@@ -25,6 +25,7 @@ from xuna_backend.modules.audit.infrastructure.repository import SqlAuditLog
 from xuna_backend.modules.backups.api.routes import router as backups_router
 from xuna_backend.modules.backups.infrastructure.repository import SqlBackupRepository
 from xuna_backend.modules.cognition.application.ports import (
+    Embedder,
     SpeechRecognizer,
     SpeechSynthesizer,
     TextGenerator,
@@ -122,6 +123,25 @@ def speech_synthesizer(settings: Settings) -> SpeechSynthesizer | None:
     )
 
 
+def embedder(settings: Settings) -> Embedder | None:
+    """None when embedding is off (lexical matching used); fails at startup if misconfigured."""
+    if not settings.embedding_provider:
+        return None
+    registry = ProviderRegistry()
+    openai_compatible.register(registry)
+    options = {
+        "base_url": settings.embedding_base_url,
+        "model": settings.embedding_model,
+        "api_key": settings.embedding_api_key,
+        "api_key_header": settings.embedding_api_key_header,
+        "timeout_s": settings.embedding_timeout_s,
+    }
+    return cast(
+        Embedder,
+        registry.create(Capability.EMBEDDING, settings.embedding_provider, options),
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -129,6 +149,7 @@ def create_app(
     generator: TextGenerator | None = None,
     recognizer: SpeechRecognizer | None = None,
     synthesizer: SpeechSynthesizer | None = None,
+    embedder_instance: Embedder | None = None,
 ) -> FastAPI:
     resolved = settings or Settings.from_env()
     configure_logging(resolved.log_level)
@@ -163,6 +184,7 @@ def create_app(
     app.state.text_generator = generator or text_generator(resolved)
     app.state.speech_recognizer = recognizer or speech_recognizer(resolved)
     app.state.speech_synthesizer = synthesizer or speech_synthesizer(resolved)
+    app.state.embedder = embedder_instance or embedder(resolved)
     install_error_handlers(app)
     install_request_context(app)
     app.include_router(health_router)

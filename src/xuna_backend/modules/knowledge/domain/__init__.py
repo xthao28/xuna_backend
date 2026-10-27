@@ -1,5 +1,9 @@
-"""Knowledge domain package."""
-
+from xuna_backend.modules.knowledge.domain.clustering import (
+    check_cluster_duplicate,
+    cluster_candidates_lexical,
+    derive_cluster_name_and_description,
+    is_suggestion_expired,
+)
 from xuna_backend.modules.knowledge.domain.entities import (
     DomainOrigin,
     DomainStatus,
@@ -29,9 +33,13 @@ __all__ = [
     "RelationKind",
     "SuggestionKind",
     "SuggestionStatus",
+    "check_cluster_duplicate",
+    "cluster_candidates_lexical",
     "compute_fact_key",
     "compute_lexical_similarity",
+    "derive_cluster_name_and_description",
     "extract_syllables_and_bigrams",
+    "is_suggestion_expired",
     "normalize_vietnamese",
     "remove_accents",
 ]
