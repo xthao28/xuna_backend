@@ -16,6 +16,8 @@ dependencies = [
     # Phone voice V1 TTS (owner D16, 2026-10-22). LGPL-3.0, unofficial free service.
     # 7.3.1 because Microsoft's handshake change broke 7.2.x (403) in October 2026.
     "edge-tts==7.3.1",
+    # WebSocket server for uvicorn: device-direct /v1/devices/connect and voice (owner 2026-10-27). BSD-3.
+    "websockets==13.1",
 ]
 
 [project.optional-dependencies]

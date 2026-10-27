@@ -58,3 +58,11 @@ Text provider: `XUNA_TEXT_PROVIDER` (`echo` default, or `openai_compatible`), `X
 Phone-free end-to-end check (simulated board + app-shaped requests against a real server with a local test issuer; adds rows, so use a dev/test database): `.venv/bin/python scripts/device_e2e.py --database-url postgresql+psycopg://$(whoami)@localhost/xuna_test`.
 
 CI: `.github/workflows/ci.yml` runs `scripts/check.sh` against PostgreSQL 16.
+
+## Windows / device-direct dev server (2026-10-27)
+
+```powershell
+.venv\Scripts\python.exe scripts\serve.py --host 0.0.0.0 --port 8443 --tls $env:USERPROFILE\.xuna\dev-ca
+```
+
+Sets the Selector event loop (psycopg async does not run on Windows' default Proactor loop), serves WebSockets (`websockets`) and uses the certificate from `scripts/make_dev_ca.py`.

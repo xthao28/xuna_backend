@@ -71,6 +71,14 @@ class Owner:
         return {"Authorization": f"Bearer {self.issuer.token(self.subject)}"}
 
     def bind(self) -> "Owner":
+        self._bind(expected=201)
+        return self
+
+    def bind_again(self) -> "Owner":
+        self._bind(expected=201)  # restored after an unbind counts as a new binding
+        return self
+
+    def _bind(self, expected: int) -> None:
         challenge = self.client.post(
             "/v1/devices/challenges",
             json={"schemaVersion": 1, "petId": PET},
@@ -98,9 +106,8 @@ class Owner:
             },
             headers={**self.headers(), **idem()},
         )
-        assert response.status_code == 201, response.text
+        assert response.status_code == expected, response.text
         self.device_id = response.json()["deviceId"]
-        return self
 
     def consent(self, on: bool, expected_version: int = 0) -> "Owner":
         response = self.client.put(
@@ -240,6 +247,22 @@ def test_proof_from_an_earlier_session_is_refused(client: TestClient, issuer: Lo
         hello(ws)
         prove(ws, owner.device, old_nonce)  # signed for another challenge
         assert closed_with(ws) == (1008, "unauthorized")
+
+
+def test_pet_id_that_is_not_a_uuid4_is_refused(client: TestClient) -> None:
+    with client.websocket_connect("/v1/devices/connect", subprotocols=PROTOCOL) as ws:
+        ws.send_text(
+            json.dumps(
+                {
+                    "type": "hello",
+                    "schemaVersion": 1,
+                    "petId": "0123456789abcdef0123456789abcdef",
+                    "firmware": "0.2.0-mvp",
+                    "capabilities": [],
+                }
+            )
+        )
+        assert closed_with(ws) == (1002, "unsupported_protocol")
 
 
 def test_missing_subprotocol_is_refused(client: TestClient) -> None:
@@ -395,3 +418,39 @@ def test_only_projections_may_exceed_four_kib(client: TestClient, issuer: LocalI
         assert ws.receive_json()["type"] == "ready"
         ws.send_text(json.dumps({"type": "ping", "schemaVersion": 1, "seq": 1, "pad": "x" * 5000}))
         assert closed_with(ws) == (1009, "frame_too_large")
+
+
+def test_unbind_refuses_the_board_keeps_data_and_rebinds(
+    client: TestClient, issuer: LocalIssuer
+) -> None:
+    owner = Owner(client, issuer).bind().consent(True)
+    with client.websocket_connect("/v1/devices/connect", subprotocols=PROTOCOL) as ws:
+        prove(ws, owner.device, hello(ws))
+        assert ws.receive_json()["type"] == "ready"
+        assert send_projection(ws, 38)["result"] == "stored"
+        unbind = client.delete(f"/v1/pets/{PET}/device", headers={**owner.headers(), **idem()})
+        assert unbind.status_code == 204, unbind.text
+        ws.send_text('{"type":"ping","schemaVersion":1,"seq":4}')
+        assert closed_with(ws) == (1008, "not_bound")  # the live session ends
+    pet = client.get(f"/v1/pets/{PET}", headers=owner.headers()).json()
+    assert pet["deviceBound"] is False
+    latest = client.get(f"/v1/pets/{PET}/projections/latest", headers=owner.headers())
+    assert latest.status_code == 200 and latest.json()["snapshotGeneration"] == 38  # data kept
+    with client.websocket_connect("/v1/devices/connect", subprotocols=PROTOCOL) as ws:
+        prove(ws, owner.device, hello(ws))
+        assert closed_with(ws) == (1008, "not_bound")
+    again = client.delete(f"/v1/pets/{PET}/device", headers={**owner.headers(), **idem()})
+    assert again.status_code == 204  # unbinding twice changes nothing
+    actions = owner.audit_actions()
+    assert actions.count("pet.unbound") == 1 and "device.rejected" in actions
+
+    owner.bind_again()  # a fresh bind proof with the same board key
+    assert client.get(f"/v1/pets/{PET}", headers=owner.headers()).json()["deviceBound"] is True
+    connect_ready(client, owner).__exit__(None, None, None)
+
+
+def test_unbind_another_owners_pet_is_not_found(client: TestClient, issuer: LocalIssuer) -> None:
+    Owner(client, issuer).bind()
+    stranger = Owner(client, issuer)
+    response = client.delete(f"/v1/pets/{PET}/device", headers={**stranger.headers(), **idem()})
+    assert response.status_code == 404

@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, Request
+from fastapi import APIRouter, Header, Request, Response
 from fastapi.responses import JSONResponse
 
 from xuna_backend.core.db import commit_or_conflict
@@ -27,6 +27,7 @@ from xuna_backend.modules.identity.application.use_cases import (
     get_owned_pet,
     issue_challenge,
     list_pets,
+    unbind_pet,
 )
 from xuna_backend.modules.identity.domain.entities import Pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
@@ -61,6 +62,7 @@ def _pet_body(pet: Pet) -> dict[str, Any]:
         "origin": pet.origin.value,
         "lastGeneration": pet.last_generation,
         "boundAt": pet.bound_at.astimezone(UTC).isoformat(),
+        "deviceBound": pet.device_bound,
     }
 
 
@@ -174,3 +176,45 @@ async def get_pet(
     except IdentityError as error:
         raise _problem(error) from error
     return _pet_body(pet)
+
+
+@router.delete("/pets/{pet_id}/device", status_code=HTTPStatus.NO_CONTENT)
+async def unbind_device(
+    pet_id: str,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+    idempotency_key: IdempotencyKey = None,
+) -> Response:
+    """Unbinds the board: its key is revoked, the pet's cloud data stays."""
+    try:
+        parsed = PetId(pet_id)
+    except ValueError as error:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
+    now = datetime.now(UTC)
+
+    async def action() -> StoredResponse:
+        audit_for: Callable[[object], AuditLog] = state(request, "audit_log")
+        await unbind_pet(
+            _repo(request, session),
+            audit_for(session),
+            owner.owner_id,
+            parsed,
+            now,
+            request.state.request_id,
+        )
+        return StoredResponse(HTTPStatus.NO_CONTENT, {})
+
+    try:
+        await run_once(
+            session,
+            owner_id=owner.owner_id,
+            key=parse_key(idempotency_key),
+            fingerprint=request_hash("unbind", {"petId": parsed.value}),
+            now=now,
+            action=action,
+        )
+    except IdentityError as error:
+        raise _problem(error) from error
+    await commit_or_conflict(session)
+    return Response(status_code=HTTPStatus.NO_CONTENT)

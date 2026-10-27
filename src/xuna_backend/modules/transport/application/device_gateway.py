@@ -96,6 +96,8 @@ async def open_device_session(
     pet = await identity.get_pet(proof.pet_id)
     if pet is None:
         raise SessionRejected(NOT_BOUND)
+    if not pet.device_bound:
+        raise await _reject(audit, pet, NOT_BOUND, now, request_id)
     if proof.public_key is not None and proof.public_key != pet.device_public_key:
         raise await _reject(audit, pet, UNAUTHORIZED, now, request_id)
     message = proof_message(
@@ -137,7 +139,7 @@ async def touch_device_session(
 ) -> SessionClose | None:
     """Heartbeat: None keeps the session; otherwise the close to send."""
     pet = await identity.get_pet(session.pet_id)
-    if pet is None or pet.device_id != session.device_id:
+    if pet is None or pet.device_id != session.device_id or not pet.device_bound:
         return NOT_BOUND
     if not await _consented(consent, pet.owner_id):
         return CONSENT_REQUIRED

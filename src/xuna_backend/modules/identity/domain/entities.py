@@ -23,6 +23,12 @@ class Pet:
     device_public_key: bytes
     last_generation: int
     bound_at: datetime
+    # Set when the owner unbound the board (device key revoked, data kept).
+    device_revoked_at: datetime | None = None
+
+    @property
+    def device_bound(self) -> bool:
+        return self.device_revoked_at is None
 
 
 @dataclass(frozen=True, slots=True)

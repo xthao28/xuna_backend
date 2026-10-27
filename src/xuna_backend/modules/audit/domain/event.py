@@ -20,6 +20,7 @@ MAX_METADATA = 8
 class AuditAction(StrEnum):
     PET_BOUND = "pet.bound"
     PET_BIND_REJECTED = "pet.bind_rejected"
+    PET_UNBOUND = "pet.unbound"
     CONSENT_CHANGED = "consent.changed"
     PROJECTION_INGESTED = "projection.ingested"
     PROJECTION_REJECTED = "projection.rejected"

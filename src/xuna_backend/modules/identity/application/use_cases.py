@@ -131,6 +131,8 @@ async def _bind(
     if existing is not None:
         if existing.owner_id != owner_id:
             raise IdentityError("pet_already_bound")
+        if not existing.device_bound:  # bound again after an unbind: data kept
+            return await repo.restore_device(command.pet_id, command.public_key, now), True
         if existing.device_public_key != command.public_key:
             raise IdentityError("device_key_mismatch")
         return existing, False
@@ -143,6 +145,32 @@ async def _bind(
         now=now,
     )
     return pet, True
+
+
+async def unbind_pet(
+    repo: IdentityRepository,
+    audit: AuditLog,
+    owner_id: uuid.UUID,
+    pet_id: PetId,
+    now: datetime,
+    request_id: str = "",
+) -> None:
+    """Revokes the board's key (owner 2026-10-27): the board is refused on its
+    next connect or heartbeat; projections, backups and memories stay. Binding
+    again needs a fresh bind proof. Unbinding twice changes nothing."""
+    pet = await get_owned_pet(repo, owner_id, pet_id)
+    if not pet.device_bound:
+        return
+    await repo.revoke_device(pet_id, now)
+    await audit.record(
+        AuditEvent(
+            owner_id=owner_id,
+            action=AuditAction.PET_UNBOUND,
+            occurred_at=now,
+            subject=pet_id.value,
+            request_id=request_id,
+        )
+    )
 
 
 async def list_pets(repo: IdentityRepository, owner_id: uuid.UUID) -> list[Pet]:

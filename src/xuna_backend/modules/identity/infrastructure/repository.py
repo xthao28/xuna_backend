@@ -165,14 +165,44 @@ class SqlIdentityRepository:
             raise RuntimeError(f"pet {pet_id.value} missing after brain rotation")
         return pet
 
+    async def revoke_device(self, pet_id: PetId, now: datetime) -> None:
+        await self._session.execute(
+            update(DeviceRow)
+            .where((DeviceRow.pet_id == pet_id.value) & (DeviceRow.revoked_at.is_(None)))
+            .values(revoked_at=now)
+        )
+        await self._session.flush()
+
+    async def restore_device(self, pet_id: PetId, public_key: bytes, now: datetime) -> Pet:
+        same_key = await self._session.scalar(
+            select(DeviceRow).where(
+                (DeviceRow.pet_id == pet_id.value) & (DeviceRow.public_key == public_key)
+            )
+        )
+        if same_key is None:
+            return await self.rebind_device(pet_id, public_key, now)
+        same_key.revoked_at = None  # public keys are unique: reuse that row
+        same_key.bound_at = now
+        await self._session.flush()
+        pet = await self.get_pet(pet_id)
+        if pet is None:
+            raise RuntimeError(f"pet {pet_id.value} missing after restore")
+        return pet
+
     async def _pets(self, condition: object) -> list[Pet]:
+        # Each pet with its active device, or its newest revoked one (unbound).
         result = await self._session.execute(
             select(PetRow, BrainRow, DeviceRow)
             .join(BrainRow, (BrainRow.pet_id == PetRow.pet_id) & (BrainRow.status == "active"))
-            .join(DeviceRow, (DeviceRow.pet_id == PetRow.pet_id) & (DeviceRow.revoked_at.is_(None)))
+            .join(DeviceRow, DeviceRow.pet_id == PetRow.pet_id)
             .where(condition)  # type: ignore[arg-type]
-            .order_by(PetRow.bound_at)
+            .order_by(PetRow.bound_at, DeviceRow.bound_at)
         )
+        chosen: dict[str, tuple[PetRow, BrainRow, DeviceRow]] = {}
+        for pet, brain, device in result.all():
+            current = chosen.get(pet.pet_id)
+            if current is None or current[2].revoked_at is not None:
+                chosen[pet.pet_id] = (pet, brain, device)
         return [
             Pet(
                 pet_id=PetId(pet.pet_id),
@@ -183,6 +213,7 @@ class SqlIdentityRepository:
                 device_public_key=device.public_key,
                 last_generation=pet.last_generation,
                 bound_at=pet.bound_at,
+                device_revoked_at=device.revoked_at,
             )
-            for pet, brain, device in result.all()
+            for pet, brain, device in chosen.values()
         ]

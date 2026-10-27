@@ -113,6 +113,10 @@ async def _handshake(websocket: WebSocket, limits: GatewayLimits) -> DeviceSessi
     hello = parse_device_frame(raw)
     if not isinstance(hello, HelloFrame):
         raise SessionRejected(UNAUTHORIZED)  # steps out of order
+    try:
+        pet_id = PetId(hello.petId)
+    except ValueError as error:  # 32 hex but not a device-issued UUIDv4
+        raise SessionRejected(UNSUPPORTED_PROTOCOL) from error
     challenge_limiter: SlidingWindowLimiter = app.state.device_challenge_limiter
     if not challenge_limiter.allow(hello.petId, time.monotonic()):
         raise SessionRejected(RATE_LIMITED)
@@ -124,7 +128,7 @@ async def _handshake(websocket: WebSocket, limits: GatewayLimits) -> DeviceSessi
     if not isinstance(proof, ProofFrame) or time.monotonic() - issued > limits.challenge_ttl_s:
         raise SessionRejected(UNAUTHORIZED)
     command = SessionProof(
-        pet_id=PetId(hello.petId),
+        pet_id=pet_id,
         nonce=nonce,
         generation=proof.generation,
         public_key=(

@@ -131,8 +131,8 @@ async def ingest_projection(
         except ValueError as error:
             raise MemoryError("invalid_signature") from error
 
-        if pub_key_bytes != pet.device_public_key:
-            raise MemoryError("device_key_mismatch")
+        if pub_key_bytes != pet.device_public_key or not pet.device_bound:
+            raise MemoryError("device_key_mismatch")  # an unbound board attests nothing
 
         compact_payload = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode(
             "utf-8"
