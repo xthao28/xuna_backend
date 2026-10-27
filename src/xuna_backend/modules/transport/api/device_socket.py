@@ -31,7 +31,9 @@ from xuna_backend.modules.identity.domain.pet_id import PetId
 from xuna_backend.modules.transport.application.device_frames import (
     HelloFrame,
     PingFrame,
+    ProjectionFrame,
     ProofFrame,
+    ack_frame,
     challenge_frame,
     decode_b64,
     parse_device_frame,
@@ -42,6 +44,7 @@ from xuna_backend.modules.transport.application.device_gateway import (
     DeviceSession,
     SessionProof,
     close_device_session,
+    ingest_session_projection,
     open_device_session,
     touch_device_session,
 )
@@ -152,13 +155,38 @@ async def _handshake(websocket: WebSocket, limits: GatewayLimits) -> DeviceSessi
 async def _serve(websocket: WebSocket, session: DeviceSession, limits: GatewayLimits) -> None:
     app = websocket.app
     while True:
-        raw = await _receive(websocket, limits.idle_timeout_s, limits.max_frame_bytes, IDLE_TIMEOUT)
-        frame = parse_device_frame(raw)
+        raw = await _receive(
+            websocket, limits.idle_timeout_s, limits.max_projection_bytes, IDLE_TIMEOUT
+        )
+        oversize = len(raw.encode()) > limits.max_frame_bytes  # only projections may be large
+        try:
+            frame = parse_device_frame(raw)
+        except SessionRejected:
+            if oversize:
+                raise SessionRejected(FRAME_TOO_LARGE) from None
+            raise
+        if oversize and not isinstance(frame, ProjectionFrame):
+            raise SessionRejected(FRAME_TOO_LARGE)
+        if isinstance(frame, ProjectionFrame):
+            async with app.state.database.sessions() as db:
+                repos = _Repos(app, db)
+                result = await ingest_session_projection(
+                    app.state.memory_repository(db),
+                    repos.identity,
+                    repos.verifier,
+                    repos.consent,
+                    repos.audit,
+                    session,
+                    frame.generation,
+                    frame.export,
+                    datetime.now(UTC),
+                )
+                await db.commit()
+            logger.info("device projection result=%s", result)
+            await websocket.send_text(ack_frame(frame.generation, result))
+            continue
         if not isinstance(frame, PingFrame):
-            # hello/proof again are out of order; projections arrive with DC-5.
-            raise SessionRejected(
-                UNAUTHORIZED if frame.type in ("hello", "proof") else UNSUPPORTED_PROTOCOL
-            )
+            raise SessionRejected(UNAUTHORIZED)  # hello/proof again: out of order
         async with app.state.database.sessions() as db:
             repos = _Repos(app, db)
             close = await touch_device_session(

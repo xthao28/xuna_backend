@@ -57,11 +57,15 @@ async def ingest_projection(
     consent: ConsentState,
     now: datetime,
     request_id: str = "",
+    session_attested: bool = False,
 ) -> tuple[Projection, bool]:
     """Ingests a verified `xuna.export.v1` projection.
 
     Returns (projection, created). If identical projection already exists, returns
     (existing, False). If generation is stale or conflict occurs, raises MemoryError.
+    `session_attested` marks a projection the board sent over its own proved
+    device-direct session (DC-5, contract "Device connection"); it needs no
+    separate per-projection proof.
     """
     # 1. Consent check: U1 required to store any aggregate projection
     if not consent.allows(ConsentClass.AGGREGATE_METRICS):
@@ -104,7 +108,7 @@ async def ingest_projection(
             raise MemoryError("conflict_stale_generation")
 
     # 6. Device proof verification (if provided)
-    device_attested = False
+    device_attested = session_attested
     if device_proof is not None:
         try:
             challenge_id = uuid.UUID(device_proof.challengeId)

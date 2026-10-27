@@ -1,6 +1,7 @@
 """`/v1/devices/connect` end to end against PostgreSQL (DC-3, contract "Device connection")."""
 
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -311,3 +312,86 @@ def test_consent_withdrawn_ends_live_session(client: TestClient, issuer: LocalIs
         owner.consent(False, expected_version=1)
         ws.send_text('{"type":"ping","schemaVersion":1,"seq":3}')
         assert closed_with(ws) == (1008, "consent_required")
+
+
+GOLDEN = ROOT / "tests" / "fixtures" / "xuna_export_v1_golden.json"
+
+
+def envelope(generation: int = 38, tamper: bool = False) -> dict[str, Any]:
+    """The Dart golden, re-hashed for another generation when asked."""
+    document: dict[str, Any] = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    payload = document["payload"]
+    payload["identity"]["snapshotGeneration"] = generation
+    compact = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+    document["sha256"] = hashlib.sha256(compact.encode()).hexdigest()
+    if tamper:
+        payload["life"]["feedbackCount"] += 1
+    return document
+
+
+def send_projection(ws: WebSocketTestSession, generation: int, **kwargs: Any) -> dict[str, Any]:
+    ws.send_text(
+        json.dumps(
+            {
+                "type": "projection",
+                "schemaVersion": 1,
+                "generation": generation,
+                "export": envelope(generation, **kwargs),
+            }
+        )
+    )
+    ack: dict[str, Any] = ws.receive_json()
+    assert ack["type"] == "ack" and ack["ref"] == "projection"
+    assert ack["generation"] == generation
+    return ack
+
+
+def test_projection_over_the_session_is_stored_once(
+    client: TestClient, issuer: LocalIssuer
+) -> None:
+    owner = Owner(client, issuer).bind().consent(True)
+    with client.websocket_connect("/v1/devices/connect", subprotocols=PROTOCOL) as ws:
+        prove(ws, owner.device, hello(ws))
+        assert ws.receive_json()["type"] == "ready"
+        assert send_projection(ws, 38)["result"] == "stored"
+        assert send_projection(ws, 38)["result"] == "duplicate"
+        assert send_projection(ws, 37)["result"] == "stale"
+        assert send_projection(ws, 39, tamper=True)["result"] == "invalid"
+        assert send_projection(ws, 40)["result"] == "stored"
+        ws.send_text('{"type":"ping","schemaVersion":1,"seq":9}')
+        assert ws.receive_json()["seq"] == 9  # the session lives on after a refusal
+    latest = client.get(f"/v1/pets/{PET}/projections/latest", headers=owner.headers())
+    assert latest.status_code == 200, latest.text
+    body = latest.json()
+    assert body["snapshotGeneration"] == 40 and body["deviceAttested"] is True
+
+
+def test_projection_without_u1_is_acknowledged_as_consent_required(
+    client: TestClient, issuer: LocalIssuer
+) -> None:
+    owner = Owner(client, issuer).bind()
+    response = client.put(
+        "/v1/consents",
+        json={
+            "schemaVersion": 1,
+            "aggregateMetrics": False,
+            "experienceEvents": True,
+            "conversationText": False,
+            "expectedVersion": 0,
+        },
+        headers={**owner.headers(), **idem()},
+    )
+    assert response.status_code == 200
+    with client.websocket_connect("/v1/devices/connect", subprotocols=PROTOCOL) as ws:
+        prove(ws, owner.device, hello(ws))
+        assert ws.receive_json()["type"] == "ready"  # U2 alone opens the session
+        assert send_projection(ws, 38)["result"] == "consent_required"
+
+
+def test_only_projections_may_exceed_four_kib(client: TestClient, issuer: LocalIssuer) -> None:
+    owner = Owner(client, issuer).bind().consent(True)
+    with client.websocket_connect("/v1/devices/connect", subprotocols=PROTOCOL) as ws:
+        prove(ws, owner.device, hello(ws))
+        assert ws.receive_json()["type"] == "ready"
+        ws.send_text(json.dumps({"type": "ping", "schemaVersion": 1, "seq": 1, "pad": "x" * 5000}))
+        assert closed_with(ws) == (1009, "frame_too_large")

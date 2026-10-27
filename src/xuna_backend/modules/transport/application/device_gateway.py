@@ -22,6 +22,8 @@ from xuna_backend.modules.identity.application.ports import (
 from xuna_backend.modules.identity.domain.device_proof import ProofPurpose, proof_message
 from xuna_backend.modules.identity.domain.entities import Pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
+from xuna_backend.modules.memory.application.ports import MemoryRepository
+from xuna_backend.modules.memory.application.use_cases import MemoryError, ingest_projection
 from xuna_backend.modules.transport.application.ports import TransportStatusRepository
 from xuna_backend.modules.transport.domain.device_session import (
     CONSENT_REQUIRED,
@@ -160,3 +162,45 @@ def _status(
         firmware=session.firmware,
         connected_at=session.connected_at,
     )
+
+
+# MemoryError code → `ack.result` (contract "Device connection").
+_ACK_FOR_ERROR = {
+    "consent_required": "consent_required",
+    "projection_conflict": "stale",
+    "conflict_stale_generation": "stale",
+}
+
+
+async def ingest_session_projection(
+    memory: MemoryRepository,
+    identity: IdentityRepository,
+    verifier: SignatureVerifier,
+    consent: ConsentRepository,
+    audit: AuditLog,
+    session: DeviceSession,
+    generation: int,
+    envelope: dict[str, object],
+    now: datetime,
+) -> str:
+    """Stores a projection the board sent over its proved session (DC-5) through
+    the normal projection rules; returns the `ack` result. Rejections are
+    answered, never fatal to the session."""
+    try:
+        _, created = await ingest_projection(
+            memory,
+            identity,
+            verifier,
+            audit,
+            session.owner_id,
+            session.pet_id,
+            generation,
+            dict(envelope),
+            None,
+            await consent.current(session.owner_id),
+            now,
+            session_attested=True,
+        )
+    except MemoryError as error:
+        return _ACK_FOR_ERROR.get(error.code, "invalid")
+    return "stored" if created else "duplicate"

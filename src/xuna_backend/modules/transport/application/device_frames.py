@@ -96,6 +96,18 @@ def ready_frame(server_time: str, heartbeat_s: int) -> str:
     )
 
 
+def ack_frame(generation: int, result: str) -> str:
+    return _dump(
+        {
+            "type": "ack",
+            "schemaVersion": 1,
+            "ref": "projection",
+            "generation": generation,
+            "result": result,
+        }
+    )
+
+
 def pong_frame(seq: int) -> str:
     return _dump({"type": "pong", "schemaVersion": 1, "seq": seq})
 
