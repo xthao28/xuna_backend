@@ -184,6 +184,18 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
     sample_rate = int(audio_params.get("sampleRate", 16000))
 
     asr_auto_detect = getattr(getattr(app.state, "settings", None), "asr_auto_detect", True)
+    locale_raw = hello.get("locale")
+    target_locale: Locale | None = None
+    if locale_raw:
+        try:
+            target_locale = Locale(locale_raw)
+        except ValueError:
+            target_locale = None
+    if target_locale is None and not asr_auto_detect:
+        target_locale = Locale.VI
+
+    chosen_voice = hello.get("voice")
+
     session = VoiceSession(
         session_id=session_id,
         pet_id=pet_id,
@@ -191,7 +203,8 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
         recognizer=getattr(app.state, "speech_recognizer", None),
         generator=app.state.text_generator,
         synthesizer=getattr(app.state, "speech_synthesizer", None),
-        locale=None if asr_auto_detect else Locale.VI,
+        locale=target_locale,
+        voice=chosen_voice,
         speak=bool(hello.get("speak", True)),
         sample_rate=sample_rate,
     )
@@ -239,10 +252,15 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
                     turn_text = str(payload.get("text", "")).strip()
                     context = _parse_turn_context(payload.get("context", {}))
+                    turn_voice = payload.get("voice")
 
-                    async def run_reply(target_text: str, ctx: TurnContext) -> None:
+                    async def run_reply(
+                        target_text: str, ctx: TurnContext, v: str | None = None
+                    ) -> None:
                         try:
-                            async for event in session.stream_turn_reply(target_text, ctx):
+                            async for event in session.stream_turn_reply(
+                                target_text, ctx, voice=v
+                            ):
                                 if isinstance(event, TextDelta):
                                     await websocket.send_json(
                                         {"type": "reply.delta", "text": event.text}
@@ -277,7 +295,9 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                             logger.warning(f"Voice websocket reply error: {e}")
                             await websocket.send_json({"type": "error", "code": "reply_failed"})
 
-                    active_turn_task = asyncio.create_task(run_reply(turn_text, context))
+                    active_turn_task = asyncio.create_task(
+                        run_reply(turn_text, context, v=turn_voice)
+                    )
 
                 elif msg_type == "abort":
                     if active_turn_task and not active_turn_task.done():

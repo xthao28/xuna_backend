@@ -63,6 +63,7 @@ class VoiceSession:
         generator: TextGenerator,
         synthesizer: SpeechSynthesizer | None,
         locale: Locale | None = None,
+        voice: str | None = None,
         speak: bool = True,
         sample_rate: int = 16000,
     ) -> None:
@@ -73,6 +74,7 @@ class VoiceSession:
         self.generator = generator
         self.synthesizer = synthesizer
         self.locale = locale
+        self.voice = voice
         self.speak = speak
         self.sample_rate = sample_rate
 
@@ -119,6 +121,7 @@ class VoiceSession:
         self,
         text: str,
         context: TurnContext,
+        voice: str | None = None,
     ) -> AsyncIterator[SpokenTurnEvent | ChatEvent | ProviderFailed]:
         if not text.strip():
             self.state = SessionState.IDLE
@@ -128,8 +131,11 @@ class VoiceSession:
         try:
             req = build_request(text, context=context, locale=self.locale)
             text_events = chat_turn(self.generator, req)
+            chosen_voice = voice or self.voice
             if self.speak and self.synthesizer is not None:
-                async for event in spoken_turn(text_events, self.synthesizer, self.locale):
+                async for event in spoken_turn(
+                    text_events, self.synthesizer, self.locale, voice=chosen_voice
+                ):
                     yield event
             else:
                 async for event in text_events:
