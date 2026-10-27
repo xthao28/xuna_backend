@@ -31,6 +31,7 @@ from xuna_backend.modules.cognition.domain.types import (
 from xuna_backend.modules.consent.application.ports import ConsentRepository
 from xuna_backend.modules.consent.domain.consent import ConsentClass
 from xuna_backend.modules.conversation.application.chat_turn import (
+    GestureChosen,
     HistoryLine,
     PetAction,
     PetMood,
@@ -46,6 +47,7 @@ from xuna_backend.modules.conversation.application.voice_session import (
     VoiceSession,
     VoiceSessionError,
 )
+from xuna_backend.modules.conversation.domain.signals import conversation_signals
 from xuna_backend.modules.identity.application.ports import IdentityRepository
 from xuna_backend.modules.identity.domain.pet_id import PetId
 
@@ -103,6 +105,7 @@ def _parse_turn_context(raw: dict[str, Any]) -> TurnContext:
         history=tuple(history_items),
         pet=pet_self,
         confirmed_facts=tuple(raw.get("confirmedFacts", ())),
+        gestures=raw.get("gestures") is True,
     )
 
 
@@ -257,11 +260,18 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                     async def run_reply(
                         target_text: str, ctx: TurnContext, v: str | None = None
                     ) -> None:
+                        # PE-4c: same closed tags as the HTTP turn, sent with
+                        # `reply.finished` only; the app forwards them to the device.
+                        signals = {
+                            "signals": list(conversation_signals(target_text, len(ctx.history)))
+                        }
                         try:
-                            async for event in session.stream_turn_reply(
-                                target_text, ctx, voice=v
-                            ):
-                                if isinstance(event, TextDelta):
+                            async for event in session.stream_turn_reply(target_text, ctx, voice=v):
+                                if isinstance(event, GestureChosen):
+                                    await websocket.send_json(
+                                        {"type": "gesture", "name": event.gesture.value}
+                                    )
+                                elif isinstance(event, TextDelta):
                                     await websocket.send_json(
                                         {"type": "reply.delta", "text": event.text}
                                     )
@@ -279,6 +289,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                             "firstAudioMs": event.first_audio_ms,
                                             "spoken": event.spoken,
                                         }
+                                        | signals
                                     )
                                 elif isinstance(event, ChatFinished):
                                     await websocket.send_json(
@@ -288,6 +299,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                             "firstAudioMs": None,
                                             "spoken": False,
                                         }
+                                        | signals
                                     )
                         except asyncio.CancelledError:
                             pass

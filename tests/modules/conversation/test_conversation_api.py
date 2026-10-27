@@ -376,3 +376,32 @@ def test_conversation_injects_confirmed_facts_into_prompt(
     assert "Tên của bạn ấy là Thảo" in system_prompt
     assert "Màu yêu thích của bạn ấy là xanh ngọc" in system_prompt
     assert "Người bạn đang nói chuyện cùng tên là Thảo" in system_prompt
+
+
+def test_reply_gesture_is_sent_once_and_never_as_text(
+    setup: tuple[TestClient, RecordingGenerator], issuer: LocalIssuer
+) -> None:
+    # Owner 2026-10-27: an expression cue from a closed set, only when the app says
+    # the device can play it. The echo generator repeats the tag the owner typed.
+    client, generator = setup
+    h = headers(issuer)
+    bind(client, h)
+    opt_in_u3(client, h)
+    response = client.post(
+        f"/v1/conversations/{PET}/turns",
+        json={
+            "schemaVersion": 1,
+            "text": "<g:greet_nuzzle> chào <g:look_around>",
+            "gestures": True,
+        },
+        headers=h,
+    )
+    text = response.text
+    assert text.count("event: gesture") == 1
+    assert 'event: gesture\ndata: {"name": "greet_nuzzle"}' in text
+    deltas = [block for block in text.split("\n\n") if block.startswith("event: delta")]
+    assert deltas and not any("<g:" in block for block in deltas)
+    assert "<g:bounce_play>" in generator.requests[0].messages[0].content
+    plain = turn(client, h)
+    assert "event: gesture" not in plain.text  # type: ignore[attr-defined]
+    assert "<g:" not in generator.requests[1].messages[0].content

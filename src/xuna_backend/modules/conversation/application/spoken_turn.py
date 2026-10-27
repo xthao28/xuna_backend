@@ -25,7 +25,11 @@ from xuna_backend.modules.cognition.domain.types import (
     Locale,
     TextDelta,
 )
-from xuna_backend.modules.conversation.application.chat_turn import ProviderFailed
+from xuna_backend.modules.conversation.application.chat_turn import (
+    GestureChosen,
+    ProviderFailed,
+    TurnEvent,
+)
 from xuna_backend.modules.conversation.application.voice import (
     SentenceSplitter,
     speakable,
@@ -69,14 +73,16 @@ class SpokenFinished:
     first_audio_ms: int | None
 
 
-SpokenTurnEvent = ChatEvent | ProviderFailed | SpokenAudio | SpeechUnavailable | SpokenFinished
+SpokenTurnEvent = (
+    ChatEvent | ProviderFailed | GestureChosen | SpokenAudio | SpeechUnavailable | SpokenFinished
+)
 
 _DONE = object()
 _Job = tuple[str, asyncio.Task[tuple[bytes, str, int]]]
 
 
 async def spoken_turn(
-    events: AsyncIterator[ChatEvent | ProviderFailed],
+    events: AsyncIterator[TurnEvent],
     synthesizer: SpeechSynthesizer | None,
     locale: Locale | None = None,
     *,

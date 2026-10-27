@@ -10,6 +10,8 @@ Protocol tests:
 - Abort & Bye lifecycle
 """
 
+import json
+
 import pytest
 
 from tests.helpers import LocalIssuer
@@ -88,7 +90,7 @@ def test_ws_consent_required_when_voice_consent_denied(
 
 
 def test_ws_full_push_to_talk_and_reply_flow(database_url: str, issuer: LocalIssuer) -> None:
-    recognizer = FakeRecognizer(text="chào bé XUNA")
+    recognizer = FakeRecognizer(text="XUNA giỏi quá, thương bé ghê")
     synthesizer = FakeSynthesizer(pcm=False)
     with make(database_url, issuer, recognizer, synthesizer) as client:
         h = headers(issuer)
@@ -123,7 +125,7 @@ def test_ws_full_push_to_talk_and_reply_flow(database_url: str, issuer: LocalIss
             ws.send_json({"type": "listen.stop"})
             stt = ws.receive_json()
             assert stt["type"] == "stt.final"
-            assert stt["text"] == "chào bé XUNA"
+            assert stt["text"] == "XUNA giỏi quá, thương bé ghê"
             assert isinstance(stt["asrMs"], int)
 
             # 3. Commit turn with context
@@ -165,6 +167,10 @@ def test_ws_full_push_to_talk_and_reply_flow(database_url: str, issuer: LocalIss
             assert "tts.end" in event_types
             assert "reply.finished" in event_types
             assert len(audio_bytes_received) > 0
+            # Owner 2026-10-27: no gesture unless the app says the device can play one.
+            assert "gesture" not in event_types
+            # PE-4c: the WebSocket turn carries the same tags as the HTTP turn.
+            assert events[-1]["signals"] == ["praise", "affection"]
 
             # 4. Clean bye
             ws.send_json({"type": "bye"})
@@ -201,4 +207,41 @@ def test_ws_abort_barge_in(database_url: str, issuer: LocalIssuer) -> None:
             assert err["type"] == "error"
             assert err["code"] == "invalid_state"
 
+            ws.send_json({"type": "bye"})
+
+
+def test_ws_reply_gesture_comes_before_the_text(database_url: str, issuer: LocalIssuer) -> None:
+    # Owner 2026-10-27: the echo generator repeats the tag; it is sent as a
+    # `gesture` event once and never reaches the reply text or the speech.
+    with make(database_url, issuer, FakeRecognizer(), FakeSynthesizer(pcm=False)) as client:
+        h = headers(issuer)
+        bind(client, h)
+        consents(client, h, text=True, voice=True)
+
+        token = h["Authorization"].removeprefix("Bearer ")
+        with client.websocket_connect("/v1/voice") as ws:
+            ws.send_json(
+                {"type": "hello", "schemaVersion": 1, "auth": {"token": token}, "petId": PET}
+            )
+            assert ws.receive_json()["type"] == "hello.ok"
+            ws.send_json(
+                {
+                    "type": "turn.commit",
+                    "text": "<g:bounce_play> chơi nào",
+                    "context": {"gestures": True},
+                }
+            )
+            events = []
+            while True:
+                msg = ws.receive()
+                if msg.get("text"):
+                    parsed = json.loads(msg["text"])
+                    events.append(parsed)
+                    if parsed["type"] in ("reply.finished", "error"):
+                        break
+
+            assert events[0] == {"type": "gesture", "name": "bounce_play"}
+            replies = [e for e in events if e["type"] in ("reply.delta", "tts.start")]
+            assert replies and not any("<g:" in e["text"] for e in replies)
+            assert events[-1]["type"] == "reply.finished"
             ws.send_json({"type": "bye"})

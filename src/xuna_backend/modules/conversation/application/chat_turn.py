@@ -18,11 +18,14 @@ from xuna_backend.modules.cognition.application.ports import (
 from xuna_backend.modules.cognition.domain.language_detector import detect_text_language
 from xuna_backend.modules.cognition.domain.types import (
     ChatEvent,
+    ChatFinished,
     ChatRequest,
     Locale,
     Message,
     Role,
+    TextDelta,
 )
+from xuna_backend.modules.conversation.domain.gestures import GestureTagFilter, ReplyGesture
 
 MAX_INPUT_CHARS = 500
 MAX_HISTORY_LINES = 12
@@ -169,6 +172,8 @@ class TurnContext:
     confirmed_facts: tuple[str, ...] = field(default_factory=tuple)
     # KD-3: knowledge domains recall
     knowledge: tuple[str, ...] = field(default_factory=tuple)
+    # The connected device can play reply gestures (Track A "chỉ diễn" preview).
+    gestures: bool = False
 
     def __post_init__(self) -> None:
         if self.local_time is not None and self.local_time.utcoffset() is None:
@@ -255,7 +260,27 @@ def describe_context(context: TurnContext) -> str:
             + ". Hãy vận dụng những kiến thức này khi trả lời nếu phù hợp."
         )
 
+    if context.gestures:
+        lines.append(
+            "Bạn có thể kèm theo câu trả lời đúng một cử chỉ trên màn hình thiết bị, bằng cách "
+            "viết một thẻ ở ngay đầu câu trả lời, chọn một trong: <g:look_around> (ngó nghiêng), "
+            "<g:yawn_stretch> (ngáp và vươn vai), <g:bounce_play> (nhún nhảy vui vẻ), "
+            "<g:greet_nuzzle> (chào và dụi đầu thân mật). Chỉ dùng khi cử chỉ hợp với câu trả "
+            "lời, nếu không thì bỏ qua. Không viết thẻ ở chỗ khác và không nhắc đến thẻ."
+        )
+
     return " ".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class GestureChosen:
+    """The reply's expression cue, at most one per turn, sent as soon as it is read.
+
+    Untrusted model output from a closed set; the app checks it again and plays
+    it as a Track A preview, which never changes XUNA's life.
+    """
+
+    gesture: ReplyGesture
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,11 +316,26 @@ def build_request(
     )
 
 
-async def chat_turn(
-    generator: TextGenerator, request: ChatRequest
-) -> AsyncIterator[ChatEvent | ProviderFailed]:
+TurnEvent = ChatEvent | ProviderFailed | GestureChosen
+
+
+async def chat_turn(generator: TextGenerator, request: ChatRequest) -> AsyncIterator[TurnEvent]:
+    """Streams the reply with gesture tags removed from its text."""
+    tags = GestureTagFilter()
     try:
         async for event in generator.stream(request):
-            yield event
+            match event:
+                case TextDelta(text=text):
+                    clean, gesture = tags.feed(text)
+                    if gesture is not None:
+                        yield GestureChosen(gesture)
+                    if clean:
+                        yield TextDelta(clean)
+                case ChatFinished():
+                    if rest := tags.flush():
+                        yield TextDelta(rest)
+                    yield event
+                case _:
+                    yield event
     except ProviderUnavailableError:
         yield ProviderFailed()

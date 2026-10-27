@@ -2,8 +2,8 @@
 
 Protocol:
 Client -> Server: hello, listen.start, binary audio frames, listen.stop, turn.commit, abort, bye.
-Server -> Client: hello.ok, stt.final, reply.delta, tts.start, binary audio, tts.end,
-                  reply.finished, error.
+Server -> Client: hello.ok, stt.final, gesture, reply.delta, tts.start, binary audio,
+                  tts.end, reply.finished, error.
 """
 
 import time
@@ -16,12 +16,8 @@ from xuna_backend.modules.cognition.application.ports import (
     SpeechSynthesizer,
     TextGenerator,
 )
-from xuna_backend.modules.cognition.domain.types import (
-    ChatEvent,
-    Locale,
-)
+from xuna_backend.modules.cognition.domain.types import Locale
 from xuna_backend.modules.conversation.application.chat_turn import (
-    ProviderFailed,
     TurnContext,
     build_request,
     chat_turn,
@@ -122,7 +118,7 @@ class VoiceSession:
         text: str,
         context: TurnContext,
         voice: str | None = None,
-    ) -> AsyncIterator[SpokenTurnEvent | ChatEvent | ProviderFailed]:
+    ) -> AsyncIterator[SpokenTurnEvent]:
         if not text.strip():
             self.state = SessionState.IDLE
             return

@@ -37,6 +37,7 @@ from xuna_backend.modules.conversation.api.websocket import router as ws_router
 from xuna_backend.modules.conversation.application.chat_turn import (
     MAX_HISTORY_LINES,
     MAX_INPUT_CHARS,
+    GestureChosen,
     HistoryLine,
     PetAction,
     PetMood,
@@ -121,6 +122,8 @@ class TurnBody(BaseModel):
     clientTime: AwareDatetime | None = None
     history: list[HistoryLineBody] | None = Field(default=None, max_length=MAX_HISTORY_LINES)
     pet: PetSelfBody | None = None
+    # The connected device can play reply gestures (owner 2026-10-27).
+    gestures: bool = False
 
     knowledge: list[dict[str, Any]] | None = None
     extractKnowledge: bool = True
@@ -134,6 +137,7 @@ class TurnBody(BaseModel):
             self.clientTime is None
             and self.history is None
             and self.pet is None
+            and not self.gestures
             and not confirmed_facts
             and not knowledge
         ):
@@ -155,6 +159,7 @@ class TurnBody(BaseModel):
             ),
             confirmed_facts=confirmed_facts,
             knowledge=knowledge,
+            gestures=self.gestures,
         )
 
 
@@ -375,6 +380,8 @@ async def turn(
             match event:
                 case TextDelta(text=text):
                     yield _sse("delta", {"text": text})
+                case GestureChosen(gesture=gesture):
+                    yield _sse("gesture", {"name": gesture.value})
                 case ToolCallRequested():
                     continue  # no server tools enabled yet
                 case ChatFinished() as done:

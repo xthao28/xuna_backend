@@ -1,8 +1,18 @@
 """Persona rules of the text turn (no database)."""
 
+import asyncio
+from collections.abc import AsyncIterator
+
 import pytest
 
-from xuna_backend.modules.cognition.domain.types import Locale, Role
+from xuna_backend.modules.cognition.domain.types import (
+    ChatEvent,
+    ChatFinished,
+    ChatRequest,
+    Locale,
+    Role,
+    TextDelta,
+)
 from xuna_backend.modules.conversation.application.chat_turn import PERSONA_VI, build_request
 
 
@@ -159,3 +169,39 @@ def test_build_request_auto_detects_language_when_locale_omitted() -> None:
     req_en = build_request("Hello, can you help me with Python?")
     assert req_en.locale == Locale.EN
     assert "when speaking English" in req_en.messages[0].content
+
+
+def test_gesture_tags_are_offered_only_when_the_device_can_play_them() -> None:
+    from xuna_backend.modules.conversation.application.chat_turn import TurnContext
+
+    offered = build_request("chào", Locale.VI, context=TurnContext(gestures=True))
+    assert "<g:bounce_play>" in offered.messages[0].content
+    assert "ngay đầu câu trả lời" in offered.messages[0].content
+    plain = build_request("chào", Locale.VI, context=TurnContext())
+    assert "<g:" not in plain.messages[0].content
+
+
+class _ScriptedGenerator:
+    def __init__(self, pieces: list[str]) -> None:
+        self.pieces = pieces
+
+    async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        for piece in self.pieces:
+            yield TextDelta(piece)
+        yield ChatFinished("fake", "fake-v1", 1, 1, 0)
+
+
+def test_turn_sends_the_gesture_first_and_never_the_tag_text() -> None:
+    from xuna_backend.modules.conversation.application.chat_turn import GestureChosen, chat_turn
+    from xuna_backend.modules.conversation.domain.gestures import ReplyGesture
+
+    async def run() -> list[object]:
+        generator = _ScriptedGenerator(["<g:bou", "nce_play> Chơi", " thôi! <g:yawn", "_stretch>"])
+        return [event async for event in chat_turn(generator, build_request("chơi", Locale.VI))]
+
+    events = asyncio.run(run())
+    assert events[0] == GestureChosen(ReplyGesture.BOUNCE_PLAY)
+    text = "".join(e.text for e in events if isinstance(e, TextDelta))
+    assert text == "Chơi thôi! "
+    assert sum(isinstance(e, GestureChosen) for e in events) == 1
+    assert isinstance(events[-1], ChatFinished)
