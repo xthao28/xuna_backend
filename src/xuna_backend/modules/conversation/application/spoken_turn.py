@@ -80,6 +80,7 @@ async def spoken_turn(
     synthesizer: SpeechSynthesizer | None,
     locale: Locale | None = None,
     *,
+    voice: str | None = None,
     max_parallel: int = MAX_PARALLEL_TTS,
     first_clause_chars: int = FIRST_CLAUSE_CHARS,
     clock: Callable[[], float] = time.monotonic,
@@ -98,7 +99,12 @@ async def spoken_turn(
         async with limit:
             audio = b""
             codec, rate = "", 0
-            async for chunk in tts.synthesize(text, locale):
+            call = (
+                tts.synthesize(text, locale, voice=voice)
+                if voice is not None
+                else tts.synthesize(text, locale)
+            )
+            async for chunk in call:
                 audio += chunk.data
                 codec, rate = chunk.codec, chunk.sample_rate
         if audio and codec == "pcm16":

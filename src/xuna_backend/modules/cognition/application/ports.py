@@ -44,7 +44,10 @@ class SpeechSynthesizer(Protocol):
     """Streaming TTS: text in, audio frames out."""
 
     def synthesize(
-        self, text: str, locale: Locale | None = None
+        self,
+        text: str,
+        locale: Locale | None = None,
+        voice: str | None = None,
     ) -> AsyncIterator[AudioChunk]: ...
 
 

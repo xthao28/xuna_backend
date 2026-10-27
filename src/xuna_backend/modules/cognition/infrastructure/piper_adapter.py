@@ -34,7 +34,12 @@ class PiperSpeechSynthesizer:
     def _render(self, text: str) -> list[tuple[bytes, int]]:
         return [(c.audio_int16_bytes, c.sample_rate) for c in self._voice.synthesize(text)]
 
-    async def synthesize(self, text: str, locale: Locale) -> AsyncIterator[AudioChunk]:
+    async def synthesize(
+        self,
+        text: str,
+        locale: Locale | None = None,
+        voice: str | None = None,
+    ) -> AsyncIterator[AudioChunk]:
         try:
             chunks = await asyncio.to_thread(self._render, text)
         except Exception as error:  # onnxruntime errors have no common base class

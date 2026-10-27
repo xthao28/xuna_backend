@@ -52,7 +52,9 @@ class Synth:
         self.active = 0
         self.max_active = 0
 
-    async def synthesize(self, text: str, locale: Locale) -> AsyncIterator[AudioChunk]:
+    async def synthesize(
+        self, text: str, locale: Locale | None = None, voice: str | None = None
+    ) -> AsyncIterator[AudioChunk]:
         self.started.append(text)
         self.active += 1
         self.max_active = max(self.max_active, self.active)
@@ -134,7 +136,9 @@ def test_a_failed_sentence_is_skipped_reported_once_and_later_ones_spoken() -> N
 
 def test_several_failed_sentences_are_still_reported_once() -> None:
     class Flaky(Synth):
-        async def synthesize(self, text: str, locale: Locale) -> AsyncIterator[AudioChunk]:
+        async def synthesize(
+            self, text: str, locale: Locale | None = None, voice: str | None = None
+        ) -> AsyncIterator[AudioChunk]:
             if text != "Ba.":
                 raise ProviderUnavailableError("tts down")
             yield AudioChunk(text.encode(), "mp3", 24000)

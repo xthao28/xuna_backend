@@ -40,19 +40,23 @@ class EdgeSpeechSynthesizer:
         self._max_attempts = max_attempts
 
     async def synthesize(
-        self, text: str, locale: Locale | None = None
+        self,
+        text: str,
+        locale: Locale | None = None,
+        voice: str | None = None,
     ) -> AsyncIterator[AudioChunk]:
         target_locale = detect_text_language(text, default=locale or Locale.VI)
+        chosen = voice or self._voice
         if target_locale == Locale.EN:
-            voice = (
-                self._voice
-                if (self._voice and self._voice.startswith("en-"))
+            active_voice = (
+                chosen
+                if (chosen and chosen.startswith("en-"))
                 else _DEFAULT_VOICES[Locale.EN]
             )
         else:
-            voice = (
-                self._voice
-                if (self._voice and not self._voice.startswith("en-"))
+            active_voice = (
+                chosen
+                if (chosen and not chosen.startswith("en-"))
                 else _DEFAULT_VOICES[Locale.VI]
             )
         audio: list[bytes] = []
@@ -62,7 +66,7 @@ class EdgeSpeechSynthesizer:
             async with asyncio.timeout(self._timeout_s):
                 for _ in range(self._max_attempts):
                     try:
-                        audio = await _attempt(text, voice)
+                        audio = await _attempt(text, active_voice)
                     # EdgeTTS "no audio", dropped streams and aiohttp handshake
                     # errors (403) share no base class.
                     except Exception as error:

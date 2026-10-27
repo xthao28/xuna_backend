@@ -112,6 +112,7 @@ class TurnBody(BaseModel):
     schemaVersion: Literal[1]
     text: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
     locale: Locale | None = None
+    voice: str | None = None
     # Phone voice V1: also stream the reply as audio, sentence by sentence.
     speak: bool = False
     # Turn context (owner 2026-10-23), all optional and never stored: the phone's
@@ -366,7 +367,9 @@ async def turn(
     async def events() -> AsyncIterator[str]:
         text_events = chat_turn(generator, chat_request)
         stream: AsyncIterator[SpokenTurnEvent] = (
-            spoken_turn(text_events, synthesizer, body.locale) if body.speak else text_events
+            spoken_turn(text_events, synthesizer, body.locale, voice=body.voice)
+            if body.speak
+            else text_events
         )
         async for event in stream:
             match event:
@@ -431,3 +434,36 @@ async def transcription(
     except ProviderUnavailableError as error:
         raise AppError("provider_unavailable", HTTPStatus.SERVICE_UNAVAILABLE) from error
     return {"text": text, "latencyMs": int((time.perf_counter() - started) * 1000)}
+
+
+class SynthesisBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schemaVersion: Literal[1]
+    text: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
+    voice: str | None = None
+    locale: Locale | None = None
+
+
+@router.post("/speech/synthesis")
+async def synthesis(
+    body: SynthesisBody, request: Request, owner: VoiceOwner, session: Session
+) -> dict[str, Any]:
+    """Synthesize text into audio for voice preview (requires U3V consent)."""
+    await session.close()
+    synthesizer: SpeechSynthesizer | None = state(request, "speech_synthesizer")
+    if synthesizer is None:
+        raise AppError("voice_unavailable", HTTPStatus.SERVICE_UNAVAILABLE)
+    audio = bytearray()
+    codec = "mp3"
+    try:
+        async for chunk in synthesizer.synthesize(body.text, body.locale, voice=body.voice):
+            audio.extend(chunk.data)
+            codec = chunk.codec
+    except ProviderUnavailableError as error:
+        raise AppError("provider_unavailable", HTTPStatus.SERVICE_UNAVAILABLE) from error
+    return {
+        "text": body.text,
+        "format": codec,
+        "audio": base64.b64encode(bytes(audio)).decode("ascii"),
+    }
