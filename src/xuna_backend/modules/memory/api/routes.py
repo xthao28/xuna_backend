@@ -105,6 +105,12 @@ def _candidate_body(c: MemoryCandidate) -> dict[str, Any]:
         "updatedAt": c.updated_at.astimezone(UTC).isoformat(),
         "confirmedAt": c.confirmed_at.astimezone(UTC).isoformat() if c.confirmed_at else None,
         "committedGeneration": c.committed_generation,
+        "domainId": str(c.domain_id) if c.domain_id is not None else None,
+        "relation": c.relation,
+        "relatedCandidateId": (
+            str(c.related_candidate_id) if c.related_candidate_id is not None else None
+        ),
+        "factKey": c.fact_key,
     }
 
 

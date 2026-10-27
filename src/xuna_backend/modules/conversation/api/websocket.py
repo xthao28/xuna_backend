@@ -64,6 +64,7 @@ def _parse_turn_context(raw: dict[str, Any]) -> TurnContext:
     pet_self: PetSelf | None = None
     pet_data = raw.get("pet")
     if isinstance(pet_data, dict):
+
         def _safe_action(key: str) -> PetAction | None:
             if key in pet_data:
                 try:
@@ -250,9 +251,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         {"type": "tts.start", "seq": event.seq, "text": event.text}
                                     )
                                     await websocket.send_bytes(event.data)
-                                    await websocket.send_json(
-                                        {"type": "tts.end", "seq": event.seq}
-                                    )
+                                    await websocket.send_json({"type": "tts.end", "seq": event.seq})
                                 elif isinstance(event, SpokenFinished):
                                     await websocket.send_json(
                                         {

@@ -45,6 +45,11 @@ def _to_candidate(row: MemoryCandidateRow) -> MemoryCandidate:
         updated_at=row.updated_at,
         confirmed_at=row.confirmed_at,
         committed_generation=row.committed_generation,
+        domain_id=row.domain_id,
+        relation=row.relation,
+        related_candidate_id=row.related_candidate_id,
+        fact_key=row.fact_key,
+        embedding=list(row.embedding) if row.embedding is not None else None,
     )
 
 
@@ -109,6 +114,11 @@ class SqlMemoryRepository:
                 updated_at=candidate.updated_at,
                 confirmed_at=candidate.confirmed_at,
                 committed_generation=candidate.committed_generation,
+                domain_id=candidate.domain_id,
+                relation=candidate.relation,
+                related_candidate_id=candidate.related_candidate_id,
+                fact_key=candidate.fact_key,
+                embedding=candidate.embedding,
             )
         )
         await self._session.flush()
@@ -129,6 +139,11 @@ class SqlMemoryRepository:
                 updated_at=candidate.updated_at,
                 confirmed_at=candidate.confirmed_at,
                 committed_generation=candidate.committed_generation,
+                domain_id=candidate.domain_id,
+                relation=candidate.relation,
+                related_candidate_id=candidate.related_candidate_id,
+                fact_key=candidate.fact_key,
+                embedding=candidate.embedding,
             )
         )
         await self._session.flush()

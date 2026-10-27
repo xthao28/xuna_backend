@@ -151,6 +151,7 @@ def test_ws_full_push_to_talk_and_reply_flow(database_url: str, issuer: LocalIss
                     audio_bytes_received.append(msg["bytes"])
                 elif msg.get("text"):
                     import json
+
                     parsed = json.loads(msg["text"])
                     events.append(parsed)
                     if parsed["type"] == "error":
@@ -201,4 +202,3 @@ def test_ws_abort_barge_in(database_url: str, issuer: LocalIssuer) -> None:
             assert err["code"] == "invalid_state"
 
             ws.send_json({"type": "bye"})
-

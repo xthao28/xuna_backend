@@ -94,8 +94,7 @@ async def create_backup(
             inner = dict(payload_copy["payload"])
             if "memories" in inner and isinstance(inner["memories"], list):
                 inner["memories"] = [
-                    m for m in inner["memories"]
-                    if str(m.get("context", "")) not in tombstone_ids
+                    m for m in inner["memories"] if str(m.get("context", "")) not in tombstone_ids
                 ]
             payload_copy["payload"] = inner
 
@@ -261,11 +260,12 @@ async def restore_backup(
         if "memories" in inner and isinstance(inner["memories"], list):
             original_count = len(inner["memories"])
             filtered = [
-                m for m in inner["memories"]
+                m
+                for m in inner["memories"]
                 if str(m.get("context", "")) not in tombstone_ids
                 and str(m.get("action", "")) not in tombstone_ids
             ]
-            tombstones_applied += (original_count - len(filtered))
+            tombstones_applied += original_count - len(filtered)
             inner["memories"] = filtered
 
     await audit.record(

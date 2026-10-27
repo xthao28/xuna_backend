@@ -24,6 +24,7 @@ class CandidateStatus(StrEnum):
 class CandidateType(StrEnum):
     STATED_PREFERENCE = "stated_preference"
     FACT = "fact"
+    KNOWLEDGE = "knowledge"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,11 @@ class MemoryCandidate:
     updated_at: datetime
     confirmed_at: datetime | None = None
     committed_generation: int | None = None
+    domain_id: uuid.UUID | None = None
+    relation: str | None = None
+    related_candidate_id: uuid.UUID | None = None
+    fact_key: int | None = None
+    embedding: list[float] | None = None
 
     def __post_init__(self) -> None:
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
@@ -71,3 +77,5 @@ class MemoryCandidate:
             and not 0 <= self.committed_generation <= 0xFFFFFFFF
         ):
             raise ValueError("committed_generation must be a u32")
+        if self.fact_key is not None and not 0 <= self.fact_key <= 0xFFFFFFFF:
+            raise ValueError("fact_key must be a u32")

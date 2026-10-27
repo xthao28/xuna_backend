@@ -231,6 +231,10 @@ async def create_candidate(
         status=CandidateStatus.AWAITING_OWNER_CONFIRMATION,
         created_at=now,
         updated_at=now,
+        domain_id=body.domainId,
+        relation=body.relation,
+        related_candidate_id=body.relatedCandidateId,
+        fact_key=body.factKey,
     )
     await repo.add_candidate(candidate)
     return candidate
@@ -253,6 +257,7 @@ async def patch_candidate(
         case "confirm":
             if candidate.status != CandidateStatus.AWAITING_OWNER_CONFIRMATION:
                 raise MemoryError("invalid_transition")
+            domain_id = body.domainId if body.domainId is not None else candidate.domain_id
             updated = MemoryCandidate(
                 candidate_id=candidate.candidate_id,
                 owner_id=candidate.owner_id,
@@ -265,6 +270,11 @@ async def patch_candidate(
                 updated_at=now,
                 confirmed_at=now,
                 committed_generation=candidate.committed_generation,
+                domain_id=domain_id,
+                relation=candidate.relation,
+                related_candidate_id=candidate.related_candidate_id,
+                fact_key=candidate.fact_key,
+                embedding=candidate.embedding,
             )
             await repo.update_candidate(updated)
             await audit.record(
@@ -297,6 +307,11 @@ async def patch_candidate(
                 updated_at=now,
                 confirmed_at=candidate.confirmed_at,
                 committed_generation=candidate.committed_generation,
+                domain_id=candidate.domain_id,
+                relation=candidate.relation,
+                related_candidate_id=candidate.related_candidate_id,
+                fact_key=candidate.fact_key,
+                embedding=candidate.embedding,
             )
             await repo.update_candidate(updated)
             await audit.record(
@@ -328,6 +343,35 @@ async def patch_candidate(
                 updated_at=now,
                 confirmed_at=candidate.confirmed_at,
                 committed_generation=body.committedGeneration,
+                domain_id=candidate.domain_id,
+                relation=candidate.relation,
+                related_candidate_id=candidate.related_candidate_id,
+                fact_key=candidate.fact_key,
+                embedding=candidate.embedding,
+            )
+            await repo.update_candidate(updated)
+            return updated
+
+        case "retag":
+            if candidate.status in (CandidateStatus.REJECTED, CandidateStatus.DELETED):
+                raise MemoryError("invalid_transition")
+            updated = MemoryCandidate(
+                candidate_id=candidate.candidate_id,
+                owner_id=candidate.owner_id,
+                pet_id=candidate.pet_id,
+                source=candidate.source,
+                candidate_type=candidate.candidate_type,
+                content=candidate.content,
+                status=candidate.status,
+                created_at=candidate.created_at,
+                updated_at=now,
+                confirmed_at=candidate.confirmed_at,
+                committed_generation=candidate.committed_generation,
+                domain_id=body.domainId,
+                relation=candidate.relation,
+                related_candidate_id=candidate.related_candidate_id,
+                fact_key=candidate.fact_key,
+                embedding=candidate.embedding,
             )
             await repo.update_candidate(updated)
             return updated
@@ -345,6 +389,11 @@ async def patch_candidate(
                 updated_at=now,
                 confirmed_at=candidate.confirmed_at,
                 committed_generation=candidate.committed_generation,
+                domain_id=candidate.domain_id,
+                relation=candidate.relation,
+                related_candidate_id=candidate.related_candidate_id,
+                fact_key=candidate.fact_key,
+                embedding=candidate.embedding,
             )
             await repo.update_candidate(updated)
             return updated

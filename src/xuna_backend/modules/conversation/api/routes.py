@@ -111,12 +111,19 @@ class TurnBody(BaseModel):
     history: list[HistoryLineBody] | None = Field(default=None, max_length=MAX_HISTORY_LINES)
     pet: PetSelfBody | None = None
 
-    def context(self, confirmed_facts: tuple[str, ...] = ()) -> TurnContext | None:
+    knowledge: list[dict[str, Any]] | None = None
+
+    def context(
+        self,
+        confirmed_facts: tuple[str, ...] = (),
+        knowledge: tuple[str, ...] = (),
+    ) -> TurnContext | None:
         if (
             self.clientTime is None
             and self.history is None
             and self.pet is None
             and not confirmed_facts
+            and not knowledge
         ):
             return None
         pet = self.pet
@@ -135,6 +142,7 @@ class TurnBody(BaseModel):
                 mood=pet.mood,
             ),
             confirmed_facts=confirmed_facts,
+            knowledge=knowledge,
         )
 
 
@@ -209,19 +217,23 @@ async def turn(
             PetId(pet_id), status=CandidateStatus.CONFIRMED
         )
         seen_facts: set[str] = set()
+        knowledge_items: list[str] = []
         for cand in confirmed_candidates:
-            if cand.candidate_type != CandidateType.FACT:
-                continue
-            fact_key = cand.content.get("fact")
-            dedup_key = str(fact_key) if fact_key else str(cand.content.get("summary", ""))
-            if dedup_key in seen_facts:
-                continue
-            seen_facts.add(dedup_key)
-            formatted = _format_fact(cand.content)
-            if formatted:
-                confirmed_facts.append(formatted)
-            if len(confirmed_facts) >= 10:
-                break
+            if cand.candidate_type == CandidateType.FACT:
+                fact_key = cand.content.get("fact")
+                dedup_key = str(fact_key) if fact_key else str(cand.content.get("summary", ""))
+                if dedup_key in seen_facts:
+                    continue
+                seen_facts.add(dedup_key)
+                formatted = _format_fact(cand.content)
+                if formatted and len(confirmed_facts) < 5:
+                    confirmed_facts.append(formatted)
+            elif cand.candidate_type == CandidateType.KNOWLEDGE:
+                t = cand.content.get("text")
+                if isinstance(t, str) and t.strip():
+                    item = t.strip()
+                    if item not in knowledge_items and len(knowledge_items) < 5:
+                        knowledge_items.append(item)
 
         if extracted is not None:
             existing = await mem_repo.list_candidates(
@@ -261,7 +273,10 @@ async def turn(
             body.text,
             body.locale,
             state(request, "settings").text_timeout_s,
-            body.context(confirmed_facts=tuple(confirmed_facts)),
+            body.context(
+                confirmed_facts=tuple(confirmed_facts),
+                knowledge=tuple(knowledge_items),
+            ),
         )
     except ValueError as error:
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text") from error

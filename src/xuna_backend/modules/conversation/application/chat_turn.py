@@ -167,6 +167,8 @@ class TurnContext:
     pet: PetSelf | None = None
     # Layer B: confirmed facts recall (CLD-14, D17)
     confirmed_facts: tuple[str, ...] = field(default_factory=tuple)
+    # KD-3: knowledge domains recall
+    knowledge: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.local_time is not None and self.local_time.utcoffset() is None:
@@ -245,6 +247,13 @@ def describe_context(context: TurnContext) -> str:
                 f"Khi xưng hô, bạn có thể gọi bạn ấy là {owner_name} hoặc bạn {owner_name} "
                 "một cách thân thiện."
             )
+
+    if context.knowledge:
+        lines.append(
+            "Những điều bạn biết về thế giới qua các chủ đề đã học: "
+            + "; ".join(context.knowledge)
+            + ". Hãy vận dụng những kiến thức này khi trả lời nếu phù hợp."
+        )
 
     return " ".join(lines)
 

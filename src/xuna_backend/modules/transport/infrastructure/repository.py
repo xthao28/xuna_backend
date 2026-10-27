@@ -44,9 +44,7 @@ class SqlTransportStatusRepository:
 
     async def get_status(self, device_id: uuid.UUID) -> DeviceStatusRecord | None:
         result = await self._session.execute(
-            select(DeviceTransportStatusRow).where(
-                DeviceTransportStatusRow.device_id == device_id
-            )
+            select(DeviceTransportStatusRow).where(DeviceTransportStatusRow.device_id == device_id)
         )
         row = result.scalar_one_or_none()
         if row is None:

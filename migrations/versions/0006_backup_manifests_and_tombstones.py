@@ -85,9 +85,7 @@ def upgrade() -> None:
         sa.Column("item_id", sa.String(128), nullable=False),
         sa.Column("reason", sa.String(255), nullable=True),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=False),
-        sa.UniqueConstraint(
-            "pet_id", "item_type", "item_id", name="uq_deletion_tombstones_item"
-        ),
+        sa.UniqueConstraint("pet_id", "item_type", "item_id", name="uq_deletion_tombstones_item"),
     )
     op.create_index(
         "ix_deletion_tombstones_pet_type",

@@ -66,3 +66,17 @@ class MemoryCandidateRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     committed_generation: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    domain_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_domains.domain_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    relation: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    related_candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("memory_candidates.candidate_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    fact_key: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)

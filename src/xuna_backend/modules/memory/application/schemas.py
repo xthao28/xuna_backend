@@ -1,6 +1,7 @@
 """Strict application schemas for projections and memory candidates (CLD-14)."""
 
 import base64
+import uuid
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -47,6 +48,10 @@ class CreateCandidateRequest(_Strict):
     source: str = Field(default="conversation", max_length=32)
     candidateType: CandidateType = CandidateType.STATED_PREFERENCE
     content: dict[str, Any]
+    domainId: uuid.UUID | None = None
+    relation: str | None = None
+    relatedCandidateId: uuid.UUID | None = None
+    factKey: int | None = None
 
     def parsed_pet_id(self) -> PetId:
         return PetId(self.petId)
@@ -54,5 +59,6 @@ class CreateCandidateRequest(_Strict):
 
 class PatchCandidateRequest(_Strict):
     schemaVersion: Literal[1] = 1
-    action: Literal["confirm", "reject", "commit", "delete"]
+    action: Literal["confirm", "reject", "commit", "delete", "retag"]
     committedGeneration: int | None = Field(default=None, ge=0, le=0xFFFFFFFF)
+    domainId: uuid.UUID | None = None

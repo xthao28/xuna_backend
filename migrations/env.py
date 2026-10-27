@@ -13,6 +13,7 @@ import xuna_backend.modules.audit.infrastructure.models
 import xuna_backend.modules.backups.infrastructure.models
 import xuna_backend.modules.consent.infrastructure.models
 import xuna_backend.modules.identity.infrastructure.models
+import xuna_backend.modules.knowledge.infrastructure.models
 import xuna_backend.modules.memory.infrastructure.models
 import xuna_backend.modules.suggestions.infrastructure.models
 import xuna_backend.modules.transport.infrastructure.models  # noqa: F401

@@ -146,8 +146,7 @@ class SqlIdentityRepository:
         await self._session.execute(
             update(BrainRow)
             .where(
-                (BrainRow.pet_id == pet_id.value)
-                & (BrainRow.status == BrainStatus.ACTIVE.value)
+                (BrainRow.pet_id == pet_id.value) & (BrainRow.status == BrainStatus.ACTIVE.value)
             )
             .values(status=BrainStatus.ARCHIVED.value)
         )

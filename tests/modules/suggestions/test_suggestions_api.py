@@ -98,9 +98,7 @@ def bind_test_pet(
     return bind_res.json()
 
 
-def test_consolidation_requires_u1_or_u2_consent(
-    client: TestClient, issuer: LocalIssuer
-) -> None:
+def test_consolidation_requires_u1_or_u2_consent(client: TestClient, issuer: LocalIssuer) -> None:
     device = SimulatedDevice()
     bind_test_pet(client, issuer, device)
 
@@ -146,9 +144,7 @@ def test_consolidation_requires_u1_or_u2_consent(
     assert res2_retry.json() == body
 
 
-def test_suggestions_lifecycle_and_crud(
-    client: TestClient, issuer: LocalIssuer
-) -> None:
+def test_suggestions_lifecycle_and_crud(client: TestClient, issuer: LocalIssuer) -> None:
     device = SimulatedDevice()
     bind_test_pet(client, issuer, device)
 

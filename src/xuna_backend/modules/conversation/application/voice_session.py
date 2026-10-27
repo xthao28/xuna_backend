@@ -108,9 +108,7 @@ class VoiceSession:
 
         start = time.monotonic()
         wav_data = wav_container(bytes(self._audio_buffer), self.sample_rate)
-        transcript = await transcribe_once(
-            self.recognizer, wav_data, AudioFormat.WAV, self.locale
-        )
+        transcript = await transcribe_once(self.recognizer, wav_data, AudioFormat.WAV, self.locale)
         asr_ms = int((time.monotonic() - start) * 1000)
 
         self.state = SessionState.AWAITING_COMMIT

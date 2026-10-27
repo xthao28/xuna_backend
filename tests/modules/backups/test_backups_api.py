@@ -96,9 +96,7 @@ def bind_test_pet(
     return bind_res.json()
 
 
-def test_backup_lifecycle_and_restore_same_device(
-    client: TestClient, issuer: LocalIssuer
-) -> None:
+def test_backup_lifecycle_and_restore_same_device(client: TestClient, issuer: LocalIssuer) -> None:
     device = SimulatedDevice()
     bound = bind_test_pet(client, issuer, device)
     initial_brain_id = bound["brainId"]
@@ -159,9 +157,7 @@ def test_backup_lifecycle_and_restore_same_device(
     assert get_after_del.status_code == 404
 
 
-def test_restore_to_replacement_device(
-    client: TestClient, issuer: LocalIssuer
-) -> None:
+def test_restore_to_replacement_device(client: TestClient, issuer: LocalIssuer) -> None:
     old_device = SimulatedDevice()
     bound = bind_test_pet(client, issuer, old_device)
     brain_id = bound["brainId"]
@@ -222,9 +218,7 @@ def test_restore_to_replacement_device(
     assert restored["deviceId"] != old_device_id
 
 
-def test_tombstones_prevent_memory_resurrection(
-    client: TestClient, issuer: LocalIssuer
-) -> None:
+def test_tombstones_prevent_memory_resurrection(client: TestClient, issuer: LocalIssuer) -> None:
     device = SimulatedDevice()
     bind_test_pet(client, issuer, device)
 
@@ -277,9 +271,7 @@ def test_tombstones_prevent_memory_resurrection(
     assert memories[0]["context"] == "quiet"
 
 
-def test_forget_all_rotates_brain(
-    client: TestClient, issuer: LocalIssuer
-) -> None:
+def test_forget_all_rotates_brain(client: TestClient, issuer: LocalIssuer) -> None:
     device = SimulatedDevice()
     bound = bind_test_pet(client, issuer, device)
     old_brain_id = bound["brainId"]
@@ -294,9 +286,7 @@ def test_forget_all_rotates_brain(
     assert forget_data["newBrainId"] != old_brain_id
 
 
-def test_cross_tenant_access_denied(
-    client: TestClient, issuer: LocalIssuer
-) -> None:
+def test_cross_tenant_access_denied(client: TestClient, issuer: LocalIssuer) -> None:
     device = SimulatedDevice()
     bind_test_pet(client, issuer, device)
 
