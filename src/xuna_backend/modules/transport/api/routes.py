@@ -13,6 +13,7 @@ from xuna_backend.core.errors import AppError
 from xuna_backend.modules.accounts.api.dependencies import CurrentOwner, Session, state
 from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.identity.application.ports import IdentityRepository
+from xuna_backend.modules.transport.api.device_socket import router as device_router
 from xuna_backend.modules.transport.application.ports import (
     MqttPublisher,
     TransportStatusRepository,
@@ -37,6 +38,7 @@ from xuna_backend.modules.transport.domain.entities import (
 )
 
 router = APIRouter(prefix="/v1", tags=["transport"])
+router.include_router(device_router)
 
 _STATUS: dict[str, HTTPStatus] = {
     "device_not_found": HTTPStatus.NOT_FOUND,
@@ -134,6 +136,10 @@ async def get_device_transport_status(
             lastSeenAt=record.last_seen_at.astimezone(UTC).isoformat(),
             ipAddress=record.ip_address,
             clientId=record.client_id,
+            firmware=record.firmware,
+            connectedAt=(
+                record.connected_at.astimezone(UTC).isoformat() if record.connected_at else None
+            ),
         )
     except TransportError as error:
         raise _problem(error) from error

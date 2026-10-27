@@ -28,6 +28,8 @@ class SqlTransportStatusRepository:
                 last_seen_at=record.last_seen_at,
                 ip_address=record.ip_address,
                 client_id=record.client_id,
+                firmware=record.firmware,
+                connected_at=record.connected_at,
             )
             .on_conflict_do_update(
                 index_elements=["device_id"],
@@ -36,6 +38,8 @@ class SqlTransportStatusRepository:
                     "last_seen_at": record.last_seen_at,
                     "ip_address": record.ip_address,
                     "client_id": record.client_id,
+                    "firmware": record.firmware,
+                    "connected_at": record.connected_at,
                 },
             )
         )
@@ -72,4 +76,6 @@ class SqlTransportStatusRepository:
             last_seen_at=last_seen,
             ip_address=row.ip_address,
             client_id=row.client_id,
+            firmware=row.firmware,
+            connected_at=row.connected_at,
         )

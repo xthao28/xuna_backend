@@ -36,6 +36,8 @@ class AuditAction(StrEnum):
     DEVICE_STATUS_CHANGED = "device.status_changed"
     DEVICE_EVENT_INGESTED = "device.event_ingested"
     DEVICE_COMMAND_SENT = "device.command_sent"
+    DEVICE_CONNECTED = "device.connected"
+    DEVICE_REJECTED = "device.rejected"
 
 
 @dataclass(frozen=True, slots=True)

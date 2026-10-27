@@ -34,3 +34,5 @@ class DeviceTransportStatusRow(Base):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
     client_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    firmware: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

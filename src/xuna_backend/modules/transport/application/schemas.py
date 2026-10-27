@@ -30,6 +30,8 @@ class DeviceTransportStatusResponse(_Strict):
     lastSeenAt: str
     ipAddress: str | None = None
     clientId: str | None = None
+    firmware: str | None = None
+    connectedAt: str | None = None
 
 
 class SendCommandRequest(_Strict):

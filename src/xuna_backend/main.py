@@ -56,8 +56,13 @@ from xuna_backend.modules.memory.infrastructure.repository import SqlMemoryRepos
 from xuna_backend.modules.suggestions.api.routes import router as suggestions_router
 from xuna_backend.modules.suggestions.infrastructure.repository import SqlSuggestionRepository
 from xuna_backend.modules.transport.api.routes import router as transport_router
+from xuna_backend.modules.transport.domain.device_session import (
+    GatewayLimits,
+    SlidingWindowLimiter,
+)
 from xuna_backend.modules.transport.infrastructure.memory_broker import InMemoryMqttBroker
 from xuna_backend.modules.transport.infrastructure.repository import SqlTransportStatusRepository
+from xuna_backend.modules.transport.infrastructure.session_hub import InMemoryDeviceSessionHub
 
 
 def token_verifier(settings: Settings) -> TokenVerifier:
@@ -181,6 +186,16 @@ def create_app(
     app.state.suggestion_repository = SqlSuggestionRepository
     app.state.transport_status_repository = SqlTransportStatusRepository
     app.state.mqtt_publisher = InMemoryMqttBroker()
+    # Device-direct gateway (DC-3): limits, process-local rate limits and session registry.
+    limits = GatewayLimits()
+    app.state.device_gateway_limits = limits
+    app.state.device_challenge_limiter = SlidingWindowLimiter(
+        limits.challenges_per_pet, limits.challenge_window_s
+    )
+    app.state.device_connect_limiter = SlidingWindowLimiter(
+        limits.connects_per_peer, limits.connect_window_s
+    )
+    app.state.device_session_hub = InMemoryDeviceSessionHub()
     app.state.text_generator = generator or text_generator(resolved)
     app.state.speech_recognizer = recognizer or speech_recognizer(resolved)
     app.state.speech_synthesizer = synthesizer or speech_synthesizer(resolved)

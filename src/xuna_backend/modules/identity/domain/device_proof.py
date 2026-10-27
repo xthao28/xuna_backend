@@ -24,6 +24,7 @@ SIGNATURE_SIZE = 64  # r || s
 class ProofPurpose(IntEnum):
     BIND = 1
     PROJECTION = 2
+    SESSION = 3  # device-direct connection (DC-3); payload = the device's own public key
 
 
 def proof_message(

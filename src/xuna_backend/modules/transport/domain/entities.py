@@ -89,10 +89,14 @@ class DeviceStatusRecord:
     last_seen_at: datetime
     ip_address: str | None = None
     client_id: str | None = None
+    firmware: str | None = None  # device-direct sessions (DC-3)
+    connected_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.last_seen_at.tzinfo is None:
             raise ValueError("last_seen_at must be timezone-aware")
+        if self.connected_at is not None and self.connected_at.tzinfo is None:
+            raise ValueError("connected_at must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)
