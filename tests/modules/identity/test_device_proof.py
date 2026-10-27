@@ -35,6 +35,16 @@ def test_golden_message_bytes() -> None:
     )
 
 
+def test_session_purpose_golden() -> None:
+    """Device-direct session proof (DC-3/DC-4); firmware test_cloud_session checks the same hash."""
+    message = proof_message(NONCE, PET, ProofPurpose.SESSION, 38, b"payload")
+    assert message[62] == 3
+    assert (
+        hashlib.sha256(message).hexdigest()
+        == "448f0b9047eebce3a1cffe8f87c9f49f06ac73ff61aedd5855645906cc4b1aa4"
+    )
+
+
 def test_rejects_bad_inputs() -> None:
     with pytest.raises(ValueError):
         proof_message(NONCE[:31], PET, ProofPurpose.BIND, 0, b"")

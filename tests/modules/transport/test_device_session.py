@@ -280,3 +280,19 @@ def test_hub_newest_session_wins() -> None:
         assert hub.live() == 0
 
     asyncio.run(run())
+
+
+def test_firmware_frames_pass_the_strict_parser() -> None:
+    """Exact strings from firmware test_cloud_session (CloudSession, DC-4)."""
+    hello = parse_device_frame(
+        '{"type":"hello","schemaVersion":1,"petId":"d945c77026fd4f4a8a899bbff4aeed86",'
+        '"firmware":"0.2.0-mvp","capabilities":[]}'
+    )
+    assert isinstance(hello, HelloFrame) and hello.capabilities == []
+    proof = parse_device_frame(
+        '{"type":"proof","schemaVersion":1,"generation":40,"signature":'
+        '"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0+Pw=="}'
+    )
+    assert isinstance(proof, ProofFrame)
+    assert decode_b64(proof.signature, 64) == bytes(range(64))
+    assert isinstance(parse_device_frame('{"type":"ping","schemaVersion":1,"seq":1}'), PingFrame)
