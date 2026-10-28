@@ -446,7 +446,7 @@ async def transcription(
 class SynthesisBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schemaVersion: Literal[1]
+    schemaVersion: Literal[1] = 1
     text: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
     voice: str | None = None
     locale: Locale | None = None

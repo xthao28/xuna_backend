@@ -157,6 +157,8 @@ class SqlMemoryRepository:
         query = select(MemoryCandidateRow).where(MemoryCandidateRow.pet_id == pet_id.value)
         if status is not None:
             query = query.where(MemoryCandidateRow.status == status.value)
+        else:
+            query = query.where(MemoryCandidateRow.status != CandidateStatus.DELETED.value)
         query = query.order_by(MemoryCandidateRow.created_at.desc()).limit(limit)
         result = await self._session.scalars(query)
         return [_to_candidate(row) for row in result.all()]

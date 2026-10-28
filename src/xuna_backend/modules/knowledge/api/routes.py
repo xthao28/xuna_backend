@@ -10,6 +10,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query, Request
 
+from xuna_backend.core.db import commit_or_conflict
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.accounts.api.dependencies import CurrentOwner, Session, state
 from xuna_backend.modules.accounts.domain.owner import Owner
@@ -115,9 +116,11 @@ async def create_domain(
     repo = _repo(request, session)
     use_case = CreateDomainUseCase(repo)
     try:
-        return await use_case.execute(PetId(pet_id), owner.owner_id, body)
+        res = await use_case.execute(PetId(pet_id), owner.owner_id, body)
     except ValueError as err:
         raise _map_error(err) from err
+    await commit_or_conflict(session)
+    return res
 
 
 @router.get("/knowledge-domains/{domain_id}", response_model=DomainResponse)
@@ -147,11 +150,13 @@ async def update_domain(
     candidate_port = _candidate_port(request, session)
     use_case = UpdateDomainUseCase(repo, candidate_port)
     try:
-        return await use_case.execute(domain_id, body)
+        res = await use_case.execute(domain_id, body)
     except (KeyError, ValueError) as err:
         if isinstance(err, KeyError):
             raise AppError("not_found", HTTPStatus.NOT_FOUND, str(err)) from err
         raise _map_error(err) from err
+    await commit_or_conflict(session)
+    return res
 
 
 @router.post(
@@ -176,9 +181,11 @@ async def teach_knowledge(
     candidate_port = _candidate_port(request, session)
     use_case = TeachKnowledgeUseCase(repo, candidate_port)
     try:
-        return await use_case.execute(PetId(pet_id), owner.owner_id, body)
+        res = await use_case.execute(PetId(pet_id), owner.owner_id, body)
     except ValueError as err:
         raise _map_error(err) from err
+    await commit_or_conflict(session)
+    return res
 
 
 @router.get(
@@ -218,9 +225,11 @@ async def decide_suggestion(
     candidate_port = _candidate_port(request, session)
     use_case = DecideSuggestionUseCase(repo, candidate_port)
     try:
-        return await use_case.execute(suggestion_id, body)
+        res = await use_case.execute(suggestion_id, body)
     except ValueError as err:
         raise _map_error(err) from err
+    await commit_or_conflict(session)
+    return res
 
 
 @router.post(
@@ -246,6 +255,7 @@ async def generate_suggestion(
     suggestion = await use_case.execute(PetId(pet_id), owner.owner_id)
     if suggestion is None:
         return None
+    await commit_or_conflict(session)
     return KnowledgeSuggestionResponse(
         suggestion_id=suggestion.suggestion_id,
         pet_id=str(suggestion.pet_id),
