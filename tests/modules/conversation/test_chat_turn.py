@@ -205,3 +205,131 @@ def test_turn_sends_the_gesture_first_and_never_the_tag_text() -> None:
     assert text == "Chơi thôi! "
     assert sum(isinstance(e, GestureChosen) for e in events) == 1
     assert isinstance(events[-1], ChatFinished)
+
+
+def test_expert_persona_and_describe_owner_context_levels() -> None:
+    import uuid
+
+    from xuna_backend.modules.conversation.application.chat_turn import (
+        PERSONA_EXPERT_VI,
+        ReplyBudget,
+        TurnContext,
+        describe_owner_context,
+    )
+    from xuna_backend.modules.conversation.domain.turn_mode import TurnMode
+    from xuna_backend.modules.knowledge.domain.owner_context import (
+        DocSnippet,
+        DomainBrief,
+        OwnerContext,
+    )
+
+    assert "Không đưa lời khuyên y tế, pháp lý hay tài chính." not in PERSONA_VI
+    assert "Không đưa lời khuyên y tế, pháp lý hay tài chính." not in PERSONA_EXPERT_VI
+    assert "chuyên gia có thẩm quyền" in PERSONA_VI
+    assert "<say> và </say>" in PERSONA_EXPERT_VI
+
+    dom_id = uuid.uuid4()
+    for lvl, expected_phrase in [
+        (None, "Bạn chưa biết độ ăn ý với bạn ấy trong lĩnh vực này."),
+        (0, "(độ ăn ý: Mới quen)"),
+        (1, "Độ ăn ý của bạn với bạn ấy trong lĩnh vực này: Bắt nhịp."),
+        (2, "Độ ăn ý của bạn với bạn ấy trong lĩnh vực này: Ăn ý."),
+        (3, "Độ ăn ý của bạn với bạn ấy trong lĩnh vực này: Đồng đội."),
+    ]:
+        brief = DomainBrief(
+            domain_id=dom_id,
+            name="Lập trình nhúng",
+            brief="Kỹ sư firmware ESP32.",
+            level=lvl,
+            safety_tier="high_stakes" if lvl == 3 else "general",
+        )
+        owner = OwnerContext(
+            domain=brief,
+            conventions=("Dùng ESP-IDF 5.2",),
+            cases=("Vấn đề: sụt áp. Cách giải: thêm tụ 470uF.",),
+            snippets=(DocSnippet("esp32.md", "GPIO14 dùng kéo lên nội"),),
+        )
+        chat_desc = describe_owner_context(owner, TurnMode.CHAT)
+        expert_desc = describe_owner_context(owner, TurnMode.EXPERT)
+
+        assert expected_phrase in chat_desc
+        assert expected_phrase in expert_desc
+        assert "Lĩnh vực đang trao đổi: «Lập trình nhúng»." not in chat_desc
+        assert "Lĩnh vực đang trao đổi: «Lập trình nhúng»." in expert_desc
+        assert "Quy ước và bối cảnh làm việc bạn ấy đã xác nhận" in expert_desc
+        assert "Những việc hai bạn đã cùng giải quyết: Vấn đề: sụt áp." in expert_desc
+        assert "[esp32.md] GPIO14 dùng kéo lên nội" in expert_desc
+        assert "Kiến thức chuyên môn là của bạn sẵn có" in expert_desc
+        if lvl == 3:
+            assert "Lĩnh vực này có quyết định hệ trọng" in expert_desc
+
+    req = build_request(
+        "x" * 600,
+        Locale.VI,
+        context=TurnContext(owner=owner, mode=TurnMode.EXPERT),
+        mode=TurnMode.EXPERT,
+        budget=ReplyBudget(max_output_tokens=3000, timeout_s=60.0),
+    )
+    assert req.max_output_tokens == 3000
+    assert req.timeout_s == 60.0
+    assert req.messages[0].content.startswith(PERSONA_EXPERT_VI)
+
+
+def test_chat_turn_sections_splits_say_and_detail_and_handles_fallback() -> None:
+    from xuna_backend.modules.conversation.application.chat_turn import (
+        DetailDelta,
+        GestureChosen,
+        chat_turn,
+    )
+    from xuna_backend.modules.conversation.domain.gestures import ReplyGesture
+    from xuna_backend.modules.conversation.domain.turn_mode import TurnMode
+
+    async def run_tagged() -> list[object]:
+        gen = _ScriptedGenerator(
+            ["<g:look_around><s", "ay>Tóm tắt ngắn.</s", "ay>## Chi tiết\n- Mục 1"]
+        )
+        req = build_request("hỏi", Locale.VI, mode=TurnMode.EXPERT)
+        return [e async for e in chat_turn(gen, req, sections=True, locale_vi=True)]
+
+    events = asyncio.run(run_tagged())
+    assert events[0] == GestureChosen(ReplyGesture.LOOK_AROUND)
+    say_text = "".join(e.text for e in events if isinstance(e, TextDelta))
+    detail_text = "".join(e.text for e in events if isinstance(e, DetailDelta))
+    assert say_text == "Tóm tắt ngắn."
+    assert detail_text == "## Chi tiết\n- Mục 1"
+    assert isinstance(events[-1], ChatFinished)
+
+    async def run_untagged() -> list[object]:
+        gen = _ScriptedGenerator(["## Không có thẻ say\nCâu đầu tiên kết thúc ở đây. Câu hai."])
+        req = build_request("hỏi", Locale.VI, mode=TurnMode.EXPERT)
+        return [e async for e in chat_turn(gen, req, sections=True, locale_vi=True)]
+
+    untagged_events = asyncio.run(run_untagged())
+    # DetailDelta comes first, then fallback TextDelta right before ChatFinished
+    assert isinstance(untagged_events[0], DetailDelta)
+    assert isinstance(untagged_events[-2], TextDelta)
+    assert untagged_events[-2].text == "Không có thẻ say Câu đầu tiên kết thúc ở đây."
+    assert isinstance(untagged_events[-1], ChatFinished)
+
+
+def test_settings_from_env_parses_expert_provider_options() -> None:
+    from xuna_backend.core.config import Settings
+
+    s = Settings.from_env(
+        {
+            "XUNA_DATABASE_URL": "postgresql+psycopg://u:p@localhost/db",
+            "XUNA_TEXT_PROVIDER": "echo",
+            "XUNA_TEXT_EXPERT_PROVIDER": "openai_compatible",
+            "XUNA_TEXT_EXPERT_BASE_URL": "https://expert.internal/v1",
+            "XUNA_TEXT_EXPERT_MODEL": "expert-v1",
+            "XUNA_TEXT_EXPERT_API_KEY": "secret-key",
+            "XUNA_TEXT_EXPERT_TIMEOUT_S": "75",
+            "XUNA_TEXT_EXPERT_MAX_TOKENS": "4096",
+        }
+    )
+    assert s.text_expert_provider == "openai_compatible"
+    assert s.text_expert_model == "expert-v1"
+    assert s.text_expert_timeout_s == 75.0
+    assert s.text_expert_max_tokens == 4096
+    assert "text_expert_provider='openai_compatible'" in repr(s)
+    assert "secret-key" not in repr(s)

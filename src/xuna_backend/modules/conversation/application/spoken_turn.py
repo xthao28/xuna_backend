@@ -26,6 +26,7 @@ from xuna_backend.modules.cognition.domain.types import (
     TextDelta,
 )
 from xuna_backend.modules.conversation.application.chat_turn import (
+    DetailDelta,
     GestureChosen,
     ProviderFailed,
     TurnEvent,
@@ -74,7 +75,13 @@ class SpokenFinished:
 
 
 SpokenTurnEvent = (
-    ChatEvent | ProviderFailed | GestureChosen | SpokenAudio | SpeechUnavailable | SpokenFinished
+    ChatEvent
+    | ProviderFailed
+    | GestureChosen
+    | DetailDelta
+    | SpokenAudio
+    | SpeechUnavailable
+    | SpokenFinished
 )
 
 _DONE = object()

@@ -35,8 +35,11 @@ from xuna_backend.modules.consent.api.routes import RequireConsent
 from xuna_backend.modules.consent.domain.consent import ConsentClass
 from xuna_backend.modules.conversation.api.websocket import router as ws_router
 from xuna_backend.modules.conversation.application.chat_turn import (
+    MAX_EXPERT_INPUT_CHARS,
+    MAX_HISTORY_LINE_CHARS,
     MAX_HISTORY_LINES,
     MAX_INPUT_CHARS,
+    DetailDelta,
     GestureChosen,
     HistoryLine,
     PetAction,
@@ -44,6 +47,7 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     PetSelf,
     PetTemperament,
     ProviderFailed,
+    ReplyBudget,
     TurnContext,
     build_request,
     chat_turn,
@@ -55,6 +59,10 @@ from xuna_backend.modules.conversation.application.spoken_turn import (
     SpokenTurnEvent,
     spoken_turn,
 )
+from xuna_backend.modules.conversation.application.turn_preparation import (
+    PreparedTurn,
+    prepare_turn,
+)
 from xuna_backend.modules.conversation.application.voice import (
     MAX_AUDIO_BYTES,
     AudioFormat,
@@ -65,12 +73,24 @@ from xuna_backend.modules.conversation.domain.candidate_extractor import (
     extract_knowledge_candidate,
 )
 from xuna_backend.modules.conversation.domain.signals import conversation_signals
+from xuna_backend.modules.conversation.domain.turn_mode import (
+    Channel,
+    RequestedMode,
+    TurnMode,
+    decide_mode,
+)
 from xuna_backend.modules.identity.application.use_cases import IdentityError, get_owned_pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
+from xuna_backend.modules.knowledge.application.owner_context import BuildOwnerContextUseCase
+from xuna_backend.modules.knowledge.application.ports import (
+    KnowledgeCandidatePort,
+    KnowledgeRepository,
+)
 from xuna_backend.modules.knowledge.domain.entities import DomainStatus, compute_fact_key
 from xuna_backend.modules.knowledge.domain.lexical_matcher import (
     compute_lexical_similarity,
 )
+from xuna_backend.modules.knowledge.domain.owner_context import DeviceSlotView
 from xuna_backend.modules.memory.application.ports import MemoryRepository
 from xuna_backend.modules.memory.domain.entities import (
     CandidateStatus,
@@ -90,7 +110,7 @@ class HistoryLineBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     role: Literal["owner", "xuna"]
-    text: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
+    text: str = Field(min_length=1, max_length=MAX_HISTORY_LINE_CHARS)
 
 
 class PetSelfBody(BaseModel):
@@ -107,15 +127,26 @@ class PetSelfBody(BaseModel):
     mood: PetMood | None = None
 
 
+class KnowledgeSlotBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    slot: int = Field(ge=0, le=4)
+    level: int = Field(ge=0, le=3)
+    state: Literal["empty", "active", "resting"]
+
+
 class TurnBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     schemaVersion: Literal[1]
-    text: str = Field(min_length=1, max_length=MAX_INPUT_CHARS)
+    text: str = Field(min_length=1, max_length=MAX_EXPERT_INPUT_CHARS)
     locale: Locale | None = None
     voice: str | None = None
     # Phone voice V1: also stream the reply as audio, sentence by sentence.
     speak: bool = False
+    # KX-1: mode routing and explicit domain selection.
+    mode: RequestedMode | None = None
+    domainId: uuid.UUID | None = None
     # Turn context (owner 2026-10-23), all optional and never stored: the phone's
     # local time, earlier lines of this conversation, and what the device says
     # about XUNA. Old apps omit them and get the context-free prompt.
@@ -125,23 +156,10 @@ class TurnBody(BaseModel):
     # The connected device can play reply gestures (owner 2026-10-27).
     gestures: bool = False
 
-    knowledge: list[dict[str, Any]] | None = None
+    knowledge: list[KnowledgeSlotBody] | None = Field(default=None, max_length=5)
     extractKnowledge: bool = True
 
-    def context(
-        self,
-        confirmed_facts: tuple[str, ...] = (),
-        knowledge: tuple[str, ...] = (),
-    ) -> TurnContext | None:
-        if (
-            self.clientTime is None
-            and self.history is None
-            and self.pet is None
-            and not self.gestures
-            and not confirmed_facts
-            and not knowledge
-        ):
-            return None
+    def base_context(self) -> TurnContext:
         pet = self.pet
         return TurnContext(
             local_time=self.clientTime,
@@ -157,10 +175,34 @@ class TurnBody(BaseModel):
                 temperament=pet.personality,
                 mood=pet.mood,
             ),
-            confirmed_facts=confirmed_facts,
-            knowledge=knowledge,
             gestures=self.gestures,
         )
+
+    def device_slots(self) -> tuple[DeviceSlotView, ...] | None:
+        if self.knowledge is None:
+            return None
+        return tuple(
+            DeviceSlotView(slot=k.slot, level=k.level, state=k.state) for k in self.knowledge
+        )
+
+
+def _effective_context(ctx: TurnContext) -> TurnContext | None:
+    has_owner = ctx.owner is not None and (
+        ctx.owner.domain is not None
+        or bool(ctx.owner.conventions)
+        or bool(ctx.owner.cases)
+        or bool(ctx.owner.snippets)
+    )
+    if (
+        ctx.local_time is None
+        and not ctx.history
+        and ctx.pet is None
+        and not ctx.gestures
+        and not ctx.confirmed_facts
+        and not has_owner
+    ):
+        return None
+    return ctx
 
 
 class TranscriptionBody(BaseModel):
@@ -176,38 +218,6 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-def _format_fact(content: dict[str, Any]) -> str | None:
-    """Format a confirmed fact for inclusion in the conversation context."""
-    fact_key = content.get("fact")
-    value = content.get("value")
-    if isinstance(value, str) and value.strip():
-        v = value.strip()
-        if fact_key == "owner_name":
-            return f"Tên của bạn ấy là {v}"
-        if fact_key == "favorite_color":
-            return f"Màu yêu thích của bạn ấy là {v}"
-        if fact_key == "favorite_food":
-            return f"Món ăn yêu thích của bạn ấy là {v}"
-        if fact_key == "birthday":
-            return f"Sinh nhật của bạn ấy là ngày {v}"
-        if fact_key == "pet_companion":
-            return f"Bạn ấy có nuôi {v}"
-
-    raw_summary = content.get("summary") or content.get("text")
-    if raw_summary and isinstance(raw_summary, str) and raw_summary.strip():
-        s = str(raw_summary).strip()
-        if s.startswith("Tên của bạn là "):
-            return f"Tên của bạn ấy là {s[len('Tên của bạn là ') :]}"
-        if s.startswith("Màu yêu thích của bạn là "):
-            return f"Màu yêu thích của bạn ấy là {s[len('Màu yêu thích của bạn là ') :]}"
-        if s.startswith("Món ăn yêu thích của bạn là "):
-            return f"Món ăn yêu thích của bạn ấy là {s[len('Món ăn yêu thích của bạn là ') :]}"
-        if s.startswith("Sinh nhật của bạn là "):
-            return f"Sinh nhật của bạn ấy là {s[len('Sinh nhật của bạn là ') :]}"
-        return s
-    return None
-
-
 @router.post("/conversations/{pet_id}/turns")
 async def turn(
     pet_id: str, body: TurnBody, request: Request, owner: U3Owner, session: Session
@@ -218,47 +228,41 @@ async def turn(
     except (ValueError, IdentityError) as error:
         raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
 
-    # CLD-14, KD-4: Extract prospective memory candidates (stated preferences, facts, knowledge).
-    # Extracted candidates are saved in awaiting_owner_confirmation so the owner can review.
-    # Strict safety rules apply: credentials/door codes/chit-chat return None and are never saved.
-    extracted = extract_candidate(body.text)
-    if extracted is None and body.extractKnowledge:
-        extracted = extract_knowledge_candidate(body.text)
-    candidate_info: dict[str, Any] | None = None
-    confirmed_facts: list[str] = []
+    stripped_text = body.text.strip()
+    if not stripped_text or (
+        (body.mode is None or body.mode == RequestedMode.CHAT)
+        and len(stripped_text) > MAX_INPUT_CHARS
+    ):
+        raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text")
 
     try:
-        mem_factory: Callable[[object], MemoryRepository] = state(request, "memory_repository")
-        mem_repo = mem_factory(session)
+        base_ctx = body.base_context()
+    except ValueError as error:
+        raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text") from error
 
-        # Layer B: Query confirmed facts for this pet
-        confirmed_candidates = await mem_repo.list_candidates(
-            PetId(pet_id), status=CandidateStatus.CONFIRMED
-        )
-        seen_facts: set[str] = set()
-        knowledge_items: list[str] = []
-        for cand in confirmed_candidates:
-            if cand.candidate_type == CandidateType.FACT:
-                raw_fact_key = cand.content.get("fact")
-                dedup_key = (
-                    str(raw_fact_key) if raw_fact_key else str(cand.content.get("summary", ""))
-                )
-                if dedup_key in seen_facts:
-                    continue
-                seen_facts.add(dedup_key)
-                formatted = _format_fact(cand.content)
-                if formatted and len(confirmed_facts) < 5:
-                    confirmed_facts.append(formatted)
-            elif cand.candidate_type == CandidateType.KNOWLEDGE:
-                t = cand.content.get("text")
-                if isinstance(t, str) and t.strip():
-                    item = t.strip()
-                    if item not in knowledge_items and len(knowledge_items) < 5:
-                        knowledge_items.append(item)
+    # CLD-14, KD-4: Extract prospective memory candidates only within MAX_INPUT_CHARS
+    extracted = None
+    if len(body.text) <= MAX_INPUT_CHARS:
+        extracted = extract_candidate(body.text)
+        if extracted is None and body.extractKnowledge:
+            extracted = extract_knowledge_candidate(body.text)
+    candidate_info: dict[str, Any] | None = None
 
+    now = datetime.now(UTC)
+    target_pet_id = PetId(pet_id)
+    mem_factory: Callable[[object], MemoryRepository] = state(request, "memory_repository")
+    k_factory: Callable[[object], KnowledgeRepository] = state(request, "knowledge_repository")
+    cand_factory: Callable[[object], KnowledgeCandidatePort] = state(
+        request, "knowledge_candidate_adapter"
+    )
+    mem_repo = mem_factory(session)
+    k_repo = k_factory(session)
+    c_port = cand_factory(session)
+
+    try:
         if extracted is not None:
             existing = await mem_repo.list_candidates(
-                PetId(pet_id), status=CandidateStatus.AWAITING_OWNER_CONFIRMATION
+                target_pet_id, status=CandidateStatus.AWAITING_OWNER_CONFIRMATION
             )
             is_dup = any(
                 c.candidate_type == extracted.candidate_type
@@ -272,7 +276,6 @@ async def turn(
                 for c in existing
             )
             if not is_dup:
-                now = datetime.now(UTC)
                 domain_id: uuid.UUID | None = None
                 relation: str | None = None
                 fact_key: int | None = None
@@ -281,43 +284,33 @@ async def turn(
                     text_content = str(extracted.content.get("text", ""))
                     fact_key = compute_fact_key(text_content)
                     try:
-                        k_factory = getattr(request.app.state, "knowledge_repository", None)
-                        if k_factory is not None:
-                            k_repo = k_factory(session)
-                            domains = await k_repo.list_domains(
-                                PetId(pet_id), include_deleted=False
+                        domains = await k_repo.list_domains(target_pet_id, include_deleted=False)
+                        active = [d for d in domains if d.status != DomainStatus.DELETED]
+                        best_domain = None
+                        best_sim = 0.0
+                        for dom in active:
+                            sim = compute_lexical_similarity(
+                                text_content, [dom.name, dom.description]
                             )
-                            active = [d for d in domains if d.status != DomainStatus.DELETED]
-                            best_domain = None
-                            best_sim = 0.0
-                            for dom in active:
-                                sim = compute_lexical_similarity(
-                                    text_content, [dom.name, dom.description]
-                                )
-                                if sim > best_sim:
-                                    best_sim = sim
-                                    best_domain = dom
-                            if best_domain is not None and best_sim >= 0.20:
-                                domain_id = best_domain.domain_id
-                                cand_factory = getattr(
-                                    request.app.state, "knowledge_candidate_adapter", None
-                                )
-                                if cand_factory is not None:
-                                    c_port = cand_factory(session)
-                                    domain_cands = await c_port.list_candidates_by_domain(
-                                        domain_id, confirmed_only=True
+                            if sim > best_sim:
+                                best_sim = sim
+                                best_domain = dom
+                        if best_domain is not None and best_sim >= 0.20:
+                            domain_id = best_domain.domain_id
+                            domain_cands = await c_port.list_candidates_by_domain(
+                                domain_id, confirmed_only=True
+                            )
+                            for dc in domain_cands:
+                                if (
+                                    compute_lexical_similarity(
+                                        text_content, [str(dc.content.get("text", ""))]
                                     )
-                                    for dc in domain_cands:
-                                        if (
-                                            compute_lexical_similarity(
-                                                text_content, [str(dc.content.get("text", ""))]
-                                            )
-                                            >= 0.60
-                                        ):
-                                            relation = "refines"
-                                            break
-                                if relation is None:
-                                    relation = "new"
+                                    >= 0.60
+                                ):
+                                    relation = "refines"
+                                    break
+                            if relation is None:
+                                relation = "new"
                     except Exception:
                         _logger.debug(
                             "Failed to resolve domain/relation for candidate",
@@ -327,7 +320,7 @@ async def turn(
                 cand = MemoryCandidate(
                     candidate_id=uuid.uuid4(),
                     owner_id=owner.owner_id,
-                    pet_id=PetId(pet_id),
+                    pet_id=target_pet_id,
                     source=extracted.source,
                     candidate_type=extracted.candidate_type,
                     content=extracted.content,
@@ -346,51 +339,119 @@ async def turn(
                     "summary": cand.content.get("summary") or cand.content.get("text", ""),
                 }
     except Exception:  # noqa: S110
-        # Candidate extraction and fact lookup are best-effort; must not fail turn
+        # Candidate extraction is best-effort; must not fail turn
         pass
 
+    try:
+        prepared = await prepare_turn(
+            pet_id=target_pet_id,
+            text=body.text,
+            requested=body.mode,
+            channel=Channel.TEXT,
+            base=base_ctx,
+            device_slots=body.device_slots(),
+            explicit_domain_id=body.domainId,
+            memory_repo=mem_repo,
+            owner_context=BuildOwnerContextUseCase(k_repo, c_port),
+            now=now,
+        )
+    except Exception:
+        fallback_decision = decide_mode(body.mode, Channel.TEXT, body.text, domain_matched=False)
+        prepared = PreparedTurn(
+            context=base_ctx,
+            decision=fallback_decision,
+            domain_id=None,
+        )
+
     await session.close()  # release the DB connection before a long provider call
+
+    settings = state(request, "settings")
+    chosen_mode = prepared.decision.mode
+    if chosen_mode == TurnMode.EXPERT:
+        budget = ReplyBudget(
+            max_output_tokens=settings.text_expert_max_tokens,
+            timeout_s=settings.text_expert_timeout_s,
+        )
+        expert_gen: TextGenerator | None = getattr(request.app.state, "expert_text_generator", None)
+        generator: TextGenerator = expert_gen or state(request, "text_generator")
+    else:
+        budget = ReplyBudget(max_output_tokens=400, timeout_s=settings.text_timeout_s)
+        generator = state(request, "text_generator")
+
     try:
         chat_request = build_request(
             body.text,
             body.locale,
-            state(request, "settings").text_timeout_s,
-            body.context(
-                confirmed_facts=tuple(confirmed_facts),
-                knowledge=tuple(knowledge_items),
-            ),
+            budget.timeout_s,
+            _effective_context(prepared.context),
+            mode=chosen_mode,
+            budget=budget,
         )
     except ValueError as error:
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text") from error
-    generator: TextGenerator = state(request, "text_generator")
+
     synthesizer: SpeechSynthesizer | None = state(request, "speech_synthesizer")
     # PE-4c: closed tags from the owner's words, sent with `finished` only;
     # the app forwards them to the device. Never stored.
     signals = {"signals": list(conversation_signals(body.text, len(body.history or ())))}
     candidate_payload = {"candidate": candidate_info} if candidate_info is not None else {}
+    domain_id_str = str(prepared.domain_id) if prepared.domain_id is not None else None
 
     async def events() -> AsyncIterator[str]:
-        text_events = chat_turn(generator, chat_request)
+        if body.mode is not None:
+            yield _sse(
+                "mode",
+                {
+                    "mode": chosen_mode.value,
+                    "domainId": domain_id_str,
+                    "reason": prepared.decision.reason.value,
+                },
+            )
+        text_events = chat_turn(
+            generator,
+            chat_request,
+            sections=(chosen_mode == TurnMode.EXPERT),
+            locale_vi=(chat_request.locale == Locale.VI),
+        )
         stream: AsyncIterator[SpokenTurnEvent] = (
             spoken_turn(text_events, synthesizer, body.locale, voice=body.voice)
             if body.speak
             else text_events
         )
+        has_detail = False
         async for event in stream:
             match event:
                 case TextDelta(text=text):
                     yield _sse("delta", {"text": text})
+                case DetailDelta(text=text):
+                    has_detail = True
+                    yield _sse("detail", {"text": text})
                 case GestureChosen(gesture=gesture):
                     yield _sse("gesture", {"name": gesture.value})
                 case ToolCallRequested():
                     continue  # no server tools enabled yet
                 case ChatFinished() as done:
-                    yield _sse("finished", _finished(done) | signals | candidate_payload)
+                    extra = {
+                        "mode": chosen_mode.value,
+                        "domainId": domain_id_str,
+                        "hasDetail": has_detail,
+                    }
+                    yield _sse("finished", _finished(done) | signals | candidate_payload | extra)
                 case SpokenFinished(finished=done, spoken=spoken, first_audio_ms=first_ms):
                     timing = {} if first_ms is None else {"firstAudioMs": first_ms}
+                    extra = {
+                        "mode": chosen_mode.value,
+                        "domainId": domain_id_str,
+                        "hasDetail": has_detail,
+                    }
                     yield _sse(
                         "finished",
-                        _finished(done) | {"spoken": spoken} | timing | signals | candidate_payload,
+                        _finished(done)
+                        | {"spoken": spoken}
+                        | timing
+                        | signals
+                        | candidate_payload
+                        | extra,
                     )
                 case SpokenAudio() as audio:
                     yield _sse(

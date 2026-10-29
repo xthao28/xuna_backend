@@ -39,6 +39,15 @@ class Settings:
     # Optional OpenAI `reasoning_effort` (e.g. "none"/"low") for thinking models,
     # whose hidden reasoning otherwise eats short output budgets. Empty = not sent.
     text_reasoning_effort: str = ""
+    # Expert-mode text provider (KX-1, plan §6.1). Empty provider = reuse `text_generator`.
+    text_expert_provider: str = ""
+    text_expert_base_url: str = ""
+    text_expert_model: str = ""
+    text_expert_api_key: str = ""
+    text_expert_api_key_header: str = ""
+    text_expert_reasoning_effort: str = ""
+    text_expert_timeout_s: float = 60.0
+    text_expert_max_tokens: int = 3000
     # Phone voice V1 (owner D16, 2026-10-22). Empty provider = voice off (the
     # endpoints answer 503 voice_unavailable). ASR `openai_transcription` = any
     # OpenAI-style /audio/transcriptions server (Groq Whisper in V0).
@@ -63,6 +72,12 @@ class Settings:
     # Backup encryption key (Phase 2, CLD-20). Empty = derives deterministic fallback.
     backup_encryption_key: str = ""
 
+    def __post_init__(self) -> None:
+        if not 0 < self.text_expert_timeout_s <= 120:
+            raise ValueError("text_expert_timeout_s must be in (0, 120]")
+        if not 512 <= self.text_expert_max_tokens <= 8192:
+            raise ValueError("text_expert_max_tokens must be in 512..8192")
+
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
         source = os.environ if env is None else env
@@ -84,6 +99,14 @@ class Settings:
             text_api_key_header=source.get("XUNA_TEXT_API_KEY_HEADER", "authorization"),
             text_timeout_s=float(source.get("XUNA_TEXT_TIMEOUT_S", "30")),
             text_reasoning_effort=source.get("XUNA_TEXT_REASONING_EFFORT", ""),
+            text_expert_provider=source.get("XUNA_TEXT_EXPERT_PROVIDER", ""),
+            text_expert_base_url=source.get("XUNA_TEXT_EXPERT_BASE_URL", ""),
+            text_expert_model=source.get("XUNA_TEXT_EXPERT_MODEL", ""),
+            text_expert_api_key=source.get("XUNA_TEXT_EXPERT_API_KEY", ""),
+            text_expert_api_key_header=source.get("XUNA_TEXT_EXPERT_API_KEY_HEADER", ""),
+            text_expert_reasoning_effort=source.get("XUNA_TEXT_EXPERT_REASONING_EFFORT", ""),
+            text_expert_timeout_s=float(source.get("XUNA_TEXT_EXPERT_TIMEOUT_S", "60") or "60"),
+            text_expert_max_tokens=int(source.get("XUNA_TEXT_EXPERT_MAX_TOKENS", "3000") or "3000"),
             asr_provider=source.get("XUNA_ASR_PROVIDER", ""),
             asr_base_url=source.get("XUNA_ASR_BASE_URL", ""),
             asr_model=source.get("XUNA_ASR_MODEL", ""),
@@ -108,6 +131,8 @@ class Settings:
         # Never print secrets (database password, API key) in logs or errors.
         return (
             f"Settings(environment={self.environment.value!r}, "
-            f"text_provider={self.text_provider!r}, asr_provider={self.asr_provider!r}, "
+            f"text_provider={self.text_provider!r}, "
+            f"text_expert_provider={self.text_expert_provider!r}, "
+            f"asr_provider={self.asr_provider!r}, "
             f"tts_provider={self.tts_provider!r})"
         )

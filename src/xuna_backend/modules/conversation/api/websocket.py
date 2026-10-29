@@ -1,4 +1,4 @@
-"""WebSocket voice session route (VOICE-WS, 2026-10-23).
+"""WebSocket voice session route (VOICE-WS, 2026-10-23; KX-1 2026-10-29).
 
 Protocol:
 - Path: `GET /v1/voice` (WebSocket)
@@ -10,6 +10,8 @@ import asyncio
 import json
 import logging
 import uuid
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -23,6 +25,7 @@ from xuna_backend.modules.accounts.application.ports import (
     InvalidTokenError,
     TokenVerifier,
 )
+from xuna_backend.modules.cognition.application.ports import TextGenerator
 from xuna_backend.modules.cognition.domain.types import (
     ChatFinished,
     Locale,
@@ -31,37 +34,123 @@ from xuna_backend.modules.cognition.domain.types import (
 from xuna_backend.modules.consent.application.ports import ConsentRepository
 from xuna_backend.modules.consent.domain.consent import ConsentClass
 from xuna_backend.modules.conversation.application.chat_turn import (
+    MAX_HISTORY_LINE_CHARS,
+    MAX_HISTORY_LINES,
+    DetailDelta,
     GestureChosen,
     HistoryLine,
     PetAction,
     PetMood,
     PetSelf,
     PetTemperament,
+    ReplyBudget,
     TurnContext,
 )
 from xuna_backend.modules.conversation.application.spoken_turn import (
     SpokenAudio,
     SpokenFinished,
 )
+from xuna_backend.modules.conversation.application.turn_preparation import (
+    PreparedTurn,
+    prepare_turn,
+)
 from xuna_backend.modules.conversation.application.voice_session import (
     VoiceSession,
     VoiceSessionError,
 )
 from xuna_backend.modules.conversation.domain.signals import conversation_signals
+from xuna_backend.modules.conversation.domain.turn_mode import (
+    Channel,
+    RequestedMode,
+    TurnMode,
+    decide_mode,
+)
 from xuna_backend.modules.identity.application.ports import IdentityRepository
 from xuna_backend.modules.identity.domain.pet_id import PetId
+from xuna_backend.modules.knowledge.application.owner_context import BuildOwnerContextUseCase
+from xuna_backend.modules.knowledge.domain.owner_context import DeviceSlotView
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["voice"])
 
 
-def _parse_turn_context(raw: dict[str, Any]) -> TurnContext:
+@dataclass(frozen=True, slots=True)
+class _ParsedCommitContext:
+    base: TurnContext
+    device_slots: tuple[DeviceSlotView, ...] | None
+    domain_id: uuid.UUID | None
+
+
+def _parse_client_time(raw_val: object) -> datetime | None:
+    if not isinstance(raw_val, str) or not raw_val.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(raw_val.strip())
+    except ValueError:
+        return None
+    if dt.utcoffset() is None:
+        return None
+    return dt
+
+
+def _parse_device_slots(raw_val: object) -> tuple[DeviceSlotView, ...] | None:
+    if raw_val is None or not isinstance(raw_val, list):
+        return None
+    slots: list[DeviceSlotView] = []
+    for item in raw_val:
+        if len(slots) >= 5:
+            break
+        if not isinstance(item, dict):
+            continue
+        slot_val = item.get("slot")
+        level_val = item.get("level")
+        state_val = item.get("state")
+        if (
+            isinstance(slot_val, int)
+            and not isinstance(slot_val, bool)
+            and isinstance(level_val, int)
+            and not isinstance(level_val, bool)
+            and isinstance(state_val, str)
+        ):
+            try:
+                slots.append(DeviceSlotView(slot=slot_val, level=level_val, state=state_val))
+            except ValueError:
+                continue
+    return tuple(slots)
+
+
+def _parse_domain_id(raw_val: object) -> uuid.UUID | None:
+    if not isinstance(raw_val, str) or not raw_val.strip():
+        return None
+    try:
+        return uuid.UUID(raw_val.strip())
+    except ValueError:
+        return None
+
+
+def _parse_requested_mode(raw_val: object) -> RequestedMode | None:
+    if not isinstance(raw_val, str):
+        return None
+    try:
+        return RequestedMode(raw_val)
+    except ValueError:
+        return None
+
+
+def _parse_commit_context(raw: dict[str, Any]) -> _ParsedCommitContext:
     history_items: list[HistoryLine] = []
-    for item in raw.get("history", []):
-        if isinstance(item, dict) and "text" in item:
-            from_owner = item.get("role") == "owner" or item.get("from_owner", False)
-            history_items.append(HistoryLine(from_owner=from_owner, text=str(item["text"])))
+    raw_history = raw.get("history", [])
+    if isinstance(raw_history, list):
+        for item in raw_history[:MAX_HISTORY_LINES]:
+            if isinstance(item, dict) and "text" in item:
+                txt = str(item["text"]).strip()
+                if not txt:
+                    continue
+                if len(txt) > MAX_HISTORY_LINE_CHARS:
+                    txt = txt[:MAX_HISTORY_LINE_CHARS]
+                from_owner = item.get("role") == "owner" or item.get("from_owner", False)
+                history_items.append(HistoryLine(from_owner=from_owner, text=txt))
 
     pet_self: PetSelf | None = None
     pet_data = raw.get("pet")
@@ -101,12 +190,30 @@ def _parse_turn_context(raw: dict[str, Any]) -> TurnContext:
             mood=_safe_mood(),
         )
 
-    return TurnContext(
+    client_time = _parse_client_time(raw.get("clientTime"))
+    raw_facts = raw.get("confirmedFacts", ())
+    facts_tuple = (
+        tuple(str(f) for f in raw_facts if isinstance(f, str))
+        if isinstance(raw_facts, list | tuple)
+        else ()
+    )
+
+    base = TurnContext(
+        local_time=client_time,
         history=tuple(history_items),
         pet=pet_self,
-        confirmed_facts=tuple(raw.get("confirmedFacts", ())),
+        confirmed_facts=facts_tuple,
         gestures=raw.get("gestures") is True,
     )
+    return _ParsedCommitContext(
+        base=base,
+        device_slots=_parse_device_slots(raw.get("knowledge")),
+        domain_id=_parse_domain_id(raw.get("domainId")),
+    )
+
+
+def _parse_turn_context(raw: dict[str, Any]) -> TurnContext:
+    return _parse_commit_context(raw).base
 
 
 @router.websocket("/voice")
@@ -254,19 +361,98 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         active_turn_task.cancel()
 
                     turn_text = str(payload.get("text", "")).strip()
-                    context = _parse_turn_context(payload.get("context", {}))
+                    raw_ctx = payload.get("context", {})
+                    parsed_ctx = _parse_commit_context(raw_ctx if isinstance(raw_ctx, dict) else {})
+                    requested_mode = _parse_requested_mode(payload.get("mode"))
                     turn_voice = payload.get("voice")
 
+                    now = datetime.now(UTC)
+                    try:
+                        async with app.state.database.sessions() as db:
+                            mem_repo = app.state.memory_repository(db)
+                            k_repo = app.state.knowledge_repository(db)
+                            c_port = app.state.knowledge_candidate_adapter(db)
+                            prepared = await prepare_turn(
+                                pet_id=pet_id,
+                                text=turn_text,
+                                requested=requested_mode,
+                                channel=Channel.VOICE,
+                                base=parsed_ctx.base,
+                                device_slots=parsed_ctx.device_slots,
+                                explicit_domain_id=parsed_ctx.domain_id,
+                                memory_repo=mem_repo,
+                                owner_context=BuildOwnerContextUseCase(k_repo, c_port),
+                                now=now,
+                            )
+                            if (
+                                not prepared.context.confirmed_facts
+                                and parsed_ctx.base.confirmed_facts
+                            ):
+                                prepared = replace(
+                                    prepared,
+                                    context=replace(
+                                        prepared.context,
+                                        confirmed_facts=parsed_ctx.base.confirmed_facts,
+                                    ),
+                                )
+                    except Exception:
+                        fallback_dec = decide_mode(
+                            requested_mode, Channel.VOICE, turn_text, domain_matched=False
+                        )
+                        prepared = PreparedTurn(
+                            context=replace(parsed_ctx.base, mode=fallback_dec.mode),
+                            decision=fallback_dec,
+                            domain_id=None,
+                        )
+
+                    settings = getattr(app.state, "settings", None)
+                    chosen_mode = prepared.decision.mode
+                    if chosen_mode == TurnMode.EXPERT:
+                        max_tok = settings.text_expert_max_tokens if settings is not None else 3000
+                        timeout_s = settings.text_expert_timeout_s if settings is not None else 60.0
+                        budget = ReplyBudget(max_output_tokens=max_tok, timeout_s=timeout_s)
+                        expert_gen: TextGenerator | None = getattr(
+                            app.state, "expert_text_generator", None
+                        )
+                        turn_generator: TextGenerator = expert_gen or app.state.text_generator
+                    else:
+                        budget = ReplyBudget(max_output_tokens=400, timeout_s=30.0)
+                        turn_generator = app.state.text_generator
+
                     async def run_reply(
-                        target_text: str, ctx: TurnContext, v: str | None = None
+                        target_text: str,
+                        prep: PreparedTurn,
+                        req_mode: RequestedMode | None,
+                        bud: ReplyBudget,
+                        gen: TextGenerator,
+                        v: str | None = None,
                     ) -> None:
-                        # PE-4c: same closed tags as the HTTP turn, sent with
-                        # `reply.finished` only; the app forwards them to the device.
                         signals = {
-                            "signals": list(conversation_signals(target_text, len(ctx.history)))
+                            "signals": list(
+                                conversation_signals(target_text, len(prep.context.history))
+                            )
                         }
+                        domain_id_str = str(prep.domain_id) if prep.domain_id is not None else None
+                        mode_val = prep.decision.mode.value
+                        has_detail = False
                         try:
-                            async for event in session.stream_turn_reply(target_text, ctx, voice=v):
+                            if req_mode is not None:
+                                await websocket.send_json(
+                                    {
+                                        "type": "turn.mode",
+                                        "mode": mode_val,
+                                        "domainId": domain_id_str,
+                                        "reason": prep.decision.reason.value,
+                                    }
+                                )
+                            async for event in session.stream_turn_reply(
+                                target_text,
+                                prep.context,
+                                voice=v,
+                                mode=prep.decision.mode,
+                                budget=bud,
+                                generator=gen,
+                            ):
                                 if isinstance(event, GestureChosen):
                                     await websocket.send_json(
                                         {"type": "gesture", "name": event.gesture.value}
@@ -274,6 +460,11 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                 elif isinstance(event, TextDelta):
                                     await websocket.send_json(
                                         {"type": "reply.delta", "text": event.text}
+                                    )
+                                elif isinstance(event, DetailDelta):
+                                    has_detail = True
+                                    await websocket.send_json(
+                                        {"type": "detail.delta", "text": event.text}
                                     )
                                 elif isinstance(event, SpokenAudio):
                                     await websocket.send_json(
@@ -288,6 +479,9 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                             "latencyMs": event.finished.latency_ms,
                                             "firstAudioMs": event.first_audio_ms,
                                             "spoken": event.spoken,
+                                            "mode": mode_val,
+                                            "domainId": domain_id_str,
+                                            "hasDetail": has_detail,
                                         }
                                         | signals
                                     )
@@ -298,17 +492,27 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                             "latencyMs": event.latency_ms,
                                             "firstAudioMs": None,
                                             "spoken": False,
+                                            "mode": mode_val,
+                                            "domainId": domain_id_str,
+                                            "hasDetail": has_detail,
                                         }
                                         | signals
                                     )
                         except asyncio.CancelledError:
                             pass
-                        except Exception as e:
-                            logger.warning(f"Voice websocket reply error: {e}")
+                        except Exception:
+                            logger.warning("voice_ws_reply_error")
                             await websocket.send_json({"type": "error", "code": "reply_failed"})
 
                     active_turn_task = asyncio.create_task(
-                        run_reply(turn_text, context, v=turn_voice)
+                        run_reply(
+                            turn_text,
+                            prepared,
+                            requested_mode,
+                            budget,
+                            turn_generator,
+                            v=turn_voice,
+                        )
                     )
 
                 elif msg_type == "abort":

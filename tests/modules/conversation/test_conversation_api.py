@@ -405,3 +405,134 @@ def test_reply_gesture_is_sent_once_and_never_as_text(
     plain = turn(client, h)
     assert "event: gesture" not in plain.text  # type: ignore[attr-defined]
     assert "<g:" not in generator.requests[1].messages[0].content
+
+
+def test_legacy_client_has_no_mode_event_and_finished_reports_chat(
+    setup: tuple[TestClient, RecordingGenerator], issuer: LocalIssuer
+) -> None:
+    import json
+
+    client, _ = setup
+    h = headers(issuer)
+    bind(client, h)
+    opt_in_u3(client, h)
+    res = turn(client, h, "chào XUNA")
+    text = res.text  # type: ignore[attr-defined]
+    assert "event: mode\n" not in text
+    assert "event: detail\n" not in text
+    finished_blocks = [b for b in text.strip().split("\n\n") if b.startswith("event: finished\n")]
+    assert len(finished_blocks) == 1
+    finished_data = json.loads(finished_blocks[0].split("\n", 1)[1].removeprefix("data: "))
+    assert finished_data["mode"] == "chat"
+    assert finished_data["domainId"] is None
+    assert finished_data["hasDetail"] is False
+
+
+def test_expert_mode_dual_output_spoken_say_only_and_length_limits(
+    database_url: str, issuer: LocalIssuer
+) -> None:
+    import json
+
+    from tests.modules.conversation.test_voice_api import FakeSynthesizer
+    from xuna_backend.modules.cognition.domain.types import ChatFinished, TextDelta
+
+    class ScriptedExpertGenerator(RecordingGenerator):
+        async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+            self.requests.append(request)
+            yield TextDelta("<say>Ý chính.</say>## Chi tiết\n- Mục 1\n- Mục 2")
+            yield ChatFinished("fake", "expert-m", 10, 20, 5)
+
+    _reset(database_url)
+    chat_gen = RecordingGenerator()
+    expert_gen = ScriptedExpertGenerator()
+    synth = FakeSynthesizer()
+    app = create_app(
+        Settings(environment=Environment.TEST, database_url=database_url),
+        verifier=issuer.verifier(),
+        generator=chat_gen,
+        expert_generator=expert_gen,
+        synthesizer=synth,  # type: ignore[arg-type]
+    )
+    with TestClient(app) as client:
+        h = headers(issuer)
+        bind(client, h)
+        opt_in_u3(client, h)
+        url = f"/v1/conversations/{PET}/turns"
+
+        # 600 chars with mode="chat" -> 422
+        r_chat_long = client.post(
+            url,
+            json={"schemaVersion": 1, "text": "a" * 600, "mode": "chat"},
+            headers=h,
+        )
+        assert r_chat_long.status_code == 422
+
+        # 600 chars with mode="expert" and speak=True -> 200, uses expert_gen, TTS speaks only say
+        r_expert = client.post(
+            url,
+            json={"schemaVersion": 1, "text": "a" * 600, "mode": "expert", "speak": True},
+            headers=h,
+        )
+        assert r_expert.status_code == 200
+        assert len(chat_gen.requests) == 0
+        assert len(expert_gen.requests) == 1
+        assert expert_gen.requests[0].max_output_tokens == 3000
+
+        events = []
+        for block in r_expert.text.strip().split("\n\n"):
+            ev_line, data_line = block.split("\n", 1)
+            events.append(
+                (ev_line.removeprefix("event: "), json.loads(data_line.removeprefix("data: ")))
+            )
+
+        names = [n for n, _ in events]
+        assert names[0] == "mode"
+        assert events[0][1] == {
+            "mode": "expert",
+            "domainId": None,
+            "reason": "requested_expert",
+        }
+        assert "delta" in names
+        assert "detail" in names
+        assert "audio" in names
+        # Every detail must arrive BEFORE finished
+        assert max(i for i, (n, _) in enumerate(events) if n == "detail") < names.index("finished")
+        delta_text = "".join(d["text"] for n, d in events if n == "delta")
+        detail_text = "".join(d["text"] for n, d in events if n == "detail")
+        assert delta_text == "Ý chính."
+        assert detail_text == "## Chi tiết\n- Mục 1\n- Mục 2"
+        # Audio only speaks say, never detail
+        assert synth.texts == ["Ý chính."]
+        assert events[-1][0] == "finished"
+        assert events[-1][1]["mode"] == "expert"
+        assert events[-1][1]["hasDetail"] is True
+
+
+def test_foreign_or_unknown_domain_id_is_ignored_without_error(
+    setup: tuple[TestClient, RecordingGenerator], issuer: LocalIssuer
+) -> None:
+    import json
+    import uuid
+
+    client, _ = setup
+    h = headers(issuer)
+    bind(client, h)
+    opt_in_u3(client, h)
+
+    res = client.post(
+        f"/v1/conversations/{PET}/turns",
+        json={
+            "schemaVersion": 1,
+            "text": "Giải thích nguyên lý hoạt động?",
+            "mode": "auto",
+            "domainId": str(uuid.uuid4()),
+            "knowledge": [{"slot": 0, "level": 2, "state": "active"}],
+        },
+        headers=h,
+    )
+    assert res.status_code == 200
+    first_block = res.text.strip().split("\n\n")[0]
+    mode_data = json.loads(first_block.split("\n", 1)[1].removeprefix("data: "))
+    assert mode_data["domainId"] is None
+    assert mode_data["mode"] == "chat"
+    assert mode_data["reason"] == "casual"

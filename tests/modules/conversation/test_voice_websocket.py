@@ -245,3 +245,101 @@ def test_ws_reply_gesture_comes_before_the_text(database_url: str, issuer: Local
             assert replies and not any("<g:" in e["text"] for e in replies)
             assert events[-1]["type"] == "reply.finished"
             ws.send_json({"type": "bye"})
+
+
+def test_ws_expert_mode_emits_turn_mode_detail_delta_and_speaks_only_say(
+    database_url: str, issuer: LocalIssuer
+) -> None:
+    from collections.abc import AsyncIterator
+
+    from fastapi.testclient import TestClient
+
+    from tests.modules.conversation.test_conversation_api import RecordingGenerator, _reset
+    from xuna_backend.core.config import Environment, Settings
+    from xuna_backend.main import create_app
+    from xuna_backend.modules.cognition.domain.types import (
+        ChatEvent,
+        ChatFinished,
+        ChatRequest,
+        TextDelta,
+    )
+
+    class ScriptedExpertGen(RecordingGenerator):
+        async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+            self.requests.append(request)
+            yield TextDelta("<say>Trả lời ngắn.</say>## Chi tiết WS\n- Dòng 1")
+            yield ChatFinished("fake", "expert-ws", 5, 10, 4)
+
+    _reset(database_url)
+    expert_gen = ScriptedExpertGen()
+    synthesizer = FakeSynthesizer(pcm=False)
+    app = create_app(
+        Settings(environment=Environment.TEST, database_url=database_url),
+        verifier=issuer.verifier(),
+        generator=RecordingGenerator(),
+        expert_generator=expert_gen,
+        recognizer=FakeRecognizer(),
+        synthesizer=synthesizer,  # type: ignore[arg-type]
+    )
+    with TestClient(app) as client:
+        h = headers(issuer)
+        bind(client, h)
+        consents(client, h, text=True, voice=True)
+
+        token = h["Authorization"].removeprefix("Bearer ")
+        with client.websocket_connect("/v1/voice") as ws:
+            ws.send_json(
+                {
+                    "type": "hello",
+                    "schemaVersion": 1,
+                    "auth": {"token": token},
+                    "petId": PET,
+                    "speak": True,
+                }
+            )
+            assert ws.receive_json()["type"] == "hello.ok"
+
+            ws.send_json(
+                {
+                    "type": "turn.commit",
+                    "text": "Giải thích cho mình nguyên lý này",
+                    "mode": "expert",
+                    "context": {
+                        "clientTime": "2026-10-29T10:00:00+07:00",
+                        "knowledge": [{"slot": 0, "level": 2, "state": "active"}],
+                    },
+                }
+            )
+
+            events = []
+            while True:
+                msg = ws.receive()
+                if msg.get("text"):
+                    parsed = json.loads(msg["text"])
+                    events.append(parsed)
+                    if parsed["type"] in ("reply.finished", "error"):
+                        break
+
+            types = [e["type"] for e in events]
+            assert types[0] == "turn.mode"
+            assert events[0] == {
+                "type": "turn.mode",
+                "mode": "expert",
+                "domainId": None,
+                "reason": "requested_expert",
+            }
+            assert "reply.delta" in types
+            assert "detail.delta" in types
+            assert max(i for i, t in enumerate(types) if t == "detail.delta") < types.index(
+                "reply.finished"
+            )
+            say_text = "".join(e["text"] for e in events if e["type"] == "reply.delta")
+            detail_text = "".join(e["text"] for e in events if e["type"] == "detail.delta")
+            assert say_text == "Trả lời ngắn."
+            assert detail_text == "## Chi tiết WS\n- Dòng 1"
+            assert synthesizer.texts == ["Trả lời ngắn."]
+            finished = events[-1]
+            assert finished["mode"] == "expert"
+            assert finished["domainId"] is None
+            assert finished["hasDetail"] is True
+            ws.send_json({"type": "bye"})

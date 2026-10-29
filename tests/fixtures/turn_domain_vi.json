@@ -1,0 +1,427 @@
+[
+  {
+    "text": "Chào XUNA, hôm nay bạn khỏe không",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển ESP32, firmware C++, RTOS, nguồn mạch", "items": ["Dự án dùng ESP-IDF 5.2"]},
+      {"name": "Nấu ăn gia đình", "description": "Công thức nấu món Việt, kho cá, canh chua, gia vị", "items": ["Nhà mình ít ăn cay"]}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Tối nay trời mát ghê, mình đi dạo một vòng nhé",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển ESP32, firmware C++, RTOS, nguồn mạch", "items": []},
+      {"name": "Tài chính cá nhân", "description": "Ngân sách chi tiêu, tiết kiệm, thuế thu nhập, đầu tư", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Cảm ơn XUNA nhiều nha, bạn dễ thương lắm",
+    "channel": "voice",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình phần mềm", "description": "Backend Python FastAPI, PostgreSQL, kiểm thử phần mềm", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Chúc bạn ngủ ngon nhé",
+    "channel": "voice",
+    "requested": "auto",
+    "domains": [
+      {"name": "Y sinh", "description": "Y học, sinh học, dược lý, dinh dưỡng lâm sàng", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Mình mới uống cà phê sáng xong, tỉnh táo hẳn",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Marketing", "description": "Chiến lược quảng cáo số, nội dung thương hiệu, KPI", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Mấy giờ rồi XUNA ơi",
+    "channel": "voice",
+    "requested": null,
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển ESP32, firmware C++, RTOS", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Kể cho mình nghe một câu chuyện vui ngắn đi",
+    "channel": "text",
+    "requested": "chat",
+    "domains": [
+      {"name": "Ngoại ngữ", "description": "Học tiếng Anh giao tiếp, ngữ pháp, từ vựng IELTS", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Hôm nay công việc của mình hơi bận một chút",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Pháp luật", "description": "Pháp luật dân sự, hợp đồng lao động, doanh nghiệp", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Bạn đang làm trò gì trên màn hình thế",
+    "channel": "voice",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển ESP32, firmware C++, RTOS", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Thứ Bảy tuần này mình định về quê thăm gia đình",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Tài chính cá nhân", "description": "Quản lý chi tiêu, tiết kiệm, đầu tư, thuế", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Xem giúp mình đoạn hàm khởi tạo SPI này:\n```c\nspi_bus_config_t buscfg = {\n    .mosi_io_num = 23,\n    .miso_io_num = 19,\n    .sclk_io_num = 18\n};\n```",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển ESP32, hàm khởi tạo SPI, cấu hình spi_bus_config_t", "items": ["Chân SPI: mosi_io_num 23, miso_io_num 19, sclk_io_num 18"]},
+      {"name": "Tài chính cá nhân", "description": "Ngân sách, đầu tư, kế toán thuế", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Mình có đoạn truy vấn SQL bị chậm:\n```sql\nSELECT * FROM orders WHERE created_at > '2026-01-01' ORDER BY total DESC;\n```\nLàm sao tối ưu trên PostgreSQL?",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình phần mềm", "description": "Cơ sở dữ liệu PostgreSQL, tối ưu đoạn truy vấn SQL bị chậm", "items": ["Bảng orders có cột created_at và total trên PostgreSQL"]},
+      {"name": "Marketing", "description": "Quảng cáo số, chiến dịch thương hiệu", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Dòng 1: khởi động nguồn 3.3V\nDòng 2: cấu hình chân GPIO14 kéo lên\nDòng 3: bật ngắt sườn xuống\nDòng 4: đọc thanh ghi trạng thái nhưng bị treo",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Khởi động nguồn 3.3V, cấu hình chân GPIO14 kéo lên, bật ngắt sườn xuống", "items": ["Đọc thanh ghi trạng thái ngoại vi"]},
+      {"name": "Ngoại ngữ", "description": "Ngữ pháp tiếng Anh, dịch thuật", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "```python\ndef tinh_thue(thu_nhap: float) -> float:\n    return thu_nhap * 0.1\n```\nHàm tính thuế thu nhập cá nhân này của mình chưa trừ giảm trừ gia cảnh.",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Tài chính", "description": "Thuế thu nhập cá nhân, giảm trừ gia cảnh, kế toán doanh nghiệp", "items": ["Tính theo luật thuế Việt Nam"]},
+      {"name": "Y sinh", "description": "Sinh học phân tử, dược lý", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Trong dự án hiện tại của bọn mình, hệ thống thu thập dữ liệu từ nhiều thiết bị đầu cuối gửi về máy chủ trung tâm mỗi năm giây một lần. Khi số lượng kết nối đồng thời vượt quá hai nghìn thiết bị thì hàng đợi xử lý bắt đầu bị đầy, độ trễ tăng vọt lên hơn mười giây và thỉnh thoảng tiến trình worker bị khởi động lại đột ngột không rõ nguyên nhân.",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Nấu ăn gia đình", "description": "Món kho, món xào, canh chua", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Mình đang soạn thảo lại quy trình vận hành nội bộ cho nhóm chăm sóc khách hàng vào dịp cuối năm. Hiện tại khối lượng tin nhắn đổ về từ ba kênh khác nhau rất lớn, nhân viên thường xuyên bị sót phản hồi của khách hàng ưu tiên và chưa có tiêu chí phân loại mức độ khẩn cấp ngay từ bước tiếp nhận ban đầu nên thời gian chờ trung bình bị kéo dài quá hai giờ.",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [],
+    "expect_mode": "expert",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Bước 1: chuẩn bị mẫu thử\nBước 2: đo nồng độ dung dịch đệm\nBước 3: ủ ở nhiệt độ 37 độ C trong 30 phút\nBước 4: đọc mật độ quang học nhưng kết quả dao động mạnh",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Y sinh", "description": "Chuẩn bị mẫu thử, đo nồng độ dung dịch đệm, đọc mật độ quang học", "items": ["Ủ mẫu ở nhiệt độ 37 độ C trong 30 phút"]},
+      {"name": "Pháp luật", "description": "Hợp đồng dân sự, luật lao động", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "```dart\nfinal stream = controller.stream.asBroadcastStream();\n```\nCách dùng broadcast stream trong Flutter như vậy có làm mất sự kiện đầu tiên không?",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình phần mềm", "description": "Phát triển ứng dụng Flutter Dart, cách dùng broadcast stream và controller", "items": ["Tránh mất sự kiện đầu tiên khi dùng broadcast stream trong Flutter"]},
+      {"name": "Nấu ăn gia đình", "description": "Công thức nấu nướng", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Khoản 1: Bên A giao hàng tại kho Bên B\nKhoản 2: Bên B thanh toán trong 15 ngày làm việc\nKhoản 3: Phạt vi phạm 8% giá trị phần nghĩa vụ bị vi phạm\nKhoản 4: Tranh chấp giải quyết tại Tòa án có thẩm quyền",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Pháp luật", "description": "Hợp đồng giao hàng thanh toán, phạt vi phạm 8% giá trị phần nghĩa vụ", "items": ["Tranh chấp giải quyết tại Tòa án có thẩm quyền"]},
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển ESP32, RTOS", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Chúng tôi đang cân nhắc hai phương án phân bổ ngân sách truyền thông cho quý tới: một là dồn bảy mươi phần trăm ngân sách vào video ngắn để tăng độ phủ thương hiệu nhanh, hai là chia đều cho tìm kiếm có trả phí và nội dung chuyên sâu trên website nhằm thu thập danh sách khách hàng tiềm năng chất lượng cao cho đội ngũ kinh doanh.",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Marketing", "description": "Phương án phân bổ ngân sách truyền thông, độ phủ thương hiệu, video ngắn", "items": ["Thu thập danh sách khách hàng tiềm năng chất lượng cao cho đội ngũ kinh doanh"]},
+      {"name": "Y sinh", "description": "Dược lý, lâm sàng", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Tại sao mạch ESP32-S3 của mình bị reset liên tục khi bật phát sóng BLE?",
+    "channel": "voice",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển ESP32-S3, firmware, nguồn điện và phát sóng BLE", "items": ["Mạch dùng pin LiPo 3.7V"]},
+      {"name": "Tài chính", "description": "Kế toán, đầu tư, thuế", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Giải thích sự khác nhau giữa mutex và binary semaphore trong FreeRTOS",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Hệ điều hành thời gian thực FreeRTOS, sự khác nhau giữa mutex và binary semaphore", "items": ["Dùng mutex và binary semaphore để đồng bộ task trong FreeRTOS"]},
+      {"name": "Marketing", "description": "Chiến lược quảng cáo, nội dung số", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Làm sao để sửa lỗi async session trong SQLAlchemy khi chạy với FastAPI?",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình phần mềm", "description": "Backend Python FastAPI, sửa lỗi async session trong SQLAlchemy", "items": ["Mỗi request dùng một async session độc lập trong SQLAlchemy với FastAPI"]},
+      {"name": "Ngoại ngữ", "description": "Tiếng Anh giao tiếp", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Phân tích chỉ số dòng tiền tự do và tỷ số nợ trên vốn chủ sở hữu của doanh nghiệp",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Tài chính", "description": "Phân tích tài chính doanh nghiệp, dòng tiền tự do, vốn chủ sở hữu, kế toán", "items": []},
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển, mạch điện", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "So sánh hợp đồng lao động xác định thời hạn và hợp đồng thử việc theo luật lao động Việt Nam",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Pháp luật", "description": "Pháp luật lao động Việt Nam, hợp đồng lao động, hợp đồng thử việc", "items": []},
+      {"name": "Y sinh", "description": "Y học, dược học", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Hướng dẫn cách thiết kế chiến dịch quảng cáo chuyển đổi và tính chỉ số KPI ROAS",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Marketing", "description": "Chiến dịch quảng cáo chuyển đổi, đo lường chỉ số KPI ROAS, nghiên cứu khách hàng", "items": []},
+      {"name": "Pháp luật", "description": "Luật dân sự, hợp đồng", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Giải thích cơ chế tác dụng của thuốc ức chế bơm proton trong điều trị trào ngược dạ dày",
+    "channel": "voice",
+    "requested": "auto",
+    "domains": [
+      {"name": "Y sinh", "description": "Dược lý học, cơ chế tác dụng của thuốc, điều trị trào ngược dạ dày", "items": []},
+      {"name": "Tài chính", "description": "Ngân sách, thuế, đầu tư", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Phân biệt cách dùng thì hiện tại hoàn thành và quá khứ đơn trong ngữ pháp tiếng Anh?",
+    "channel": "voice",
+    "requested": "auto",
+    "domains": [
+      {"name": "Ngoại ngữ", "description": "Ngữ pháp tiếng Anh, thì hiện tại hoàn thành, quá khứ đơn, luyện viết", "items": []},
+      {"name": "Lập trình phần mềm", "description": "Backend Python, mobile Flutter", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Cách để khử mùi tanh của cá lóc trước khi nấu món canh chua miền Tây?",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Nấu ăn gia đình", "description": "Mẹo nhà bếp, khử mùi tanh cá lóc, nấu canh chua miền Tây", "items": []},
+      {"name": "Lập trình nhúng", "description": "ESP32, FreeRTOS", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Tư vấn cách tính toán tụ lọc nguồn cho màn hình LCD TFT dùng chip ST7789",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Phần cứng mạch điện, tụ lọc nguồn, màn hình LCD TFT ST7789", "items": []},
+      {"name": "Marketing", "description": "Nội dung quảng cáo, thương hiệu", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Kiểm tra điều khoản bồi thường thiệt hại và phạt cọc trong hợp đồng mua bán tài sản",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Pháp luật", "description": "Hợp đồng mua bán tài sản, điều khoản bồi thường thiệt hại, phạt cọc", "items": []},
+      {"name": "Nấu ăn gia đình", "description": "Công thức món Việt", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Đánh giá thiết kế thử nghiệm lâm sàng ngẫu nhiên có đối chứng mù đôi",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Y sinh", "description": "Nghiên cứu y sinh, thiết kế thử nghiệm lâm sàng ngẫu nhiên có đối chứng", "items": []},
+      {"name": "Ngoại ngữ", "description": "Từ vựng, phát âm IPA", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Làm thế nào tối ưu thời gian phản hồi API khi dùng chuẩn kiến trúc Clean Architecture?",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình phần mềm", "description": "Kiến trúc Clean Architecture, tối ưu hiệu năng thời gian phản hồi API backend", "items": []},
+      {"name": "Tài chính", "description": "Kế toán, kiểm toán", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Tính toán tỷ suất hoàn vốn nội bộ IRR cho dự án đầu tư dây chuyền sản xuất",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Tài chính", "description": "Phân tích dự án đầu tư, tỷ suất hoàn vốn nội bộ IRR, dòng tiền chiết khấu", "items": []},
+      {"name": "Lập trình nhúng", "description": "Firmware C++, vi điều khiển", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Sửa lỗi phát âm âm cuối và trọng âm từ trong bài thi nói tiếng Anh IELTS",
+    "channel": "voice",
+    "requested": "auto",
+    "domains": [
+      {"name": "Ngoại ngữ", "description": "Luyện phát âm tiếng Anh, trọng âm từ, phiên âm IPA, bài thi nói IELTS", "items": []},
+      {"name": "Pháp luật", "description": "Luật doanh nghiệp, hợp đồng", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Mình vừa đọc thêm tài liệu về vi điều khiển ESP32 và FreeRTOS hôm qua",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển ESP32, hệ điều hành FreeRTOS, firmware C++", "items": []},
+      {"name": "Nấu ăn gia đình", "description": "Món ăn hàng ngày", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Làm sao để sắp xếp thời gian biểu cá nhân trong ngày cho đỡ mệt?",
+    "channel": "text",
+    "requested": "auto",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển ESP32, giao tiếp I2C SPI, mạch nguồn", "items": []},
+      {"name": "Pháp luật", "description": "Bộ luật dân sự, tố tụng, hợp đồng thương mại", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Giải thích chi tiết cho mình nguyên lý hoạt động của bộ chuyển đổi nguồn xung buck converter",
+    "channel": "text",
+    "requested": "chat",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Phần cứng mạch nguồn, bộ chuyển đổi nguồn xung buck converter, vi điều khiển", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": 0
+  },
+  {
+    "text": "Phân tích cho mình câu chuyện này theo góc nhìn chuyên sâu nhé",
+    "channel": "text",
+    "requested": "expert",
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Vi điều khiển ESP32, RTOS", "items": []}
+    ],
+    "expect_mode": "expert",
+    "expect_domain_index": null
+  },
+  {
+    "text": "Tại sao điện áp chân cảm biến nhiệt độ trên mạch ESP32 lại bị nhiễu?",
+    "channel": "text",
+    "requested": null,
+    "domains": [
+      {"name": "Lập trình nhúng", "description": "Mạch ESP32, đọc điện áp ADC cảm biến nhiệt độ, lọc nhiễu", "items": []}
+    ],
+    "expect_mode": "chat",
+    "expect_domain_index": 0
+  }
+]

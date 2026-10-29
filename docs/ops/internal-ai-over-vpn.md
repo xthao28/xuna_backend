@@ -17,6 +17,15 @@ XUNA_TEXT_BASE_URL=http://<internal-host>:<port>/v1   # private address; not com
 XUNA_TEXT_MODEL=<model-name>
 XUNA_TEXT_API_KEY=<if required>                      # env/secret store only
 XUNA_TEXT_TIMEOUT_S=30
+# Optional expert-mode routing (KX-1; empty provider reuses XUNA_TEXT_*):
+XUNA_TEXT_EXPERT_PROVIDER=
+XUNA_TEXT_EXPERT_BASE_URL=
+XUNA_TEXT_EXPERT_MODEL=
+XUNA_TEXT_EXPERT_API_KEY=
+XUNA_TEXT_EXPERT_API_KEY_HEADER=
+XUNA_TEXT_EXPERT_REASONING_EFFORT=
+XUNA_TEXT_EXPERT_TIMEOUT_S=60
+XUNA_TEXT_EXPERT_MAX_TOKENS=3000
 ```
 
 ## Bifrost gateway

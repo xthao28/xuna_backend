@@ -192,3 +192,21 @@ def test_closing_the_stream_cancels_pending_synthesis() -> None:
 def test_rejects_a_parallel_limit_below_one() -> None:
     with pytest.raises(ValueError):
         collect(spoken_turn(reply("A."), Synth(), Locale.VI, max_parallel=0))
+
+
+def test_detail_delta_passes_through_without_being_synthesised() -> None:
+    from xuna_backend.modules.conversation.application.chat_turn import DetailDelta, TurnEvent
+
+    async def expert_reply() -> AsyncIterator[TurnEvent]:
+        yield TextDelta("Tóm tắt nói. ")
+        yield DetailDelta("## Chi tiết markdown\n- Mục 1\n- Mục 2")
+        yield DONE
+
+    synth = Synth()
+    events = collect(spoken_turn(expert_reply(), synth, Locale.VI))
+    audio = [e for e in events if isinstance(e, SpokenAudio)]
+    details = [e for e in events if isinstance(e, DetailDelta)]
+    assert [a.text for a in audio] == ["Tóm tắt nói."]
+    assert synth.started == ["Tóm tắt nói."]
+    assert len(details) == 1
+    assert details[0].text == "## Chi tiết markdown\n- Mục 1\n- Mục 2"

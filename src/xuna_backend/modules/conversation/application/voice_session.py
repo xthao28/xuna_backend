@@ -18,6 +18,7 @@ from xuna_backend.modules.cognition.application.ports import (
 )
 from xuna_backend.modules.cognition.domain.types import Locale
 from xuna_backend.modules.conversation.application.chat_turn import (
+    ReplyBudget,
     TurnContext,
     build_request,
     chat_turn,
@@ -32,6 +33,7 @@ from xuna_backend.modules.conversation.application.voice import (
     transcribe_once,
     wav_container,
 )
+from xuna_backend.modules.conversation.domain.turn_mode import TurnMode
 from xuna_backend.modules.identity.domain.pet_id import PetId
 
 
@@ -118,6 +120,10 @@ class VoiceSession:
         text: str,
         context: TurnContext,
         voice: str | None = None,
+        *,
+        mode: TurnMode = TurnMode.CHAT,
+        budget: ReplyBudget | None = None,
+        generator: TextGenerator | None = None,
     ) -> AsyncIterator[SpokenTurnEvent]:
         if not text.strip():
             self.state = SessionState.IDLE
@@ -125,8 +131,20 @@ class VoiceSession:
 
         self.state = SessionState.REPLYING
         try:
-            req = build_request(text, context=context, locale=self.locale)
-            text_events = chat_turn(self.generator, req)
+            req = build_request(
+                text,
+                context=context,
+                locale=self.locale,
+                mode=mode,
+                budget=budget,
+            )
+            chosen_gen = generator or self.generator
+            text_events = chat_turn(
+                chosen_gen,
+                req,
+                sections=(mode == TurnMode.EXPERT),
+                locale_vi=(req.locale == Locale.VI),
+            )
             chosen_voice = voice or self.voice
             if self.speak and self.synthesizer is not None:
                 async for event in spoken_turn(

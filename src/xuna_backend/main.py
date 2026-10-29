@@ -92,6 +92,26 @@ def text_generator(settings: Settings) -> TextGenerator:
     return cast(TextGenerator, registry.create(Capability.TEXT, settings.text_provider, options))
 
 
+def expert_text_generator(settings: Settings) -> TextGenerator | None:
+    """None when expert provider is unset (reuses `text_generator`); fails fast if misconfigured."""
+    if not settings.text_expert_provider:
+        return None
+    registry = ProviderRegistry()
+    echo.register(registry)
+    openai_compatible.register(registry)
+    options = {
+        "base_url": settings.text_expert_base_url or settings.text_base_url,
+        "model": settings.text_expert_model,
+        "api_key": settings.text_expert_api_key or settings.text_api_key,
+        "api_key_header": settings.text_expert_api_key_header or settings.text_api_key_header,
+        "reasoning_effort": settings.text_expert_reasoning_effort,
+    }
+    return cast(
+        TextGenerator,
+        registry.create(Capability.TEXT, settings.text_expert_provider, options),
+    )
+
+
 def speech_recognizer(settings: Settings) -> SpeechRecognizer | None:
     """None when voice is off; fails at startup on an unknown/misconfigured provider."""
     if not settings.asr_provider:
@@ -152,6 +172,7 @@ def create_app(
     *,
     verifier: TokenVerifier | None = None,
     generator: TextGenerator | None = None,
+    expert_generator: TextGenerator | None = None,
     recognizer: SpeechRecognizer | None = None,
     synthesizer: SpeechSynthesizer | None = None,
     embedder_instance: Embedder | None = None,
@@ -197,6 +218,7 @@ def create_app(
     )
     app.state.device_session_hub = InMemoryDeviceSessionHub()
     app.state.text_generator = generator or text_generator(resolved)
+    app.state.expert_text_generator = expert_generator or expert_text_generator(resolved)
     app.state.speech_recognizer = recognizer or speech_recognizer(resolved)
     app.state.speech_synthesizer = synthesizer or speech_synthesizer(resolved)
     app.state.embedder = embedder_instance or embedder(resolved)
