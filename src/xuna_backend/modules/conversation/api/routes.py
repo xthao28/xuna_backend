@@ -70,7 +70,7 @@ from xuna_backend.modules.conversation.application.voice import (
 )
 from xuna_backend.modules.conversation.domain.candidate_extractor import (
     extract_candidate,
-    extract_knowledge_candidate,
+    extract_convention_candidate,
 )
 from xuna_backend.modules.conversation.domain.signals import conversation_signals
 from xuna_backend.modules.conversation.domain.turn_mode import (
@@ -245,7 +245,7 @@ async def turn(
     if len(body.text) <= MAX_INPUT_CHARS:
         extracted = extract_candidate(body.text)
         if extracted is None and body.extractKnowledge:
-            extracted = extract_knowledge_candidate(body.text)
+            extracted = extract_convention_candidate(body.text)
     candidate_info: dict[str, Any] | None = None
 
     now = datetime.now(UTC)

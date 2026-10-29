@@ -83,12 +83,22 @@ class TeachKnowledgeRequest(BaseModel):
     domain_id: uuid.UUID | None = Field(default=None, alias="domainId")
 
 
+class ProposeKnowledgeCaseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, populate_by_name=True)
+
+    schema_version: Literal[1] = Field(default=1, alias="schemaVersion")
+    domain_id: uuid.UUID | None = Field(default=None, alias="domainId")
+    question: str = Field(min_length=1, max_length=8000)
+    answer: str = Field(min_length=1, max_length=12000)
+
+
 class TeachKnowledgeResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
     candidate_id: uuid.UUID = Field(alias="candidateId")
     fact_key: int = Field(alias="factKey")
     text: str
+    kind: str = "convention"
     status: str
     proposed_domain_id: uuid.UUID | None = Field(default=None, alias="proposedDomainId")
     relation: str

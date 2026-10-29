@@ -25,6 +25,9 @@ from xuna_backend.modules.identity.domain.pet_id import PetId
 from xuna_backend.modules.knowledge.application.brief_draft import (
     DraftExpertBriefUseCase,
 )
+from xuna_backend.modules.knowledge.application.cases import (
+    ProposeKnowledgeCaseUseCase,
+)
 from xuna_backend.modules.knowledge.application.ports import (
     KnowledgeCandidatePort,
     KnowledgeRepository,
@@ -37,6 +40,7 @@ from xuna_backend.modules.knowledge.application.schemas import (
     DraftBriefResponse,
     KnowledgePackResponse,
     KnowledgeSuggestionResponse,
+    ProposeKnowledgeCaseRequest,
     TeachKnowledgeRequest,
     TeachKnowledgeResponse,
     UpdateDomainRequest,
@@ -247,6 +251,41 @@ async def teach_knowledge(
         res = await use_case.execute(PetId(pet_id), owner.owner_id, body)
     except ValueError as err:
         raise _map_error(err) from err
+    await commit_or_conflict(session)
+    return res
+
+
+@router.post(
+    "/pets/{pet_id}/knowledge-cases",
+    response_model=TeachKnowledgeResponse,
+    status_code=HTTPStatus.CREATED,
+)
+async def propose_knowledge_case(
+    pet_id: str,
+    body: ProposeKnowledgeCaseRequest,
+    request: Request,
+    owner: U3Owner,
+    session: Session,
+) -> TeachKnowledgeResponse:
+    try:
+        identity_repo = state(request, "identity_repository")(session)
+        await get_owned_pet(identity_repo, owner.owner_id, PetId(pet_id))
+    except (ValueError, IdentityError) as err:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND) from err
+
+    repo = _repo(request, session)
+    candidate_port = _candidate_port(request, session)
+    expert_gen: TextGenerator | None = getattr(request.app.state, "expert_text_generator", None)
+    gen: TextGenerator = expert_gen or state(request, "text_generator")
+    use_case = ProposeKnowledgeCaseUseCase(gen, repo, candidate_port)
+    try:
+        res = await use_case.execute(PetId(pet_id), owner.owner_id, body)
+    except KeyError as err:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND, str(err)) from err
+    except ValueError as err:
+        raise _map_error(err) from err
+    except ProviderUnavailableError as err:
+        raise AppError("provider_unavailable", HTTPStatus.SERVICE_UNAVAILABLE) from err
     await commit_or_conflict(session)
     return res
 

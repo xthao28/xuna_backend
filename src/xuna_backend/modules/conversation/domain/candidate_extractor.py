@@ -315,16 +315,34 @@ _PERSONAL_PATTERN = re.compile(
     r"món (?:ăn )?yêu thích|màu yêu thích|(?:mình|tôi|em) (?:có )?nuôi)\b",
     re.IGNORECASE,
 )
+_CONVENTION_CONTEXT_PATTERNS = (
+    re.compile(
+        r"\b(dự án|project|repo|team|nhóm|công ty|khách hàng|sản phẩm) "
+        r"(của )?(mình|tôi|em|anh|chị|bọn mình|chúng tôi)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(mình|tôi|em|team|bọn mình|chúng tôi|công ty) "
+        r"(đang |thường |luôn |hay )?"
+        r"(dùng|sử dụng|chạy|theo|làm việc với|quy định|bắt buộc|ưu tiên|không dùng|tránh)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(quy ước|chuẩn của|quy định của|coding style|convention)\b",
+        re.IGNORECASE,
+    ),
+)
 
 
-def extract_knowledge_candidate(text: str) -> ExtractedCandidate | None:
-    """Extracts a prospective Knowledge candidate from owner text (plan §6.3.7, Q3).
+def extract_convention_candidate(text: str) -> ExtractedCandidate | None:
+    """Extracts a prospective working convention candidate from owner text (KX-4 §6.9).
 
     Deterministic, pure, and safe:
     - Filters passwords, door codes, credentials.
     - Filters questions, casual chit-chat, greetings.
     - Filters stated preferences and personal facts (handled by extract_candidate).
     - Requires 10 <= len <= 280 and at least 3 words.
+    - Requires an explicit owner work-context marker.
     """
     cleaned = unicodedata.normalize("NFC", text).strip()
     if len(cleaned) < 10 or len(cleaned) > 280:
@@ -341,12 +359,17 @@ def extract_knowledge_candidate(text: str) -> ExtractedCandidate | None:
         return None
     if _GREETING_OR_CHITCHAT_PATTERN.search(cleaned):
         return None
+    if not any(p.search(cleaned) for p in _CONVENTION_CONTEXT_PATTERNS):
+        return None
     # Check if it was already a stated preference or personal fact
     if extract_candidate(cleaned) is not None:
         return None
 
     return ExtractedCandidate(
         candidate_type=CandidateType.KNOWLEDGE,
-        content={"text": cleaned, "summary": cleaned},
+        content={"text": cleaned, "summary": cleaned, "kind": "convention"},
         source="conversation",
     )
+
+
+extract_knowledge_candidate = extract_convention_candidate
