@@ -77,17 +77,17 @@ class DraftBriefResponse(BaseModel):
 
 
 class TeachKnowledgeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, populate_by_name=True)
 
     text: str = Field(min_length=1, max_length=280)
-    domain_id: uuid.UUID | None = Field(default=None, alias="domainId")
+    domain_id: uuid.UUID | None = Field(default=None, alias="domainId", strict=False)
 
 
 class ProposeKnowledgeCaseRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, populate_by_name=True)
 
     schema_version: Literal[1] = Field(default=1, alias="schemaVersion")
-    domain_id: uuid.UUID | None = Field(default=None, alias="domainId")
+    domain_id: uuid.UUID | None = Field(default=None, alias="domainId", strict=False)
     question: str = Field(min_length=1, max_length=8000)
     answer: str = Field(min_length=1, max_length=12000)
 
@@ -133,7 +133,7 @@ class UploadDocumentRequest(BaseModel):
 
     schema_version: Literal[1] = Field(default=1, alias="schemaVersion")
     title: str = Field(min_length=1, max_length=120)
-    domain_id: uuid.UUID | None = Field(default=None, alias="domainId")
+    domain_id: uuid.UUID | None = Field(default=None, alias="domainId", strict=False)
     media_type: Literal["text/markdown", "text/plain", "application/pdf"] = Field(alias="mediaType")
     data: str = Field(min_length=1, max_length=2_800_000)
 

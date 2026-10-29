@@ -48,9 +48,9 @@ class CreateCandidateRequest(_Strict):
     source: str = Field(default="conversation", max_length=32)
     candidateType: CandidateType = CandidateType.STATED_PREFERENCE
     content: dict[str, Any]
-    domainId: uuid.UUID | None = None
+    domainId: uuid.UUID | None = Field(default=None, strict=False)
     relation: str | None = None
-    relatedCandidateId: uuid.UUID | None = None
+    relatedCandidateId: uuid.UUID | None = Field(default=None, strict=False)
     factKey: int | None = None
 
     def parsed_pet_id(self) -> PetId:
@@ -61,4 +61,4 @@ class PatchCandidateRequest(_Strict):
     schemaVersion: Literal[1] = 1
     action: Literal["confirm", "reject", "commit", "delete", "retag"]
     committedGeneration: int | None = Field(default=None, ge=0, le=0xFFFFFFFF)
-    domainId: uuid.UUID | None = None
+    domainId: uuid.UUID | None = Field(default=None, strict=False)
