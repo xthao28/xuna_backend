@@ -381,3 +381,62 @@ async def test_decide_suggestions() -> None:
     cand = await candidates.get_candidate(cand_id)
     assert cand is not None
     assert cand.domain_id == accepted.target_domain_id
+
+
+@pytest.mark.anyio
+async def test_create_and_update_domain_with_packs_and_brief() -> None:
+    repo = FakeKnowledgeRepo()
+    candidates = FakeCandidatePort()
+    create_uc = CreateDomainUseCase(repo)
+    update_uc = UpdateDomainUseCase(repo, candidates)
+
+    # 1. Create domain with packId and empty description -> fills description, brief, safety_tier
+    created = await create_uc.execute(
+        PET,
+        OWNER,
+        CreateDomainRequest(name="Tài chính", deviceSlot=0, packId="finance"),
+        now=NOW,
+    )
+    assert created.pack_id == "finance"
+    assert created.safety_tier == "high_stakes"
+    assert "Tài chính kế toán" in created.description
+    assert "Cách làm việc chuyên lĩnh vực Tài chính & kế toán:" in created.expert_brief
+
+    # 2. Invalid packId on create -> raises ValueError("Invalid packId")
+    with pytest.raises(ValueError, match="Invalid packId"):
+        await create_uc.execute(
+            PET,
+            OWNER,
+            CreateDomainRequest(name="Khác", deviceSlot=1, packId="no_such_pack"),
+            now=NOW,
+        )
+
+    # 3. set_brief updates expert_brief and preserves pack_id & safety_tier
+    updated_brief = await update_uc.execute(
+        created.domain_id,
+        UpdateDomainRequest(action="set_brief", expertBrief="  Chỉ dẫn tùy chỉnh của chủ.  "),
+        now=NOW,
+    )
+    assert updated_brief.expert_brief == "Chỉ dẫn tùy chỉnh của chủ."
+    assert updated_brief.pack_id == "finance"
+    assert updated_brief.safety_tier == "high_stakes"
+
+    # 4. apply_pack replaces expert_brief, safety_tier, pack_id
+    applied = await update_uc.execute(
+        created.domain_id,
+        UpdateDomainRequest(action="apply_pack", packId="embedded"),
+        now=NOW,
+    )
+    assert applied.pack_id == "embedded"
+    assert applied.safety_tier == "general"
+    assert "Nhúng & phần cứng" in applied.expert_brief
+
+    # 5. rename / describe / rest / activate preserve pack_id, expert_brief, safety_tier
+    renamed = await update_uc.execute(
+        created.domain_id,
+        UpdateDomainRequest(action="rename", name="Phần cứng ESP32"),
+        now=NOW,
+    )
+    assert renamed.pack_id == "embedded"
+    assert renamed.expert_brief == applied.expert_brief
+    assert renamed.safety_tier == "general"

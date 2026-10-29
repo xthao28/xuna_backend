@@ -31,6 +31,7 @@ from xuna_backend.modules.knowledge.domain.entities import (
 from xuna_backend.modules.knowledge.domain.lexical_matcher import (
     compute_lexical_similarity,
 )
+from xuna_backend.modules.knowledge.domain.packs import get_pack
 from xuna_backend.modules.memory.domain.entities import (
     CandidateStatus,
     CandidateType,
@@ -61,17 +62,35 @@ class CreateDomainUseCase:
         if existing_slot is not None and existing_slot.status != DomainStatus.DELETED:
             raise ValueError(f"Device slot {request.device_slot} is already occupied")
 
+        description = request.description.strip()
+        pack_id: str | None = None
+        expert_brief = ""
+        safety_tier = "general"
+
+        if request.pack_id is not None:
+            pack = get_pack(request.pack_id)
+            if pack is None:
+                raise ValueError("Invalid packId")
+            pack_id = pack.pack_id
+            if not description:
+                description = pack.description[:160]
+            expert_brief = pack.brief
+            safety_tier = pack.safety_tier.value
+
         domain = KnowledgeDomain(
             domain_id=uuid.uuid4(),
             owner_id=owner_id,
             pet_id=pet_id,
             name=request.name.strip(),
-            description=request.description.strip(),
+            description=description,
             status=DomainStatus.PENDING_DEVICE,
             origin=DomainOrigin.OWNER,
             created_at=current_now,
             updated_at=current_now,
             device_slot=request.device_slot,
+            pack_id=pack_id,
+            expert_brief=expert_brief,
+            safety_tier=safety_tier,
         )
         await self._repo.save_domain(domain)
         return _to_domain_response(domain)
@@ -125,6 +144,9 @@ class UpdateDomainUseCase:
                     updated_at=current_now,
                     device_slot=domain.device_slot,
                     embedding=domain.embedding,
+                    pack_id=domain.pack_id,
+                    expert_brief=domain.expert_brief,
+                    safety_tier=domain.safety_tier,
                 )
             case "rename":
                 if not request.name:
@@ -141,6 +163,9 @@ class UpdateDomainUseCase:
                     updated_at=current_now,
                     device_slot=domain.device_slot,
                     embedding=domain.embedding,
+                    pack_id=domain.pack_id,
+                    expert_brief=domain.expert_brief,
+                    safety_tier=domain.safety_tier,
                 )
             case "describe":
                 if request.description is None:
@@ -157,6 +182,48 @@ class UpdateDomainUseCase:
                     updated_at=current_now,
                     device_slot=domain.device_slot,
                     embedding=domain.embedding,
+                    pack_id=domain.pack_id,
+                    expert_brief=domain.expert_brief,
+                    safety_tier=domain.safety_tier,
+                )
+            case "set_brief":
+                updated = KnowledgeDomain(
+                    domain_id=domain.domain_id,
+                    owner_id=domain.owner_id,
+                    pet_id=domain.pet_id,
+                    name=domain.name,
+                    description=domain.description,
+                    status=domain.status,
+                    origin=domain.origin,
+                    created_at=domain.created_at,
+                    updated_at=current_now,
+                    device_slot=domain.device_slot,
+                    embedding=domain.embedding,
+                    pack_id=domain.pack_id,
+                    expert_brief=(request.expert_brief or "").strip(),
+                    safety_tier=domain.safety_tier,
+                )
+            case "apply_pack":
+                if not request.pack_id:
+                    raise ValueError("Invalid packId")
+                pack = get_pack(request.pack_id)
+                if pack is None:
+                    raise ValueError("Invalid packId")
+                updated = KnowledgeDomain(
+                    domain_id=domain.domain_id,
+                    owner_id=domain.owner_id,
+                    pet_id=domain.pet_id,
+                    name=domain.name,
+                    description=domain.description or pack.description[:160],
+                    status=domain.status,
+                    origin=domain.origin,
+                    created_at=domain.created_at,
+                    updated_at=current_now,
+                    device_slot=domain.device_slot,
+                    embedding=domain.embedding,
+                    pack_id=pack.pack_id,
+                    expert_brief=pack.brief,
+                    safety_tier=pack.safety_tier.value,
                 )
             case "rest":
                 updated = KnowledgeDomain(
@@ -171,6 +238,9 @@ class UpdateDomainUseCase:
                     updated_at=current_now,
                     device_slot=None,
                     embedding=domain.embedding,
+                    pack_id=domain.pack_id,
+                    expert_brief=domain.expert_brief,
+                    safety_tier=domain.safety_tier,
                 )
             case "activate":
                 updated = KnowledgeDomain(
@@ -185,6 +255,9 @@ class UpdateDomainUseCase:
                     updated_at=current_now,
                     device_slot=domain.device_slot,
                     embedding=domain.embedding,
+                    pack_id=domain.pack_id,
+                    expert_brief=domain.expert_brief,
+                    safety_tier=domain.safety_tier,
                 )
             case "delete":
                 updated = KnowledgeDomain(
@@ -199,6 +272,9 @@ class UpdateDomainUseCase:
                     updated_at=current_now,
                     device_slot=None,
                     embedding=domain.embedding,
+                    pack_id=domain.pack_id,
+                    expert_brief=domain.expert_brief,
+                    safety_tier=domain.safety_tier,
                 )
                 candidates = await self._candidates.list_candidates_by_domain(
                     domain_id, confirmed_only=False
@@ -408,6 +484,9 @@ def _to_domain_response(domain: KnowledgeDomain) -> DomainResponse:
         device_slot=domain.device_slot,
         status=domain.status.value,
         origin=domain.origin.value,
+        pack_id=domain.pack_id,
+        expert_brief=domain.expert_brief,
+        safety_tier=domain.safety_tier,
         created_at=domain.created_at.astimezone(UTC).isoformat(),
         updated_at=domain.updated_at.astimezone(UTC).isoformat(),
     )

@@ -1,4 +1,4 @@
-"""Knowledge Domains API endpoints (plan §6.2, §6.3, KD-3)."""
+"""Knowledge Domains API endpoints (plan §6.2, §6.3, KD-3, KX-3)."""
 
 from __future__ import annotations
 
@@ -14,10 +14,17 @@ from xuna_backend.core.db import commit_or_conflict
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.accounts.api.dependencies import CurrentOwner, Session, state
 from xuna_backend.modules.accounts.domain.owner import Owner
+from xuna_backend.modules.cognition.application.ports import (
+    ProviderUnavailableError,
+    TextGenerator,
+)
 from xuna_backend.modules.consent.api.routes import RequireConsent
 from xuna_backend.modules.consent.domain.consent import ConsentClass
 from xuna_backend.modules.identity.application.use_cases import IdentityError, get_owned_pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
+from xuna_backend.modules.knowledge.application.brief_draft import (
+    DraftExpertBriefUseCase,
+)
 from xuna_backend.modules.knowledge.application.ports import (
     KnowledgeCandidatePort,
     KnowledgeRepository,
@@ -26,6 +33,9 @@ from xuna_backend.modules.knowledge.application.schemas import (
     CreateDomainRequest,
     DecideSuggestionRequest,
     DomainResponse,
+    DraftBriefRequest,
+    DraftBriefResponse,
+    KnowledgePackResponse,
     KnowledgeSuggestionResponse,
     TeachKnowledgeRequest,
     TeachKnowledgeResponse,
@@ -43,7 +53,11 @@ from xuna_backend.modules.knowledge.application.use_cases import (
     TeachKnowledgeUseCase,
     UpdateDomainUseCase,
 )
-from xuna_backend.modules.knowledge.domain.entities import SuggestionStatus
+from xuna_backend.modules.knowledge.domain.entities import (
+    DomainStatus,
+    SuggestionStatus,
+)
+from xuna_backend.modules.knowledge.domain.packs import PACKS
 
 router = APIRouter(prefix="/v1", tags=["knowledge"])
 U3Owner = Annotated[Owner, RequireConsent(ConsentClass.CONVERSATION_TEXT)]
@@ -63,7 +77,7 @@ def _candidate_port(request: Request, session: object) -> KnowledgeCandidatePort
 
 def _map_error(err: ValueError) -> AppError:
     msg = str(err)
-    if "Domain limit reached" in msg:
+    if "Domain limit reached" in msg or "Maximum 5 non-deleted domains" in msg:
         return AppError("domain_limit_reached", HTTPStatus.CONFLICT, msg)
     if "is already occupied" in msg:
         return AppError("slot_occupied", HTTPStatus.CONFLICT, msg)
@@ -73,7 +87,24 @@ def _map_error(err: ValueError) -> AppError:
         return AppError("invalid_transition", HTTPStatus.CONFLICT, msg)
     if "slot must be provided" in msg or "device_slot is required" in msg:
         return AppError("slot_required", HTTPStatus.UNPROCESSABLE_ENTITY, msg)
+    if "Invalid packId" in msg:
+        return AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "body.packId")
     return AppError("invalid_argument", HTTPStatus.BAD_REQUEST, msg)
+
+
+@router.get("/knowledge-packs", response_model=list[KnowledgePackResponse])
+async def list_knowledge_packs(
+    _owner: CurrentOwner,
+) -> list[KnowledgePackResponse]:
+    return [
+        KnowledgePackResponse(
+            pack_id=pack.pack_id,
+            name=pack.name,
+            description=pack.description,
+            safety_tier=pack.safety_tier.value,
+        )
+        for pack in PACKS
+    ]
 
 
 @router.get("/pets/{pet_id}/knowledge-domains", response_model=list[DomainResponse])
@@ -131,6 +162,9 @@ async def get_domain(
     session: Session,
 ) -> DomainResponse:
     repo = _repo(request, session)
+    domain = await repo.get_domain(domain_id)
+    if domain is None or domain.owner_id != owner.owner_id:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND, "Domain not found")
     use_case = GetDomainUseCase(repo)
     res = await use_case.execute(domain_id)
     if res is None:
@@ -147,6 +181,9 @@ async def update_domain(
     session: Session,
 ) -> DomainResponse:
     repo = _repo(request, session)
+    domain = await repo.get_domain(domain_id)
+    if domain is None or domain.owner_id != owner.owner_id:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND, "Domain not found")
     candidate_port = _candidate_port(request, session)
     use_case = UpdateDomainUseCase(repo, candidate_port)
     try:
@@ -157,6 +194,32 @@ async def update_domain(
         raise _map_error(err) from err
     await commit_or_conflict(session)
     return res
+
+
+@router.post(
+    "/knowledge-domains/{domain_id}/brief-drafts",
+    response_model=DraftBriefResponse,
+)
+async def draft_domain_brief(
+    domain_id: uuid.UUID,
+    _body: DraftBriefRequest,
+    request: Request,
+    owner: U3Owner,
+    session: Session,
+) -> DraftBriefResponse:
+    repo = _repo(request, session)
+    domain = await repo.get_domain(domain_id)
+    if domain is None or domain.owner_id != owner.owner_id or domain.status == DomainStatus.DELETED:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND, "Domain not found")
+
+    expert_gen: TextGenerator | None = getattr(request.app.state, "expert_text_generator", None)
+    gen: TextGenerator = expert_gen or state(request, "text_generator")
+    use_case = DraftExpertBriefUseCase(gen)
+    try:
+        draft = await use_case.execute(domain.name, domain.description)
+    except ProviderUnavailableError as err:
+        raise AppError("provider_unavailable", HTTPStatus.SERVICE_UNAVAILABLE) from err
+    return DraftBriefResponse(draft=draft)
 
 
 @router.post(

@@ -43,6 +43,9 @@ def _to_domain(row: KnowledgeDomainRow) -> KnowledgeDomain:
         updated_at=row.updated_at,
         device_slot=row.device_slot,
         embedding=list(row.embedding) if row.embedding is not None else None,
+        pack_id=row.pack_id,
+        expert_brief=row.expert_brief,
+        safety_tier=row.safety_tier,
     )
 
 
@@ -114,6 +117,9 @@ class SqlKnowledgeRepository:
             created_at=domain.created_at,
             updated_at=domain.updated_at,
             embedding=domain.embedding,
+            pack_id=domain.pack_id,
+            expert_brief=domain.expert_brief,
+            safety_tier=domain.safety_tier,
         )
         self._session.add(row)
         await self._session.flush()
@@ -169,6 +175,9 @@ class SqlKnowledgeRepository:
                 origin=domain.origin.value,
                 updated_at=domain.updated_at,
                 embedding=domain.embedding,
+                pack_id=domain.pack_id,
+                expert_brief=domain.expert_brief,
+                safety_tier=domain.safety_tier,
             )
         )
         await self._session.flush()

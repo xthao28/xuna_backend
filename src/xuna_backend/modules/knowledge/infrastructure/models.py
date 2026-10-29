@@ -43,6 +43,11 @@ class KnowledgeDomainRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     embedding: Mapped[list[float] | None] = mapped_column(JSONB, nullable=True)
+    pack_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    expert_brief: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    safety_tier: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="general", server_default="general"
+    )
 
 
 class KnowledgeSuggestionRow(Base):

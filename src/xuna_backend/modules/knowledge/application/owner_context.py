@@ -215,8 +215,8 @@ class BuildOwnerContextUseCase:
             if sv is not None:
                 level = sv.level
 
-        brief_text = getattr(chosen_domain, "expert_brief", "") or chosen_domain.description
-        safety_tier = getattr(chosen_domain, "safety_tier", "general") or "general"
+        brief_text = chosen_domain.expert_brief or chosen_domain.description
+        safety_tier = chosen_domain.safety_tier or "general"
 
         domain_brief = DomainBrief(
             domain_id=chosen_domain.domain_id,
@@ -233,4 +233,3 @@ class BuildOwnerContextUseCase:
             domain_score=best_score,
             domain_explicit=domain_explicit,
         )
-

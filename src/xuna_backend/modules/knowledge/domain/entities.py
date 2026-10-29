@@ -69,6 +69,9 @@ class KnowledgeDomain:
     updated_at: datetime
     device_slot: int | None = None
     embedding: list[float] | None = None
+    pack_id: str | None = None
+    expert_brief: str = ""
+    safety_tier: str = "general"
 
     def __post_init__(self) -> None:
         if not self.name or len(self.name.strip()) == 0 or len(self.name) > 40:
@@ -79,6 +82,10 @@ class KnowledgeDomain:
             raise ValueError("device_slot must be in 0..4")
         if self.created_at.tzinfo is None or self.updated_at.tzinfo is None:
             raise ValueError("timestamps must be timezone-aware")
+        if len(self.expert_brief) > 1500:
+            raise ValueError("expert_brief must be at most 1500 characters")
+        if self.safety_tier not in ("general", "high_stakes"):
+            raise ValueError("safety_tier must be 'general' or 'high_stakes'")
 
 
 @dataclass(frozen=True, slots=True)

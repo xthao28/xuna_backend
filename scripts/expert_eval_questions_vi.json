@@ -1,0 +1,143 @@
+[
+  {
+    "packId": "embedded",
+    "question": "Làm sao nối cảm biến I2C BME280 3.3V với ESP32-S3 và kiểm tra địa chỉ trên bus?"
+  },
+  {
+    "packId": "embedded",
+    "question": "Mình muốn đọc nút nhấn trên GPIO0 của ESP32 mà không dùng delay, viết chống dội phím thế nào?"
+  },
+  {
+    "packId": "embedded",
+    "question": "Tại sao màn hình SPI ST7789 chỉ sáng đèn nền mà không hiển thị gì khi nối với ESP32?"
+  },
+  {
+    "packId": "embedded",
+    "question": "Giải thích cách tính trở phân áp để đọc điện áp pin LiPo 4.2V vào chân ADC 3.3V."
+  },
+  {
+    "packId": "embedded",
+    "question": "Sự khác nhau giữa UART, I2C và SPI khi chọn giao thức cho cảm biến khoảng cách là gì?"
+  },
+  {
+    "packId": "software",
+    "question": "Thiết kế kiến trúc phân tầng cho tính năng đồng bộ dữ liệu offline-first trên ứng dụng di động."
+  },
+  {
+    "packId": "software",
+    "question": "Truy vấn SQL lọc theo pet_id và sắp xếp theo created_at đang chạy chậm khi bảng có triệu dòng, tối ưu thế nào?"
+  },
+  {
+    "packId": "software",
+    "question": "Viết hàm Python tách luồng văn bản streaming thành phần tóm tắt trong thẻ <say> và phần chi tiết."
+  },
+  {
+    "packId": "software",
+    "question": "So sánh ưu nhược điểm giữa Server-Sent Events (SSE) và WebSocket cho tính năng trả lời AI theo thời gian thực."
+  },
+  {
+    "packId": "software",
+    "question": "Làm thế nào để tìm nguyên nhân rò rỉ bộ nhớ hoặc nghẽn event loop trong dịch vụ FastAPI bất đồng bộ?"
+  },
+  {
+    "packId": "finance",
+    "question": "Tính NPV và giải thích ý nghĩa cho dự án đầu tư ban đầu 500 triệu, dòng tiền ròng 200 triệu/năm trong 3 năm với lãi suất chiết khấu 10%/năm."
+  },
+  {
+    "packId": "finance",
+    "question": "Vì sao công ty báo lãi trên báo cáo kết quả kinh doanh nhưng vẫn thiếu tiền mặt để trả lương?"
+  },
+  {
+    "packId": "finance",
+    "question": "Cách tính điểm hòa vốn (break-even point) cho sản phẩm phần cứng có chi phí cố định 120 triệu/tháng, giá bán 1,5 triệu và biến phí 900 nghìn/chiếc?"
+  },
+  {
+    "packId": "finance",
+    "question": "So sánh phương án thuê thiết bị hàng tháng và mua đứt khấu hao trong 3 năm về mặt dòng tiền và thuế."
+  },
+  {
+    "packId": "finance",
+    "question": "Khi lập ngân sách dự phóng 12 tháng cho startup, cần tách những nhóm chi phí và giả định nhạy cảm nào?"
+  },
+  {
+    "packId": "marketing",
+    "question": "Đề xuất thông điệp định vị và 3 góc tiếp cận quảng cáo cho sản phẩm thú cưng AI để bàn dành cho lập trình viên."
+  },
+  {
+    "packId": "marketing",
+    "question": "Làm sao cải thiện tỷ lệ chuyển đổi (CVR) trên trang landing page bán thiết bị công nghệ mới ra mắt?"
+  },
+  {
+    "packId": "marketing",
+    "question": "Thiết kế kịch bản onboarding 7 ngày đầu để tăng tỷ lệ giữ chân (retention) người dùng ứng dụng kèm phần cứng."
+  },
+  {
+    "packId": "marketing",
+    "question": "Cách tính chỉ số CAC, LTV và đánh giá hiệu quả kênh quảng cáo trả phí cho sản phẩm tiêu dùng?"
+  },
+  {
+    "packId": "marketing",
+    "question": "Làm sao thiết kế thử nghiệm A/B cho tiêu đề email ra mắt tính năng mới mà kết quả đáng tin cậy?"
+  },
+  {
+    "packId": "law",
+    "question": "Khi rà soát điều khoản bảo mật (NDA) trước khi gửi thiết kế mạch cho nhà máy gia công, cần chú ý những rủi ro nào?"
+  },
+  {
+    "packId": "law",
+    "question": "Giải thích điều khoản giới hạn trách nhiệm và bồi thường thiệt hại trong hợp đồng phát triển phần mềm thuê ngoài."
+  },
+  {
+    "packId": "law",
+    "question": "Cần quy định quyền sở hữu trí tuệ như thế nào trong hợp đồng với cộng tác viên thiết kế hình ảnh Pixel Art?"
+  },
+  {
+    "packId": "law",
+    "question": "Khi chấm dứt hợp đồng dịch vụ trước thời hạn, cần kiểm tra những điều kiện và thủ tục thông báo nào?"
+  },
+  {
+    "packId": "law",
+    "question": "Những điểm chính cần có trong chính sách quyền riêng tư khi ứng dụng có thu thập giọng nói theo sự đồng ý của người dùng?"
+  },
+  {
+    "packId": "biomed",
+    "question": "Giải thích cơ chế sinh lý của nhịp sinh học (circadian rhythm) và vì sao ánh sáng xanh buổi tối làm khó ngủ."
+  },
+  {
+    "packId": "biomed",
+    "question": "Chỉ số HbA1c trong xét nghiệm máu phản ánh điều gì và khác gì với đường huyết lúc đói?"
+  },
+  {
+    "packId": "biomed",
+    "question": "Vì sao nhịp tim khi nghỉ ngơi (resting heart rate) thay đổi khi cơ thể thiếu ngủ hoặc căng thẳng kéo dài?"
+  },
+  {
+    "packId": "biomed",
+    "question": "Giải thích cơ chế mỏi mắt và đau cổ vai gáy khi ngồi làm việc máy tính liên tục nhiều giờ."
+  },
+  {
+    "packId": "biomed",
+    "question": "Phân biệt vai trò của protein, carbohydrate phức hợp và chất béo lành mạnh đối với mức năng lượng trong ngày."
+  },
+  {
+    "packId": "language",
+    "question": "Sửa giúp mình câu email tiếng Anh gửi đối tác xin lùi lịch giao hàng 1 tuần sao cho lịch sự và chuyên nghiệp."
+  },
+  {
+    "packId": "language",
+    "question": "Phân biệt cách dùng 'ensure', 'assure' và 'insure' trong tiếng Anh thương mại kèm ví dụ thực tế."
+  },
+  {
+    "packId": "language",
+    "question": "Dịch sang tiếng Anh tự nhiên cho tài liệu kỹ thuật: 'Thiết bị vẫn hoạt động bình thường ngay cả khi mất kết nối mạng'."
+  },
+  {
+    "packId": "language",
+    "question": "Trong tiếng Nhật giao tiếp công sở, khi nào dùng '承知いたしました' thay vì 'わかりました'?"
+  },
+  {
+    "packId": "language",
+    "question": "Cách viết đoạn mở đầu và kết luận cho bài báo cáo kỹ thuật bằng tiếng Anh rõ ràng, súc tích?"
+  }
+]
+

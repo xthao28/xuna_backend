@@ -16,6 +16,7 @@ from xuna_backend.modules.knowledge.domain.entities import (
     SuggestionStatus,
     compute_fact_key,
 )
+from xuna_backend.modules.knowledge.domain.packs import PACKS, SafetyTier, get_pack
 
 PET = PetId("d945c77026fd4f4a8a899bbff4aeed86")
 OWNER = uuid.uuid4()
@@ -111,3 +112,52 @@ def test_knowledge_summary_validation() -> None:
     )
     assert summary.domain_id == domain_id
     assert not summary.stale
+
+
+def test_knowledge_packs_and_domain_brief_validation() -> None:
+    expected_ids = ("embedded", "software", "finance", "marketing", "law", "biomed", "language")
+    assert tuple(p.pack_id for p in PACKS) == expected_ids
+    for p in PACKS:
+        assert 1 <= len(p.name) <= 40
+        assert 1 <= len(p.description) <= 240
+        assert 1 <= len(p.brief) <= 1500
+        assert get_pack(p.pack_id) == p
+
+    finance = get_pack("finance")
+    law = get_pack("law")
+    biomed = get_pack("biomed")
+    embedded = get_pack("embedded")
+    assert finance is not None and finance.safety_tier == SafetyTier.HIGH_STAKES
+    assert law is not None and law.safety_tier == SafetyTier.HIGH_STAKES
+    assert biomed is not None and biomed.safety_tier == SafetyTier.HIGH_STAKES
+    assert embedded is not None and embedded.safety_tier == SafetyTier.GENERAL
+    assert get_pack("unknown") is None
+
+    domain_id = uuid.uuid4()
+    with pytest.raises(ValueError, match="expert_brief must be at most 1500"):
+        KnowledgeDomain(
+            domain_id=domain_id,
+            owner_id=OWNER,
+            pet_id=PET,
+            name="Test",
+            description="",
+            status=DomainStatus.ACTIVE,
+            origin=DomainOrigin.OWNER,
+            created_at=NOW,
+            updated_at=NOW,
+            expert_brief="x" * 1501,
+        )
+
+    with pytest.raises(ValueError, match="safety_tier must be"):
+        KnowledgeDomain(
+            domain_id=domain_id,
+            owner_id=OWNER,
+            pet_id=PET,
+            name="Test",
+            description="",
+            status=DomainStatus.ACTIVE,
+            origin=DomainOrigin.OWNER,
+            created_at=NOW,
+            updated_at=NOW,
+            safety_tier="invalid",
+        )
