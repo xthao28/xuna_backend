@@ -8,7 +8,7 @@ from datetime import UTC
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
 
 from xuna_backend.core.db import commit_or_conflict
 from xuna_backend.core.errors import AppError
@@ -28,6 +28,11 @@ from xuna_backend.modules.knowledge.application.brief_draft import (
 from xuna_backend.modules.knowledge.application.cases import (
     ProposeKnowledgeCaseUseCase,
 )
+from xuna_backend.modules.knowledge.application.documents import (
+    DeleteKnowledgeDocumentUseCase,
+    ListKnowledgeDocumentsUseCase,
+    UploadKnowledgeDocumentUseCase,
+)
 from xuna_backend.modules.knowledge.application.ports import (
     KnowledgeCandidatePort,
     KnowledgeRepository,
@@ -38,12 +43,14 @@ from xuna_backend.modules.knowledge.application.schemas import (
     DomainResponse,
     DraftBriefRequest,
     DraftBriefResponse,
+    KnowledgeDocumentResponse,
     KnowledgePackResponse,
     KnowledgeSuggestionResponse,
     ProposeKnowledgeCaseRequest,
     TeachKnowledgeRequest,
     TeachKnowledgeResponse,
     UpdateDomainRequest,
+    UploadDocumentRequest,
 )
 from xuna_backend.modules.knowledge.application.suggest import (
     GenerateKnowledgeSuggestionUseCase,
@@ -65,6 +72,7 @@ from xuna_backend.modules.knowledge.domain.packs import PACKS
 
 router = APIRouter(prefix="/v1", tags=["knowledge"])
 U3Owner = Annotated[Owner, RequireConsent(ConsentClass.CONVERSATION_TEXT)]
+U4Owner = Annotated[Owner, RequireConsent(ConsentClass.OWNER_DOCUMENTS)]
 
 
 def _repo(request: Request, session: object) -> KnowledgeRepository:
@@ -83,6 +91,10 @@ def _map_error(err: ValueError) -> AppError:
     msg = str(err)
     if "Domain limit reached" in msg or "Maximum 5 non-deleted domains" in msg:
         return AppError("domain_limit_reached", HTTPStatus.CONFLICT, msg)
+    if "Document limit reached" in msg or "Chunk limit reached" in msg:
+        return AppError("document_limit_reached", HTTPStatus.CONFLICT, msg)
+    if "Duplicate document sha256" in msg:
+        return AppError("duplicate_document", HTTPStatus.CONFLICT, msg)
     if "is already occupied" in msg:
         return AppError("slot_occupied", HTTPStatus.CONFLICT, msg)
     if "not found" in msg.lower():
@@ -369,3 +381,78 @@ async def generate_suggestion(
         status=suggestion.status.value,
         created_at=suggestion.created_at.astimezone(UTC).isoformat(),
     )
+
+
+@router.post(
+    "/pets/{pet_id}/knowledge-documents",
+    response_model=KnowledgeDocumentResponse,
+    status_code=HTTPStatus.CREATED,
+)
+async def upload_knowledge_document(
+    pet_id: str,
+    body: UploadDocumentRequest,
+    request: Request,
+    owner: U4Owner,
+    session: Session,
+) -> KnowledgeDocumentResponse:
+    try:
+        identity_repo = state(request, "identity_repository")(session)
+        await get_owned_pet(identity_repo, owner.owner_id, PetId(pet_id))
+    except (ValueError, IdentityError) as err:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND) from err
+
+    repo = _repo(request, session)
+    candidate_port = _candidate_port(request, session)
+    embedder = getattr(request.app.state, "embedder", None)
+    use_case = UploadKnowledgeDocumentUseCase(repo, candidate_port, embedder)
+    try:
+        res = await use_case.execute(PetId(pet_id), owner.owner_id, body)
+    except KeyError as err:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND, str(err)) from err
+    except ValueError as err:
+        raise _map_error(err) from err
+    await commit_or_conflict(session)
+    return res
+
+
+@router.get(
+    "/pets/{pet_id}/knowledge-documents",
+    response_model=list[KnowledgeDocumentResponse],
+)
+async def list_knowledge_documents(
+    pet_id: str,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+) -> list[KnowledgeDocumentResponse]:
+    try:
+        identity_repo = state(request, "identity_repository")(session)
+        await get_owned_pet(identity_repo, owner.owner_id, PetId(pet_id))
+    except (ValueError, IdentityError) as err:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND) from err
+
+    repo = _repo(request, session)
+    use_case = ListKnowledgeDocumentsUseCase(repo)
+    return await use_case.execute(PetId(pet_id))
+
+
+@router.delete(
+    "/knowledge-documents/{document_id}",
+    status_code=HTTPStatus.NO_CONTENT,
+    response_class=Response,
+)
+async def delete_knowledge_document(
+    document_id: uuid.UUID,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+) -> Response:
+    repo = _repo(request, session)
+    candidate_port = _candidate_port(request, session)
+    use_case = DeleteKnowledgeDocumentUseCase(repo, candidate_port)
+    try:
+        await use_case.execute(document_id, owner.owner_id)
+    except KeyError as err:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND, str(err)) from err
+    await commit_or_conflict(session)
+    return Response(status_code=HTTPStatus.NO_CONTENT)

@@ -28,6 +28,7 @@ class SqlConsentRepository:
             experience_events=row.experience_events,
             conversation_text=row.conversation_text,
             conversation_voice=row.conversation_voice,
+            owner_documents=row.owner_documents,
             version=row.version,
             updated_at=row.recorded_at,
         )
@@ -42,6 +43,7 @@ class SqlConsentRepository:
                 experience_events=state.experience_events,
                 conversation_text=state.conversation_text,
                 conversation_voice=state.conversation_voice,
+                owner_documents=state.owner_documents,
                 recorded_at=state.updated_at,
                 policy=POLICY_VERSION,
             )

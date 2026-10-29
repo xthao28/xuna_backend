@@ -24,6 +24,7 @@ class UpdateConsent:
     expected_version: int
     # None keeps the current value: clients that predate voice never revoke it.
     conversation_voice: bool | None = None
+    owner_documents: bool | None = None
 
 
 async def require_consent(
@@ -54,6 +55,9 @@ async def update_consent(
             current.conversation_voice
             if command.conversation_voice is None
             else command.conversation_voice
+        ),
+        owner_documents=(
+            current.owner_documents if command.owner_documents is None else command.owner_documents
         ),
         version=current.version + 1,
         updated_at=now,

@@ -40,6 +40,7 @@ def update(
         conversation_text=bool(flags.get("u3", False)),
         expected_version=version,
         conversation_voice=flags.get("voice"),
+        owner_documents=flags.get("docs"),
     )
     return asyncio.run(update_consent(repo, audit, OWNER, command, NOW, "req12345"))
 
@@ -96,3 +97,18 @@ def test_stale_version_conflicts_and_no_change_records_nothing() -> None:
     assert same.version == 1
     assert len(repo.history) == 1
     assert len(audit.events) == 1
+
+
+def test_owner_documents_u4_is_separate_opt_in_and_omitting_keeps_it() -> None:
+    repo, audit = MemoryConsents(), MemoryAuditLog()
+    update(repo, audit, 0, u3=True)
+    with pytest.raises(ConsentError):
+        asyncio.run(require_consent(repo, OWNER, ConsentClass.OWNER_DOCUMENTS))
+    update(repo, audit, 1, u3=True, docs=True)
+    asyncio.run(require_consent(repo, OWNER, ConsentClass.OWNER_DOCUMENTS))
+    assert audit.events[-1].metadata == {"version": 2, "ownerdocuments": True}
+    kept = update(repo, audit, 2, u3=False)
+    assert kept.owner_documents is True
+    assert kept.conversation_text is False
+    withdrawn = update(repo, audit, 3, docs=False)
+    assert withdrawn.owner_documents is False

@@ -14,6 +14,7 @@ class ConsentClass(StrEnum):
     # U3V (owner D16, 2026-10-22): speech sent to the ASR provider per call; raw
     # audio and transcripts are never stored. Separate from U3: hearing is not reading.
     CONVERSATION_VOICE = "conversation_voice"
+    OWNER_DOCUMENTS = "owner_documents"
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +23,7 @@ class ConsentState:
     experience_events: bool = False
     conversation_text: bool = False
     conversation_voice: bool = False
+    owner_documents: bool = False
     version: int = 0  # 0 = never recorded (U0 default)
     updated_at: datetime | None = None
 
@@ -35,6 +37,8 @@ class ConsentState:
                 return self.conversation_text
             case ConsentClass.CONVERSATION_VOICE:
                 return self.conversation_voice
+            case ConsentClass.OWNER_DOCUMENTS:
+                return self.owner_documents
 
     def changed(self, other: "ConsentState") -> list[ConsentClass]:
         return [c for c in ConsentClass if self.allows(c) != other.allows(c)]

@@ -95,6 +95,7 @@ def test_u0_default_and_guard(client: TestClient, issuer: LocalIssuer) -> None:
         "experienceEvents": False,
         "conversationText": False,
         "conversationVoice": False,
+        "ownerDocuments": False,
         "version": 0,
         "updatedAt": None,
     }
@@ -146,6 +147,22 @@ def test_voice_opt_in_survives_a_put_without_the_field(
         headers={**headers, **idem()},
     )
     assert bad.status_code == 422
+
+
+def test_owner_documents_opt_in_survives_put_without_field(
+    client: TestClient, issuer: LocalIssuer
+) -> None:
+    headers = auth(issuer, "docs-owner")
+    on = client.put(
+        "/v1/consents",
+        json={**body(0, u3=True), "ownerDocuments": True},
+        headers={**headers, **idem()},
+    )
+    assert on.status_code == 200, on.text
+    assert on.json()["ownerDocuments"] is True
+    legacy = client.put("/v1/consents", json=body(1), headers={**headers, **idem()})
+    assert legacy.json()["ownerDocuments"] is True
+    assert legacy.json()["conversationText"] is False
 
 
 def test_consent_is_per_owner(client: TestClient, issuer: LocalIssuer) -> None:

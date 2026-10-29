@@ -126,3 +126,31 @@ class DecideSuggestionRequest(BaseModel):
     name: str | None = Field(default=None, max_length=40)
     description: str | None = Field(default=None, max_length=160)
     device_slot: int | None = Field(default=None, ge=0, le=4, alias="deviceSlot")
+
+
+class UploadDocumentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True, populate_by_name=True)
+
+    schema_version: Literal[1] = Field(default=1, alias="schemaVersion")
+    title: str = Field(min_length=1, max_length=120)
+    domain_id: uuid.UUID | None = Field(default=None, alias="domainId")
+    media_type: Literal["text/markdown", "text/plain", "application/pdf"] = Field(alias="mediaType")
+    data: str = Field(min_length=1, max_length=2_800_000)
+
+
+class KnowledgeDocumentResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    document_id: uuid.UUID = Field(alias="documentId")
+    pet_id: str = Field(alias="petId")
+    domain_id: uuid.UUID | None = Field(default=None, alias="domainId")
+    title: str
+    media_type: str = Field(alias="mediaType")
+    byte_size: int = Field(alias="byteSize")
+    sha256: str
+    status: str
+    chunk_count: int = Field(alias="chunkCount")
+    candidate_id: uuid.UUID | None = Field(default=None, alias="candidateId")
+    fact_key: int | None = Field(default=None, alias="factKey")
+    created_at: str = Field(alias="createdAt")
+    updated_at: str = Field(alias="updatedAt")

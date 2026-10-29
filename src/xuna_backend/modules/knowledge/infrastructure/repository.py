@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from xuna_backend.modules.identity.domain.pet_id import PetId
+from xuna_backend.modules.knowledge.domain.documents import (
+    DocumentMediaType,
+    DocumentStatus,
+    KnowledgeChunk,
+    KnowledgeDocument,
+)
 from xuna_backend.modules.knowledge.domain.entities import (
     DomainOrigin,
     DomainStatus,
@@ -18,6 +24,8 @@ from xuna_backend.modules.knowledge.domain.entities import (
     SuggestionStatus,
 )
 from xuna_backend.modules.knowledge.infrastructure.models import (
+    KnowledgeChunkRow,
+    KnowledgeDocumentRow,
     KnowledgeDomainRow,
     KnowledgeSuggestionRow,
     KnowledgeSummaryRow,
@@ -76,6 +84,34 @@ def _to_summary(row: KnowledgeSummaryRow) -> KnowledgeSummary:
         ],
         generated_at=row.generated_at,
         stale=row.stale,
+    )
+
+
+def _to_document(row: KnowledgeDocumentRow) -> KnowledgeDocument:
+    return KnowledgeDocument(
+        document_id=row.document_id,
+        pet_id=PetId(row.pet_id),
+        owner_id=row.owner_id,
+        domain_id=row.domain_id,
+        title=row.title,
+        media_type=DocumentMediaType(row.media_type),
+        byte_size=row.byte_size,
+        sha256=row.sha256,
+        status=DocumentStatus(row.status),
+        chunk_count=row.chunk_count,
+        candidate_id=row.candidate_id,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def _to_chunk(row: KnowledgeChunkRow) -> KnowledgeChunk:
+    return KnowledgeChunk(
+        chunk_id=row.chunk_id,
+        document_id=row.document_id,
+        ordinal=row.ordinal,
+        text=row.text,
+        embedding=list(row.embedding) if row.embedding is not None else None,
     )
 
 
@@ -273,6 +309,132 @@ class SqlKnowledgeRepository:
             select(KnowledgeSummaryRow).where(KnowledgeSummaryRow.domain_id == domain_id)
         )
         return _to_summary(row) if row is not None else None
+
+    async def save_document(
+        self, document: KnowledgeDocument, chunks: list[KnowledgeChunk]
+    ) -> None:
+        doc_row = KnowledgeDocumentRow(
+            document_id=document.document_id,
+            pet_id=document.pet_id.value,
+            owner_id=document.owner_id,
+            domain_id=document.domain_id,
+            title=document.title,
+            media_type=document.media_type.value,
+            byte_size=document.byte_size,
+            sha256=document.sha256,
+            status=document.status.value,
+            chunk_count=document.chunk_count,
+            candidate_id=document.candidate_id,
+            created_at=document.created_at,
+            updated_at=document.updated_at,
+        )
+        self._session.add(doc_row)
+        await self._session.flush()
+        for chunk in chunks:
+            chunk_row = KnowledgeChunkRow(
+                chunk_id=chunk.chunk_id,
+                document_id=chunk.document_id,
+                ordinal=chunk.ordinal,
+                text=chunk.text,
+                embedding=chunk.embedding,
+            )
+            self._session.add(chunk_row)
+        await self._session.flush()
+
+    async def get_document(self, document_id: uuid.UUID) -> KnowledgeDocument | None:
+        row = await self._session.scalar(
+            select(KnowledgeDocumentRow).where(
+                (KnowledgeDocumentRow.document_id == document_id)
+                & (KnowledgeDocumentRow.status != DocumentStatus.DELETED.value)
+            )
+        )
+        return _to_document(row) if row is not None else None
+
+    async def get_document_by_sha256(self, pet_id: PetId, sha256: str) -> KnowledgeDocument | None:
+        row = await self._session.scalar(
+            select(KnowledgeDocumentRow).where(
+                (KnowledgeDocumentRow.pet_id == pet_id.value)
+                & (KnowledgeDocumentRow.sha256 == sha256)
+                & (KnowledgeDocumentRow.status != DocumentStatus.DELETED.value)
+            )
+        )
+        return _to_document(row) if row is not None else None
+
+    async def list_documents(self, pet_id: PetId) -> list[KnowledgeDocument]:
+        stmt = (
+            select(KnowledgeDocumentRow)
+            .where(
+                (KnowledgeDocumentRow.pet_id == pet_id.value)
+                & (KnowledgeDocumentRow.status != DocumentStatus.DELETED.value)
+            )
+            .order_by(KnowledgeDocumentRow.created_at.desc())
+        )
+        result = await self._session.scalars(stmt)
+        return [_to_document(r) for r in result.all()]
+
+    async def count_documents(self, pet_id: PetId) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(KnowledgeDocumentRow)
+            .where(
+                (KnowledgeDocumentRow.pet_id == pet_id.value)
+                & (KnowledgeDocumentRow.status != DocumentStatus.DELETED.value)
+            )
+        )
+        count = await self._session.scalar(stmt)
+        return count or 0
+
+    async def count_chunks_for_pet(self, pet_id: PetId) -> int:
+        stmt = (
+            select(func.count())
+            .select_from(KnowledgeChunkRow)
+            .join(
+                KnowledgeDocumentRow,
+                KnowledgeChunkRow.document_id == KnowledgeDocumentRow.document_id,
+            )
+            .where(
+                (KnowledgeDocumentRow.pet_id == pet_id.value)
+                & (KnowledgeDocumentRow.status != DocumentStatus.DELETED.value)
+            )
+        )
+        count = await self._session.scalar(stmt)
+        return count or 0
+
+    async def delete_document(self, document_id: uuid.UUID) -> None:
+        await self._session.execute(
+            delete(KnowledgeChunkRow).where(KnowledgeChunkRow.document_id == document_id)
+        )
+        await self._session.execute(
+            delete(KnowledgeDocumentRow).where(KnowledgeDocumentRow.document_id == document_id)
+        )
+        await self._session.flush()
+
+    async def list_chunks_for_pet(
+        self, pet_id: PetId, domain_id: uuid.UUID | None = None
+    ) -> list[tuple[KnowledgeDocument, KnowledgeChunk]]:
+        stmt = (
+            select(KnowledgeDocumentRow, KnowledgeChunkRow)
+            .join(
+                KnowledgeChunkRow,
+                KnowledgeChunkRow.document_id == KnowledgeDocumentRow.document_id,
+            )
+            .where(
+                (KnowledgeDocumentRow.pet_id == pet_id.value)
+                & (KnowledgeDocumentRow.status == DocumentStatus.READY.value)
+            )
+        )
+        if domain_id is not None:
+            stmt = stmt.where(
+                (KnowledgeDocumentRow.domain_id == domain_id)
+                | (KnowledgeDocumentRow.domain_id.is_(None))
+            )
+        else:
+            stmt = stmt.where(KnowledgeDocumentRow.domain_id.is_(None))
+        stmt = stmt.order_by(
+            KnowledgeDocumentRow.created_at.desc(), KnowledgeChunkRow.ordinal.asc()
+        )
+        result = await self._session.execute(stmt)
+        return [(_to_document(doc_r), _to_chunk(chk_r)) for doc_r, chk_r in result.all()]
 
 
 class SqlKnowledgeCandidateAdapter:

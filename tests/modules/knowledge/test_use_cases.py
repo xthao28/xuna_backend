@@ -21,6 +21,11 @@ from xuna_backend.modules.knowledge.application.use_cases import (
     TeachKnowledgeUseCase,
     UpdateDomainUseCase,
 )
+from xuna_backend.modules.knowledge.domain.documents import (
+    DocumentStatus,
+    KnowledgeChunk,
+    KnowledgeDocument,
+)
 from xuna_backend.modules.knowledge.domain.entities import (
     DomainStatus,
     KnowledgeDomain,
@@ -46,6 +51,8 @@ class FakeKnowledgeRepo:
         self.domains: dict[uuid.UUID, KnowledgeDomain] = {}
         self.suggestions: dict[uuid.UUID, KnowledgeSuggestion] = {}
         self.summaries: dict[uuid.UUID, KnowledgeSummary] = {}
+        self.documents: dict[uuid.UUID, KnowledgeDocument] = {}
+        self.chunks: dict[uuid.UUID, list[KnowledgeChunk]] = {}
 
     async def save_domain(self, domain: KnowledgeDomain) -> None:
         self.domains[domain.domain_id] = domain
@@ -113,6 +120,62 @@ class FakeKnowledgeRepo:
 
     async def get_summary(self, domain_id: uuid.UUID) -> KnowledgeSummary | None:
         return self.summaries.get(domain_id)
+
+    async def save_document(
+        self, document: KnowledgeDocument, chunks: list[KnowledgeChunk]
+    ) -> None:
+        self.documents[document.document_id] = document
+        self.chunks[document.document_id] = list(chunks)
+
+    async def get_document(self, document_id: uuid.UUID) -> KnowledgeDocument | None:
+        doc = self.documents.get(document_id)
+        if doc is not None and doc.status != DocumentStatus.DELETED:
+            return doc
+        return None
+
+    async def get_document_by_sha256(self, pet_id: PetId, sha256: str) -> KnowledgeDocument | None:
+        for d in self.documents.values():
+            if d.pet_id == pet_id and d.sha256 == sha256 and d.status != DocumentStatus.DELETED:
+                return d
+        return None
+
+    async def list_documents(self, pet_id: PetId) -> list[KnowledgeDocument]:
+        res = [
+            d
+            for d in self.documents.values()
+            if d.pet_id == pet_id and d.status != DocumentStatus.DELETED
+        ]
+        return sorted(res, key=lambda d: d.created_at, reverse=True)
+
+    async def count_documents(self, pet_id: PetId) -> int:
+        return len(await self.list_documents(pet_id))
+
+    async def count_chunks_for_pet(self, pet_id: PetId) -> int:
+        docs = await self.list_documents(pet_id)
+        return sum(len(self.chunks.get(d.document_id, [])) for d in docs)
+
+    async def delete_document(self, document_id: uuid.UUID) -> None:
+        self.documents.pop(document_id, None)
+        self.chunks.pop(document_id, None)
+
+    async def list_chunks_for_pet(
+        self, pet_id: PetId, domain_id: uuid.UUID | None = None
+    ) -> list[tuple[KnowledgeDocument, KnowledgeChunk]]:
+        docs = [
+            d
+            for d in self.documents.values()
+            if d.pet_id == pet_id and d.status == DocumentStatus.READY
+        ]
+        if domain_id is not None:
+            docs = [d for d in docs if d.domain_id == domain_id or d.domain_id is None]
+        else:
+            docs = [d for d in docs if d.domain_id is None]
+        docs.sort(key=lambda d: d.created_at, reverse=True)
+        out: list[tuple[KnowledgeDocument, KnowledgeChunk]] = []
+        for d in docs:
+            for c in sorted(self.chunks.get(d.document_id, []), key=lambda x: x.ordinal):
+                out.append((d, c))
+        return out
 
 
 class FakeCandidatePort:

@@ -9,19 +9,31 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from xuna_backend.modules.cognition.domain.types import EmbeddingRequest
 from xuna_backend.modules.identity.domain.pet_id import PetId
+from xuna_backend.modules.knowledge.domain.documents import (
+    KnowledgeChunk,
+    KnowledgeDocument,
+    cosine_similarity,
+)
 from xuna_backend.modules.knowledge.domain.entities import DomainStatus, KnowledgeDomain
 from xuna_backend.modules.knowledge.domain.lexical_matcher import (
     compute_lexical_similarity,
 )
 from xuna_backend.modules.knowledge.domain.owner_context import (
     DeviceSlotView,
+    DocSnippet,
     DomainBrief,
     OwnerContext,
 )
-from xuna_backend.modules.memory.domain.entities import CandidateType, MemoryCandidate
+from xuna_backend.modules.memory.domain.entities import (
+    CandidateStatus,
+    CandidateType,
+    MemoryCandidate,
+)
 
 if TYPE_CHECKING:
+    from xuna_backend.modules.cognition.application.ports import Embedder
     from xuna_backend.modules.knowledge.application.ports import (
         KnowledgeCandidatePort,
         KnowledgeRepository,
@@ -31,8 +43,11 @@ TURN_DOMAIN_THRESHOLD = 0.20  # [P]; KX-1 measures it on tests/fixtures/turn_dom
 MAX_CONVENTIONS = 6
 MAX_CASES = 3
 MAX_UNSORTED = 2
+MAX_SNIPPETS = 4
+LEXICAL_CANDIDATE_CHUNKS = 50
 CONVENTION_CHARS = 1200
 CASE_CHARS = 900
+SNIPPET_CHARS = 3000
 
 
 def _item_text(candidate: MemoryCandidate) -> str:
@@ -83,9 +98,81 @@ class BuildOwnerContextUseCase:
         self,
         repo: KnowledgeRepository,
         candidates: KnowledgeCandidatePort,
+        embedder: Embedder | None = None,
     ) -> None:
         self._repo = repo
         self._candidates = candidates
+        self._embedder = embedder
+
+    async def _select_snippets(
+        self,
+        pet_id: PetId,
+        domain_id: uuid.UUID | None,
+        query: str,
+    ) -> list[DocSnippet]:
+        doc_chunks = await self._repo.list_chunks_for_pet(pet_id, domain_id=domain_id)
+        if not doc_chunks:
+            return []
+
+        # Filter out documents whose linked candidate has been explicitly rejected
+        checked_docs: dict[uuid.UUID, bool] = {}
+        eligible: list[tuple[KnowledgeDocument, KnowledgeChunk, float]] = []
+        for doc, chunk in doc_chunks:
+            if doc.document_id not in checked_docs:
+                allowed = True
+                if doc.candidate_id is not None:
+                    cand = await self._candidates.get_candidate(doc.candidate_id)
+                    if cand is not None and cand.status == CandidateStatus.REJECTED:
+                        allowed = False
+                checked_docs[doc.document_id] = allowed
+            if not checked_docs[doc.document_id]:
+                continue
+
+            lex = compute_lexical_similarity(query, [chunk.text, doc.title])
+            if lex > 0.0:
+                eligible.append((doc, chunk, lex))
+
+        if not eligible:
+            return []
+
+        eligible.sort(key=lambda item: item[2], reverse=True)
+        top_candidates = eligible[:LEXICAL_CANDIDATE_CHUNKS]
+
+        query_embedding: list[float] | None = None
+        if self._embedder is not None and any(
+            chk.embedding is not None for _, chk, _ in top_candidates
+        ):
+            try:
+                emb_res = await self._embedder.embed(EmbeddingRequest(texts=(query,)))
+                if emb_res.embeddings:
+                    query_embedding = list(emb_res.embeddings[0])
+            except Exception:
+                query_embedding = None
+
+        scored: list[tuple[float, KnowledgeDocument, KnowledgeChunk]] = []
+        for doc, chunk, lex in top_candidates:
+            if query_embedding is not None and chunk.embedding is not None:
+                sem = cosine_similarity(query_embedding, chunk.embedding)
+                score = 0.4 * lex + 0.6 * sem
+            else:
+                score = lex
+            scored.append((score, doc, chunk))
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+
+        selected: list[DocSnippet] = []
+        used_chars = 0
+        for _, doc, chunk in scored:
+            if len(selected) >= MAX_SNIPPETS:
+                break
+            c_text = chunk.text.strip()
+            if not c_text:
+                continue
+            if used_chars + len(c_text) > SNIPPET_CHARS:
+                continue
+            selected.append(DocSnippet(title=doc.title, text=c_text))
+            used_chars += len(c_text)
+        return selected
 
     async def execute(
         self,
@@ -199,12 +286,18 @@ class BuildOwnerContextUseCase:
             used_conv_chars += len(t)
             added_unsorted += 1
 
+        snippets = await self._select_snippets(
+            pet_id,
+            chosen_domain.domain_id if chosen_domain is not None else None,
+            text,
+        )
+
         if chosen_domain is None:
             return OwnerContext(
                 domain=None,
                 conventions=tuple(conventions),
                 cases=(),
-                snippets=(),
+                snippets=tuple(snippets),
                 domain_score=best_score,
                 domain_explicit=False,
             )
@@ -229,7 +322,7 @@ class BuildOwnerContextUseCase:
             domain=domain_brief,
             conventions=tuple(conventions),
             cases=tuple(cases),
-            snippets=(),
+            snippets=tuple(snippets),
             domain_score=best_score,
             domain_explicit=domain_explicit,
         )

@@ -6,6 +6,10 @@ import uuid
 from typing import Protocol
 
 from xuna_backend.modules.identity.domain.pet_id import PetId
+from xuna_backend.modules.knowledge.domain.documents import (
+    KnowledgeChunk,
+    KnowledgeDocument,
+)
 from xuna_backend.modules.knowledge.domain.entities import (
     KnowledgeDomain,
     KnowledgeSuggestion,
@@ -45,6 +49,28 @@ class KnowledgeRepository(Protocol):
     async def save_summary(self, summary: KnowledgeSummary) -> None: ...
 
     async def get_summary(self, domain_id: uuid.UUID) -> KnowledgeSummary | None: ...
+
+    async def save_document(
+        self, document: KnowledgeDocument, chunks: list[KnowledgeChunk]
+    ) -> None: ...
+
+    async def get_document(self, document_id: uuid.UUID) -> KnowledgeDocument | None: ...
+
+    async def get_document_by_sha256(
+        self, pet_id: PetId, sha256: str
+    ) -> KnowledgeDocument | None: ...
+
+    async def list_documents(self, pet_id: PetId) -> list[KnowledgeDocument]: ...
+
+    async def count_documents(self, pet_id: PetId) -> int: ...
+
+    async def count_chunks_for_pet(self, pet_id: PetId) -> int: ...
+
+    async def delete_document(self, document_id: uuid.UUID) -> None: ...
+
+    async def list_chunks_for_pet(
+        self, pet_id: PetId, domain_id: uuid.UUID | None = None
+    ) -> list[tuple[KnowledgeDocument, KnowledgeChunk]]: ...
 
 
 class KnowledgeCandidatePort(Protocol):

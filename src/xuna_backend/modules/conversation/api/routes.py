@@ -352,7 +352,9 @@ async def turn(
             device_slots=body.device_slots(),
             explicit_domain_id=body.domainId,
             memory_repo=mem_repo,
-            owner_context=BuildOwnerContextUseCase(k_repo, c_port),
+            owner_context=BuildOwnerContextUseCase(
+                k_repo, c_port, getattr(request.app.state, "embedder", None)
+            ),
             now=now,
         )
     except Exception:

@@ -381,7 +381,9 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                 device_slots=parsed_ctx.device_slots,
                                 explicit_domain_id=parsed_ctx.domain_id,
                                 memory_repo=mem_repo,
-                                owner_context=BuildOwnerContextUseCase(k_repo, c_port),
+                                owner_context=BuildOwnerContextUseCase(
+                                    k_repo, c_port, getattr(app.state, "embedder", None)
+                                ),
                                 now=now,
                             )
                             if (
