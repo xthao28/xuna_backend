@@ -147,6 +147,7 @@ class ToolPermissionState(StrEnum):
     GRANTED = "granted"
     DENIED = "denied"
     NOT_DETERMINED = "not_determined"
+    UNSUPPORTED = "unsupported"
 
 
 @dataclass(frozen=True, slots=True)

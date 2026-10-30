@@ -665,3 +665,187 @@ def test_http_self_enroll_and_action_result_with_output() -> None:
             assert app.state.host_session_hub.is_online(host_id_str) is True
         assert app.state.host_session_hub.is_online(host_id_str) is False
     host_routes.run_once = orig_run_once
+
+
+def test_ios_self_enroll_and_unsupported_tools_filtered_and_rejected() -> None:
+    """UDC-6 S6.2: iPhone self-enrolls with `platform: 'ios'`, supported tools (`url.open`,
+    Apple Music `media.*`, `host.status`) and unsupported tools (`app.launch`, `media.volume_set`)
+    marked `permission: 'unsupported'`. Unsupported tools are omitted from the LLM catalog
+    and rejected with `status: 'unsupported'` if invoked."""
+
+    async def _run() -> None:
+        host_repo = FakeHostRepository()
+        verifier = P256SignatureVerifier()
+        audit = MemoryAuditLog()
+        limiter = HostRateLimiter(5, 60.0)
+        challenge_store = SelfEnrollmentChallengeStore(60.0)
+        hub = InMemoryHostSessionHub()
+        owner_id = uuid.uuid4()
+        now = datetime.now(UTC)
+        mono = time.monotonic()
+
+        ios_key = SimulatedDevice()
+        nonce = b"\x99" * 32
+        code = b"\xaa" * 16
+        challenge_store.issue(str(owner_id), nonce, code, mono)
+        sig = ios_key.sign(
+            host_proof_message(nonce=nonce, purpose=HostProofPurpose.ENROLL, payload=code)
+        )
+
+        ios_tools: list[dict[str, object]] = [
+            {
+                "name": "url.open",
+                "description": "Open an allowlisted HTTPS URL on the iPhone.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"url": {"type": "string", "maxLength": 2048}},
+                    "required": ["url"],
+                    "additionalProperties": False,
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "additionalProperties": False,
+                },
+                "_meta": {
+                    "xuna/policy": {
+                        "version": 1,
+                        "family": "url",
+                        "risk": "R2",
+                        "observes": False,
+                        "reversible": False,
+                        "permission": "granted",
+                        "platform": "ios",
+                    }
+                },
+            },
+            {
+                "name": "media.play_pause",
+                "description": "Toggle Apple Music playback on the iPhone.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "additionalProperties": False,
+                },
+                "_meta": {
+                    "xuna/policy": {
+                        "version": 1,
+                        "family": "media",
+                        "risk": "R1",
+                        "observes": False,
+                        "reversible": True,
+                        "permission": "granted",
+                        "platform": "ios",
+                    }
+                },
+            },
+            {
+                "name": "app.launch",
+                "description": "Unsupported on iOS.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"app_id": {"type": "string"}},
+                    "required": ["app_id"],
+                    "additionalProperties": False,
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {"ok": {"type": "boolean"}},
+                    "additionalProperties": False,
+                },
+                "_meta": {
+                    "xuna/policy": {
+                        "version": 1,
+                        "family": "app",
+                        "risk": "R2",
+                        "observes": False,
+                        "reversible": False,
+                        "permission": "unsupported",
+                        "platform": "ios",
+                    }
+                },
+            },
+        ]
+
+        host, _, _ = await self_enroll_host(
+            host_repo,
+            verifier,
+            audit,
+            limiter,
+            challenge_store,
+            owner_id,
+            SelfEnrollHostCommand(
+                platform=HostPlatform.IOS,
+                os_version="iOS 17.5",
+                agent_version="1.0.0",
+                alias="iPhone 15",
+                public_key=ios_key.public_key,
+                signature=sig,
+                hostname="iPhone-15",
+                tools=ios_tools,
+            ),
+            now,
+            mono,
+        )
+        assert host.platform == HostPlatform.IOS
+
+        await set_grants(
+            host_repo,
+            audit,
+            owner_id,
+            host.host_id,
+            [
+                (ToolFamily.URL, RiskTier.R2, True),
+                (ToolFamily.APP, RiskTier.R2, True),
+            ],
+            now,
+        )
+
+        # Catalog includes `url__open` and `media__play_pause`, never `app__launch`
+        catalog = await load_tool_catalog_for_owner(
+            owner_id=owner_id,
+            client_caps=(CAP_HOST_ACTIONS_V1,),
+            board_available=False,
+            host_repo=host_repo,
+            hub=hub,
+            self_host_id=str(host.host_id),
+        )
+        assert {t.name for t in catalog} == {"url__open", "media__play_pause"}
+
+        # Calling `app__launch` directly returns `status: "unsupported"`
+        orch = Orchestrator(
+            host_repo=host_repo,
+            hub=hub,
+            approval_repo=_FakeApprovalRepository(),
+            approval_broker=InMemoryApprovalBroker(),
+            local_result_broker=InMemoryLocalResultBroker(),
+            last_target_store=InMemoryLastTargetStore(),
+            audit=audit,
+            clock=lambda: now,
+        )
+        emitted: list[ActionStreamEvent] = []
+
+        async def on_event(ev: ActionStreamEvent) -> None:
+            emitted.append(ev)
+
+        msg = await orch.handle_call(
+            ToolCall(id="c-unsup", name="app__launch", arguments={"app_id": "com.spotify.music"}),
+            ActionContext(
+                owner_id=owner_id,
+                pet_id="pet-1",
+                locale=Locale.VI,
+                client_caps=(CAP_HOST_ACTIONS_V1,),
+                board_available=False,
+                emit_event=on_event,
+                self_host_id=str(host.host_id),
+            ),
+        )
+        assert '"status":"unsupported"' in msg.content
+        assert any(isinstance(e, ActionResultEvent) and e.status == "unsupported" for e in emitted)
+
+    asyncio.run(_run())

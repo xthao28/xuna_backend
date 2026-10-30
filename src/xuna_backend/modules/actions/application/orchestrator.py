@@ -71,6 +71,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     Manifest,
     RiskTier,
     ToolDescriptor,
+    ToolPermissionState,
 )
 
 DEADLINE_MS = 10000
@@ -558,6 +559,40 @@ class Orchestrator:
                     content=_encode_tool_payload("invalid_args"),
                     tool_call_id=call.id,
                 )
+
+        if descriptor.permission == ToolPermissionState.UNSUPPORTED:
+            await self._audit.record(
+                AuditEvent(
+                    owner_id=ctx.owner_id,
+                    action=AuditAction.HOST_TOOL_DENIED,
+                    occurred_at=now,
+                    subject=str(host.host_id),
+                    request_id=ctx.request_id,
+                    metadata={
+                        "tool": descriptor.name,
+                        "risk": descriptor.risk.value,
+                        "status": "unsupported",
+                        "reason": "unsupported",
+                        "platform": host.platform.value,
+                    },
+                )
+            )
+            await ctx.emit_event(
+                ActionResultEvent(
+                    invocation_id=invocation_id,
+                    target=target_alias,
+                    summary=ActionSummary.format_result(
+                        descriptor.name, clean_args, target_alias, "unsupported", ctx.locale
+                    ),
+                    status="unsupported",
+                    gesture=gesture_for_action_status("unsupported"),
+                )
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload("unsupported"),
+                tool_call_id=call.id,
+            )
 
         if not is_tool_granted(descriptor, host_grants):
             await self._audit.record(

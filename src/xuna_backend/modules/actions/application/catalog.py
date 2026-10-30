@@ -24,6 +24,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     HostStatus,
     Manifest,
     ToolDescriptor,
+    ToolPermissionState,
 )
 
 MAX_CATALOG_TOOLS = 8
@@ -51,8 +52,10 @@ _PRIORITY_ORDER: tuple[str, ...] = (
 
 
 def is_tool_granted(descriptor: ToolDescriptor, grants: Sequence[Grant]) -> bool:
-    """Returns True iff the host has an enabled grant for `descriptor.family`
-    whose `max_risk` covers `descriptor.risk`."""
+    """Returns True iff the tool is supported on the host and the host has an enabled
+    grant for `descriptor.family` whose `max_risk` covers `descriptor.risk`."""
+    if descriptor.permission == ToolPermissionState.UNSUPPORTED:
+        return False
     for grant in grants:
         if grant.family == descriptor.family:
             return grant.enabled and grant.max_risk.allows(descriptor.risk)
