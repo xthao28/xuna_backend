@@ -43,6 +43,10 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "host.status",
     "app.list_allowed",
     "workflow.list",
+    "ui.tap_text",
+    "ui.back",
+    "ui.home",
+    "ui.recents",
 )
 
 
