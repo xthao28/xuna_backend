@@ -43,6 +43,7 @@ from xuna_backend.modules.consent.api.routes import router as consent_router
 from xuna_backend.modules.consent.infrastructure.repository import SqlConsentRepository
 from xuna_backend.modules.conversation.api.routes import router as conversation_router
 from xuna_backend.modules.health.api.routes import router as health_router
+from xuna_backend.modules.hosts.wiring import wire_hosts
 from xuna_backend.modules.identity.api.routes import router as identity_router
 from xuna_backend.modules.identity.infrastructure.p256 import P256SignatureVerifier
 from xuna_backend.modules.identity.infrastructure.repository import SqlIdentityRepository
@@ -235,6 +236,7 @@ def create_app(
     app.include_router(backups_router)
     app.include_router(suggestions_router)
     app.include_router(transport_router)
+    wire_hosts(app)
     return app
 
 

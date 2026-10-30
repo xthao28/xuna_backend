@@ -17,6 +17,7 @@ import xuna_backend.modules.knowledge.infrastructure.models
 import xuna_backend.modules.memory.infrastructure.models
 import xuna_backend.modules.suggestions.infrastructure.models
 import xuna_backend.modules.transport.infrastructure.models  # noqa: F401
+import xuna_backend.modules.hosts.infrastructure.models  # noqa: F401
 from xuna_backend.core.db import Base
 
 config = context.config

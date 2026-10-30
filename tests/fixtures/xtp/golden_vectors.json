@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "sas": {
+    "codeHex": "0102030405060708090a0b0c0d0e0f10",
+    "codeB64Url": "AQIDBAUGBwgJCgsMDQ4PEA",
+    "publicKeyHex": "04aafe1e1b0dc482007c1b7f836175fc09038c89efc8fac311d017960b8a28f037256a6b25b8a11038561cc887a42b2adc16015d8dfa8804ea79114500dc2c0f3e",
+    "publicKeyB64": "BKr+HhsNxIIAfBt/g2F1/AkDjInvyPrDEdAXlguKKPA3JWprJbihEDhWHMiHpCsq3BYBXY36iATqeRFFANwsDz4=",
+    "keyFingerprintHex": "6250b64ee539e8cf5242a9b11e234d02",
+    "keyFingerprintB64Url": "YlC2TuU56M9SQqmxHiNNAg",
+    "hostname": "PC-PHONG-LAM-VIEC",
+    "enrollmentUri": "xuna-host://enroll?v=1&c=AQIDBAUGBwgJCgsMDQ4PEA&k=YlC2TuU56M9SQqmxHiNNAg&n=PC-PHONG-LAM-VIEC",
+    "sas": "944872"
+  },
+  "hostProof": {
+    "privateScalarHex": "df1dba3b7e9f94cda2c49843589ed15ed55fbbdada5d5c4f3a8b8c8060214719",
+    "publicKeyHex": "04aafe1e1b0dc482007c1b7f836175fc09038c89efc8fac311d017960b8a28f037256a6b25b8a11038561cc887a42b2adc16015d8dfa8804ea79114500dc2c0f3e",
+    "publicKeyB64": "BKr+HhsNxIIAfBt/g2F1/AkDjInvyPrDEdAXlguKKPA3JWprJbihEDhWHMiHpCsq3BYBXY36iATqeRFFANwsDz4=",
+    "nonceHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "nonceB64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "enrollProof": {
+      "purpose": 1,
+      "hostIdUuid": "00000000-0000-0000-0000-000000000000",
+      "payloadHex": "0102030405060708090a0b0c0d0e0f10",
+      "messageHex": "78756e612e686f73742e70726f6f662e763100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000000000000000000000000000000015dfbabeedf318bf33c0927c43d7630f51b82f351740301354fa3d7fc51f0132e",
+      "messageSha256Hex": "b207024ca07b500caee8edbf160df12532c468c5c2544f631abecc90dd1db1ca",
+      "signatureHex": "4ff7184c5660113e39365c35b033575f740e4e4e3bf2d9ea674cd79a17e9f504481418a64e5b7dd6a0c55be03d91a3abffdd979650386f9ca05b8b589a20c765",
+      "signatureDerHex": "304402204ff7184c5660113e39365c35b033575f740e4e4e3bf2d9ea674cd79a17e9f5040220481418a64e5b7dd6a0c55be03d91a3abffdd979650386f9ca05b8b589a20c765",
+      "signatureB64": "T/cYTFZgET45Nlw1sDNXX3QOTk478tnqZ0zXmhfp9QRIFBimTlt91qDFW+A9kaOr/92XllA4b5ygW4tYmiDHZQ=="
+    },
+    "sessionProof": {
+      "purpose": 2,
+      "hostIdUuid": "9b2f7e4a-5c11-4d8e-9a30-1f6d8c2e4b10",
+      "payloadHex": "04aafe1e1b0dc482007c1b7f836175fc09038c89efc8fac311d017960b8a28f037256a6b25b8a11038561cc887a42b2adc16015d8dfa8804ea79114500dc2c0f3e",
+      "messageHex": "78756e612e686f73742e70726f6f662e763100000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f9b2f7e4a5c114d8e9a301f6d8c2e4b10026250b64ee539e8cf5242a9b11e234d024cafb681075a96681dd82881e19ccb3c",
+      "messageSha256Hex": "459f48c5eeaad1cf083e7b41184f13934a4ef5d502571441979d87b075319cca",
+      "signatureHex": "ef98a9c4807bed260f9c65a21bd7c19b2144e6988c606765830ebde83df780ea224208696dc131b0b53be011ad8234be10877d1bf6616eedc7e8a4f9679e45db",
+      "signatureDerHex": "3045022100ef98a9c4807bed260f9c65a21bd7c19b2144e6988c606765830ebde83df780ea0220224208696dc131b0b53be011ad8234be10877d1bf6616eedc7e8a4f9679e45db",
+      "signatureB64": "75ipxIB77SYPnGWiG9fBmyFE5piMYGdlgw696D33gOoiQghpbcExsLU74BGtgjS+EId9G/Zhbu3H6KT5Z55F2w=="
+    }
+  },
+  "canonicalJson": [
+    {
+      "input": {},
+      "canonical": "{}",
+      "argsSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "input": {
+        "id": "vscode"
+      },
+      "canonical": "{\"id\":\"vscode\"}",
+      "argsSha256": "d78399bc678956f67755bb780874c11570b9c38eec010b89132232dc97821abb"
+    },
+    {
+      "input": {
+        "z": 10,
+        "a": "Xin chào XUNA",
+        "m": [
+          3,
+          1,
+          2
+        ],
+        "b": {
+          "y": true,
+          "x": false
+        }
+      },
+      "canonical": "{\"a\":\"Xin chào XUNA\",\"b\":{\"x\":false,\"y\":true},\"m\":[3,1,2],\"z\":10}",
+      "argsSha256": "ca2e6fc38621ad445bdf2dcec9ff5bad3a8ecffa7e13ff46e66eadc8392a4341"
+    }
+  ]
+}

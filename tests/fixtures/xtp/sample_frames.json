@@ -1,0 +1,369 @@
+{
+  "schemaVersion": 1,
+  "frames": {
+    "helloEnrollRequest": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "xuna/hello",
+      "params": {
+        "protocols": [
+          "xtp/1"
+        ],
+        "enroll": {
+          "code": "AQIDBAUGBwgJCgsMDQ4PEA",
+          "publicKey": "BKr+HhsNxIIAfBt/g2F1/AkDjInvyPrDEdAXlguKKPA3JWprJbihEDhWHMiHpCsq3BYBXY36iATqeRFFANwsDz4=",
+          "platform": "windows",
+          "osVersion": "10.0.22631",
+          "agentVersion": "0.1.0",
+          "hostname": "PC-PHONG-LAM-VIEC"
+        }
+      }
+    },
+    "helloReconnectRequest": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "xuna/hello",
+      "params": {
+        "protocols": [
+          "xtp/1"
+        ],
+        "hostId": "9b2f7e4a-5c11-4d8e-9a30-1f6d8c2e4b10",
+        "platform": "windows",
+        "osVersion": "10.0.22631",
+        "agentVersion": "0.1.0"
+      }
+    },
+    "helloResponse": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": {
+        "protocol": "xtp/1"
+      }
+    },
+    "challengeEnrollNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/challenge",
+      "params": {
+        "purpose": 1,
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "expiresIn": 60
+      }
+    },
+    "challengeSessionNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/challenge",
+      "params": {
+        "purpose": 2,
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+        "expiresIn": 60
+      }
+    },
+    "proofEnrollRequest": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "xuna/proof",
+      "params": {
+        "purpose": 1,
+        "signature": "T/cYTFZgET45Nlw1sDNXX3QOTk478tnqZ0zXmhfp9QRIFBimTlt91qDFW+A9kaOr/92XllA4b5ygW4tYmiDHZQ=="
+      }
+    },
+    "proofSessionRequest": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "method": "xuna/proof",
+      "params": {
+        "purpose": 2,
+        "signature": "75ipxIB77SYPnGWiG9fBmyFE5piMYGdlgw696D33gOoiQghpbcExsLU74BGtgjS+EId9G/Zhbu3H6KT5Z55F2w=="
+      }
+    },
+    "proofResponse": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "verified": true
+      }
+    },
+    "enrollPendingNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/enrollPending",
+      "params": {
+        "expiresIn": 300
+      }
+    },
+    "enrolledNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/enrolled",
+      "params": {
+        "hostId": "9b2f7e4a-5c11-4d8e-9a30-1f6d8c2e4b10",
+        "alias": "PC phòng làm việc"
+      }
+    },
+    "readyNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/ready",
+      "params": {
+        "serverTime": "2026-10-30T07:00:00Z",
+        "heartbeatS": 30
+      }
+    },
+    "toolsListRequest": {
+      "jsonrpc": "2.0",
+      "id": 10,
+      "method": "tools/list",
+      "params": {}
+    },
+    "toolsListResponse": {
+      "jsonrpc": "2.0",
+      "id": 10,
+      "result": {
+        "tools": [
+          {
+            "name": "media.play_pause",
+            "description": "Toggle playback of the active media session.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "playing",
+                    "paused",
+                    "unknown"
+                  ]
+                }
+              },
+              "required": [
+                "state"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "media",
+                "risk": "R1",
+                "observes": false,
+                "reversible": true,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "app.launch",
+            "description": "Launch an allowlisted application by id.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9_.-]{1,64}$"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9_.-]{1,64}$"
+                }
+              },
+              "required": [
+                "id"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "app",
+                "risk": "R2",
+                "observes": false,
+                "reversible": false,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "host.status",
+            "description": "Report host platform, OS version, agent version and permission states.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "platform": {
+                  "type": "string",
+                  "enum": [
+                    "windows",
+                    "macos",
+                    "android",
+                    "ios",
+                    "linux"
+                  ]
+                },
+                "osVersion": {
+                  "type": "string",
+                  "maxLength": 64
+                },
+                "agentVersion": {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                "permissions": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "enum": [
+                      "granted",
+                      "denied",
+                      "not_determined"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "platform",
+                "osVersion",
+                "agentVersion",
+                "permissions"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "host",
+                "risk": "R0",
+                "observes": false,
+                "reversible": true,
+                "permission": "granted"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "toolsCallRequest": {
+      "jsonrpc": "2.0",
+      "id": 17,
+      "method": "tools/call",
+      "params": {
+        "name": "app.launch",
+        "arguments": {
+          "id": "vscode"
+        },
+        "_meta": {
+          "xuna/invocationId": "5f3c2d10-8a4e-4b71-9c12-0e4f6a8b9c01",
+          "xuna/deadlineMs": 10000,
+          "xuna/approval": {
+            "approvalId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+            "argsSha256": "d78399bc678956f67755bb780874c11570b9c38eec010b89132232dc97821abb",
+            "expiresAt": "2026-10-30T07:01:00Z"
+          }
+        }
+      }
+    },
+    "toolsCallOkResponse": {
+      "jsonrpc": "2.0",
+      "id": 17,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "opened"
+          }
+        ],
+        "structuredContent": {
+          "id": "vscode"
+        },
+        "isError": false,
+        "_meta": {
+          "xuna/status": "ok",
+          "xuna/durationMs": 420
+        }
+      }
+    },
+    "toolsCallErrorResponse": {
+      "jsonrpc": "2.0",
+      "id": 17,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "needs_permission: accessibility"
+          }
+        ],
+        "structuredContent": {},
+        "isError": true,
+        "_meta": {
+          "xuna/status": "needs_permission",
+          "xuna/errorCode": "accessibility",
+          "xuna/durationMs": 12
+        }
+      }
+    },
+    "cancelledNotification": {
+      "jsonrpc": "2.0",
+      "method": "notifications/cancelled",
+      "params": {
+        "requestId": 17,
+        "reason": "timeout"
+      }
+    },
+    "progressNotification": {
+      "jsonrpc": "2.0",
+      "method": "notifications/progress",
+      "params": {
+        "progressToken": "5f3c2d10-8a4e-4b71-9c12-0e4f6a8b9c01",
+        "progress": 1,
+        "total": 3,
+        "message": "launching_app"
+      }
+    },
+    "toolsListChangedNotification": {
+      "jsonrpc": "2.0",
+      "method": "notifications/tools/list_changed",
+      "params": {}
+    },
+    "stopNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/stop",
+      "params": {
+        "reason": "owner_app"
+      }
+    },
+    "pingRequest": {
+      "jsonrpc": "2.0",
+      "id": 42,
+      "method": "ping",
+      "params": {}
+    },
+    "pingResponse": {
+      "jsonrpc": "2.0",
+      "id": 42,
+      "result": {}
+    },
+    "jsonRpcMethodNotFoundError": {
+      "jsonrpc": "2.0",
+      "id": 99,
+      "error": {
+        "code": -32601,
+        "message": "Method not found"
+      }
+    }
+  }
+}
+

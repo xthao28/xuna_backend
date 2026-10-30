@@ -71,12 +71,17 @@ class Settings:
     embedding_timeout_s: float = 10.0
     # Backup encryption key (Phase 2, CLD-20). Empty = derives deterministic fallback.
     backup_encryption_key: str = ""
+    # Dev-only host tool invocation route (`XUNA_DEV_HOST_TOOLS=1`, UDC-3 §5.4).
+    # Never enabled in production.
+    dev_host_tools: bool = False
 
     def __post_init__(self) -> None:
         if not 0 < self.text_expert_timeout_s <= 120:
             raise ValueError("text_expert_timeout_s must be in (0, 120]")
         if not 512 <= self.text_expert_max_tokens <= 8192:
             raise ValueError("text_expert_max_tokens must be in 512..8192")
+        if self.dev_host_tools and self.environment == Environment.PRODUCTION:
+            raise ValueError("dev_host_tools must never be enabled in production")
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Settings":
@@ -125,6 +130,7 @@ class Settings:
             embedding_api_key_header=source.get("XUNA_EMBEDDING_API_KEY_HEADER", "authorization"),
             embedding_timeout_s=float(source.get("XUNA_EMBEDDING_TIMEOUT_S", "10")),
             backup_encryption_key=source.get("XUNA_BACKUP_ENCRYPTION_KEY", ""),
+            dev_host_tools=source.get("XUNA_DEV_HOST_TOOLS", "").lower() in ("1", "true", "yes"),
         )
 
     def __repr__(self) -> str:

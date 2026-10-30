@@ -39,6 +39,14 @@ class AuditAction(StrEnum):
     DEVICE_COMMAND_SENT = "device.command_sent"
     DEVICE_CONNECTED = "device.connected"
     DEVICE_REJECTED = "device.rejected"
+    HOST_ENROLLED = "host.enrolled"
+    HOST_ENROLL_REJECTED = "host.enroll_rejected"
+    HOST_CONNECTED = "host.connected"
+    HOST_REJECTED = "host.rejected"
+    HOST_REVOKED = "host.revoked"
+    HOST_GRANT_CHANGED = "host.grant_changed"
+    HOST_TOOL_INVOKED = "host.tool_invoked"
+    HOST_TOOL_DENIED = "host.tool_denied"
 
 
 @dataclass(frozen=True, slots=True)
