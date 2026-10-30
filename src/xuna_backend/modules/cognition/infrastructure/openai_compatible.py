@@ -22,12 +22,37 @@ from xuna_backend.modules.cognition.domain.types import (
     ChatRequest,
     EmbeddingRequest,
     EmbeddingResult,
+    Message,
+    Role,
     TextDelta,
     ToolCall,
     ToolCallRequested,
 )
 
 NAME = "openai_compatible"
+
+
+def _serialize_message(m: Message) -> dict[str, Any]:
+    if m.role is Role.ASSISTANT and m.tool_calls:
+        return {
+            "role": Role.ASSISTANT.value,
+            "content": m.content or None,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                    },
+                }
+                for tc in m.tool_calls
+            ],
+        }
+    msg: dict[str, Any] = {"role": m.role.value, "content": m.content}
+    if m.tool_call_id:
+        msg["tool_call_id"] = m.tool_call_id
+    return msg
 
 
 class OpenAICompatibleTextGenerator:
@@ -65,11 +90,7 @@ class OpenAICompatibleTextGenerator:
             "model": self._model,
             "stream": True,
             "max_tokens": request.max_output_tokens,
-            "messages": [
-                {"role": m.role.value, "content": m.content}
-                | ({"tool_call_id": m.tool_call_id} if m.tool_call_id else {})
-                for m in request.messages
-            ],
+            "messages": [_serialize_message(m) for m in request.messages],
         }
         if self._reasoning_effort:
             payload["reasoning_effort"] = self._reasoning_effort

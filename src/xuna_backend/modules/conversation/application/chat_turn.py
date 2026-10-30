@@ -6,11 +6,26 @@ untrusted; they never become memory, preference or growth (CLD-14 does that
 through owner confirmation + device commit).
 """
 
-from collections.abc import AsyncIterator
+import asyncio
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 
+from xuna_backend.modules.actions.application.orchestrator import (
+    EventSink,
+    tool_system_prompt,
+)
+from xuna_backend.modules.actions.domain.entities import (
+    MAX_CALLS_PER_ROUND,
+    MAX_TOOL_ROUNDS,
+    TURN_BUDGET_SECONDS,
+    ActionPendingEvent,
+    ActionResultEvent,
+    ActionStreamEvent,
+    BoardHidRequestEvent,
+)
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
     TextGenerator,
@@ -24,6 +39,9 @@ from xuna_backend.modules.cognition.domain.types import (
     Message,
     Role,
     TextDelta,
+    ToolCall,
+    ToolCallRequested,
+    ToolSpec,
 )
 from xuna_backend.modules.conversation.domain.gestures import GestureTagFilter, ReplyGesture
 from xuna_backend.modules.conversation.domain.reply_sections import (
@@ -406,6 +424,7 @@ def build_request(
     *,
     mode: TurnMode = TurnMode.CHAT,
     budget: ReplyBudget | None = None,
+    tools: tuple[ToolSpec, ...] = (),
 ) -> ChatRequest:
     text = user_text.strip()
     max_chars = MAX_EXPERT_INPUT_CHARS if mode == TurnMode.EXPERT else MAX_INPUT_CHARS
@@ -423,6 +442,9 @@ def build_request(
         parts = [p for p in (persona, owner_part, ctx_part) if p]
         system = " ".join(parts)
 
+    if tools:
+        system = f"{system}{tool_system_prompt(effective_locale)}"
+
     earlier = () if context is None else context.history
     max_tokens = budget.max_output_tokens if budget is not None else 400
     eff_timeout = budget.timeout_s if budget is not None else timeout_s
@@ -435,10 +457,21 @@ def build_request(
         locale=effective_locale,
         max_output_tokens=max_tokens,
         timeout_s=eff_timeout,
+        tools=tools,
     )
 
 
-TurnEvent = ChatEvent | ProviderFailed | GestureChosen | DetailDelta
+TurnEvent = (
+    ChatEvent
+    | ProviderFailed
+    | GestureChosen
+    | DetailDelta
+    | ActionPendingEvent
+    | BoardHidRequestEvent
+    | ActionResultEvent
+)
+
+ToolCallRunner = Callable[[ToolCall, EventSink], Awaitable[Message]]
 
 
 async def chat_turn(
@@ -447,8 +480,193 @@ async def chat_turn(
     *,
     sections: bool = False,
     locale_vi: bool = True,
+    tool_runner: ToolCallRunner | None = None,
 ) -> AsyncIterator[TurnEvent]:
-    """Streams the reply with gesture tags removed, and splits say/detail when `sections=True`."""
+    """Streams the reply with gesture tags removed, splits say/detail when `sections=True`,
+    and executes up to `MAX_TOOL_ROUNDS` (3) x `MAX_CALLS_PER_ROUND` (3) tool calls when
+    `tool_runner` is supplied."""
+    if tool_runner is None:
+        async for ev in _single_round_chat_turn(
+            generator,
+            request,
+            sections=sections,
+            locale_vi=locale_vi,
+        ):
+            yield ev
+        return
+
+    turn_started = time.monotonic()
+    messages = list(request.messages)
+    last_finished: ChatFinished | None = None
+    gesture_emitted = False
+
+    try:
+        for round_idx in range(MAX_TOOL_ROUNDS + 1):
+            elapsed = time.monotonic() - turn_started
+            remaining_budget = TURN_BUDGET_SECONDS - elapsed
+            if remaining_budget <= 0:
+                break
+
+            allow_tools_this_round = round_idx < MAX_TOOL_ROUNDS and bool(request.tools)
+            round_request = ChatRequest(
+                messages=tuple(messages),
+                locale=request.locale,
+                max_output_tokens=request.max_output_tokens,
+                timeout_s=min(request.timeout_s, max(remaining_budget, 1.0)),
+                tools=request.tools if allow_tools_this_round else (),
+            )
+
+            tags = GestureTagFilter()
+            sec_filter = ReplySectionFilter() if sections else None
+            detail_accum: list[str] = []
+            round_text_parts: list[str] = []
+            round_calls: list[ToolCall] = []
+            round_finished: ChatFinished | None = None
+
+            async for event in generator.stream(round_request):
+                match event:
+                    case TextDelta(text=text):
+                        round_text_parts.append(text)
+                        clean, gesture = tags.feed(text)
+                        if gesture is not None and not gesture_emitted:
+                            gesture_emitted = True
+                            yield GestureChosen(gesture)
+                        if clean:
+                            if sec_filter is None:
+                                yield TextDelta(clean)
+                            else:
+                                for sec, chunk in sec_filter.feed(clean):
+                                    if sec == Section.SAY:
+                                        yield TextDelta(chunk)
+                                    else:
+                                        detail_accum.append(chunk)
+                                        yield DetailDelta(chunk)
+                    case ToolCallRequested(call=call):
+                        round_calls.append(call)
+                    case ChatFinished():
+                        rest = tags.flush()
+                        if sec_filter is None:
+                            if rest:
+                                yield TextDelta(rest)
+                        else:
+                            if rest:
+                                for sec, chunk in sec_filter.feed(rest):
+                                    if sec == Section.SAY:
+                                        yield TextDelta(chunk)
+                                    else:
+                                        detail_accum.append(chunk)
+                                        yield DetailDelta(chunk)
+                            for sec, chunk in sec_filter.flush():
+                                if sec == Section.SAY:
+                                    yield TextDelta(chunk)
+                                else:
+                                    detail_accum.append(chunk)
+                                    yield DetailDelta(chunk)
+                            if not sec_filter.tagged and not round_calls:
+                                yield TextDelta(fallback_say("".join(detail_accum), locale_vi))
+                        round_finished = event
+                        last_finished = event
+                    case _:
+                        yield event
+
+            if not round_calls or not allow_tools_this_round:
+                if round_finished is not None:
+                    yield round_finished
+                return
+
+            # Append the assistant's tool-call message and execute up to MAX_CALLS_PER_ROUND calls.
+            messages.append(
+                Message(
+                    role=Role.ASSISTANT,
+                    content="".join(round_text_parts),
+                    tool_calls=tuple(round_calls),
+                )
+            )
+
+            tool_messages: list[Message] = []
+            async for item in _execute_round_tool_calls(
+                round_calls,
+                tool_runner,
+                remaining_budget=max(TURN_BUDGET_SECONDS - (time.monotonic() - turn_started), 0.5),
+            ):
+                if isinstance(item, Message):
+                    tool_messages.append(item)
+                else:
+                    yield item
+
+            messages.extend(tool_messages)
+
+        if last_finished is not None:
+            yield last_finished
+    except ProviderUnavailableError:
+        yield ProviderFailed()
+
+
+async def _execute_round_tool_calls(
+    calls: list[ToolCall],
+    tool_runner: ToolCallRunner,
+    *,
+    remaining_budget: float,
+) -> AsyncIterator[ActionStreamEvent | Message]:
+    """Runs up to `MAX_CALLS_PER_ROUND` tool calls sequentially while streaming
+    any `ActionStreamEvent`s (`ActionPendingEvent`, `BoardHidRequestEvent`,
+    `ActionResultEvent`) in real time."""
+    queue: asyncio.Queue[ActionStreamEvent | Message | BaseException | None] = asyncio.Queue()
+
+    async def emit(ev: ActionStreamEvent) -> None:
+        await queue.put(ev)
+
+    async def worker() -> None:
+        try:
+            for idx, call in enumerate(calls):
+                if idx >= MAX_CALLS_PER_ROUND:
+                    await queue.put(
+                        Message(
+                            role=Role.TOOL,
+                            content='{"status":"too_many_calls"}',
+                            tool_call_id=call.id,
+                        )
+                    )
+                    continue
+                msg = await tool_runner(call, emit)
+                await queue.put(msg)
+        except BaseException as exc:
+            await queue.put(exc)
+        finally:
+            await queue.put(None)
+
+    task = asyncio.create_task(worker())
+    try:
+        async with asyncio.timeout(remaining_budget):
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+    except TimeoutError:
+        task.cancel()
+        # Drain any remaining calls as timeout tool messages so message history stays valid
+        for call in calls:
+            yield Message(
+                role=Role.TOOL,
+                content='{"status":"timeout"}',
+                tool_call_id=call.id,
+            )
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def _single_round_chat_turn(
+    generator: TextGenerator,
+    request: ChatRequest,
+    *,
+    sections: bool = False,
+    locale_vi: bool = True,
+) -> AsyncIterator[TurnEvent]:
     tags = GestureTagFilter()
     sec_filter = ReplySectionFilter() if sections else None
     detail_accum: list[str] = []

@@ -15,6 +15,11 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from typing import cast
 
+from xuna_backend.modules.actions.domain.entities import (
+    ActionPendingEvent,
+    ActionResultEvent,
+    BoardHidRequestEvent,
+)
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
     SpeechSynthesizer,
@@ -79,6 +84,9 @@ SpokenTurnEvent = (
     | ProviderFailed
     | GestureChosen
     | DetailDelta
+    | ActionPendingEvent
+    | BoardHidRequestEvent
+    | ActionResultEvent
     | SpokenAudio
     | SpeechUnavailable
     | SpokenFinished

@@ -47,6 +47,9 @@ class AuditAction(StrEnum):
     HOST_GRANT_CHANGED = "host.grant_changed"
     HOST_TOOL_INVOKED = "host.tool_invoked"
     HOST_TOOL_DENIED = "host.tool_denied"
+    HOST_APPROVAL_GRANTED = "host.approval_granted"
+    HOST_APPROVAL_REJECTED = "host.approval_rejected"
+    BOARD_HID_REQUESTED = "board.hid_requested"
 
 
 @dataclass(frozen=True, slots=True)

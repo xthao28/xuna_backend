@@ -16,9 +16,10 @@ from xuna_backend.modules.cognition.application.ports import (
     SpeechSynthesizer,
     TextGenerator,
 )
-from xuna_backend.modules.cognition.domain.types import Locale
+from xuna_backend.modules.cognition.domain.types import Locale, ToolSpec
 from xuna_backend.modules.conversation.application.chat_turn import (
     ReplyBudget,
+    ToolCallRunner,
     TurnContext,
     build_request,
     chat_turn,
@@ -124,6 +125,8 @@ class VoiceSession:
         mode: TurnMode = TurnMode.CHAT,
         budget: ReplyBudget | None = None,
         generator: TextGenerator | None = None,
+        tools: tuple[ToolSpec, ...] = (),
+        tool_runner: ToolCallRunner | None = None,
     ) -> AsyncIterator[SpokenTurnEvent]:
         if not text.strip():
             self.state = SessionState.IDLE
@@ -137,6 +140,7 @@ class VoiceSession:
                 locale=self.locale,
                 mode=mode,
                 budget=budget,
+                tools=tools,
             )
             chosen_gen = generator or self.generator
             text_events = chat_turn(
@@ -144,6 +148,7 @@ class VoiceSession:
                 req,
                 sections=(mode == TurnMode.EXPERT),
                 locale_vi=(req.locale == Locale.VI),
+                tool_runner=tool_runner,
             )
             chosen_voice = voice or self.voice
             if self.speak and self.synthesizer is not None:

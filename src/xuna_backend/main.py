@@ -20,6 +20,7 @@ from xuna_backend.modules.accounts.infrastructure.oidc import (
     jwks_resolver,
 )
 from xuna_backend.modules.accounts.infrastructure.repository import SqlOwnerRepository
+from xuna_backend.modules.actions.wiring import wire_actions
 from xuna_backend.modules.audit.api.routes import router as audit_router
 from xuna_backend.modules.audit.infrastructure.repository import SqlAuditLog
 from xuna_backend.modules.backups.api.routes import router as backups_router
@@ -237,6 +238,7 @@ def create_app(
     app.include_router(suggestions_router)
     app.include_router(transport_router)
     wire_hosts(app)
+    wire_actions(app)
     return app
 
 

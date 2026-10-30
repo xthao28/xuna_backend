@@ -19,6 +19,14 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.accounts.api.dependencies import Session, state
 from xuna_backend.modules.accounts.domain.owner import Owner
+from xuna_backend.modules.actions.api.routes import build_stream_orchestrator
+from xuna_backend.modules.actions.application.catalog import load_tool_catalog_for_owner
+from xuna_backend.modules.actions.application.orchestrator import ActionContext, EventSink
+from xuna_backend.modules.actions.domain.entities import (
+    ActionPendingEvent,
+    ActionResultEvent,
+    BoardHidRequestEvent,
+)
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
     SpeechRecognizer,
@@ -28,8 +36,11 @@ from xuna_backend.modules.cognition.application.ports import (
 from xuna_backend.modules.cognition.domain.types import (
     ChatFinished,
     Locale,
+    Message,
     TextDelta,
+    ToolCall,
     ToolCallRequested,
+    ToolSpec,
 )
 from xuna_backend.modules.consent.api.routes import RequireConsent
 from xuna_backend.modules.consent.domain.consent import ConsentClass
@@ -48,6 +59,7 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     PetTemperament,
     ProviderFailed,
     ReplyBudget,
+    ToolCallRunner,
     TurnContext,
     build_request,
     chat_turn,
@@ -79,6 +91,7 @@ from xuna_backend.modules.conversation.domain.turn_mode import (
     TurnMode,
     decide_mode,
 )
+from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
 from xuna_backend.modules.identity.application.use_cases import IdentityError, get_owned_pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
 from xuna_backend.modules.knowledge.application.owner_context import BuildOwnerContextUseCase
@@ -135,6 +148,12 @@ class KnowledgeSlotBody(BaseModel):
     state: Literal["empty", "active", "resting"]
 
 
+class BoardHidBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    available: bool = False
+
+
 class TurnBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -158,6 +177,10 @@ class TurnBody(BaseModel):
 
     knowledge: list[KnowledgeSlotBody] | None = Field(default=None, max_length=5)
     extractKnowledge: bool = True
+
+    # UDC-4 (§5.4): Client capabilities and board HID state.
+    clientCapabilities: list[str] | None = Field(default=None, max_length=16)
+    boardHid: BoardHidBody | None = None
 
     def base_context(self) -> TurnContext:
         pet = self.pet
@@ -365,6 +388,24 @@ async def turn(
             domain_id=None,
         )
 
+    client_caps = tuple(body.clientCapabilities or ())
+    board_available = bool(body.boardHid.available) if body.boardHid is not None else False
+    tools: tuple[ToolSpec, ...] = ()
+    if client_caps:
+        try:
+            host_factory: Callable[[object], HostRepository] = state(request, "host_repository")
+            hub: HostSessionHub = state(request, "host_session_hub")
+            tools = await load_tool_catalog_for_owner(
+                owner_id=owner.owner_id,
+                client_caps=client_caps,
+                board_available=board_available,
+                host_repo=host_factory(session),
+                hub=hub,
+            )
+        except Exception:
+            _logger.debug("Failed to load tool catalog for turn", exc_info=True)
+            tools = ()
+
     await session.close()  # release the DB connection before a long provider call
 
     settings = state(request, "settings")
@@ -388,6 +429,7 @@ async def turn(
             _effective_context(prepared.context),
             mode=chosen_mode,
             budget=budget,
+            tools=tools,
         )
     except ValueError as error:
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text") from error
@@ -398,6 +440,28 @@ async def turn(
     signals = {"signals": list(conversation_signals(body.text, len(body.history or ())))}
     candidate_payload = {"candidate": candidate_info} if candidate_info is not None else {}
     domain_id_str = str(prepared.domain_id) if prepared.domain_id is not None else None
+
+    tool_runner: ToolCallRunner | None = None
+    if client_caps:
+        stream_orch = build_stream_orchestrator(request.app.state)
+        raw_rid = getattr(request.state, "request_id", "")
+        request_id_str = str(raw_rid) if isinstance(raw_rid, str) else ""
+
+        async def _run_tool(call: ToolCall, emit: EventSink) -> Message:
+            return await stream_orch.handle_call(
+                call,
+                ActionContext(
+                    owner_id=owner.owner_id,
+                    pet_id=pet_id,
+                    locale=chat_request.locale,
+                    client_caps=client_caps,
+                    board_available=board_available,
+                    emit_event=emit,
+                    request_id=request_id_str,
+                ),
+            )
+
+        tool_runner = _run_tool
 
     async def events() -> AsyncIterator[str]:
         if body.mode is not None:
@@ -414,6 +478,7 @@ async def turn(
             chat_request,
             sections=(chosen_mode == TurnMode.EXPERT),
             locale_vi=(chat_request.locale == Locale.VI),
+            tool_runner=tool_runner,
         )
         stream: AsyncIterator[SpokenTurnEvent] = (
             spoken_turn(text_events, synthesizer, body.locale, voice=body.voice)
@@ -430,8 +495,39 @@ async def turn(
                     yield _sse("detail", {"text": text})
                 case GestureChosen(gesture=gesture):
                     yield _sse("gesture", {"name": gesture.value})
+                case ActionPendingEvent() as pending:
+                    yield _sse(
+                        "action_pending",
+                        {
+                            "approvalId": pending.approval_id,
+                            "target": pending.target,
+                            "summary": pending.summary,
+                            "risk": pending.risk,
+                            "expiresIn": pending.expires_in,
+                        },
+                    )
+                case BoardHidRequestEvent() as hid_req:
+                    yield _sse(
+                        "board_hid_request",
+                        {
+                            "invocationId": hid_req.invocation_id,
+                            "approvalId": hid_req.approval_id,
+                            "key": hid_req.key,
+                            "usageIndex": hid_req.usage_index,
+                        },
+                    )
+                case ActionResultEvent() as act_res:
+                    act_payload: dict[str, Any] = {
+                        "invocationId": act_res.invocation_id,
+                        "target": act_res.target,
+                        "summary": act_res.summary,
+                        "status": act_res.status,
+                    }
+                    if act_res.gesture is not None:
+                        act_payload["gesture"] = act_res.gesture
+                    yield _sse("action_result", act_payload)
                 case ToolCallRequested():
-                    continue  # no server tools enabled yet
+                    continue
                 case ChatFinished() as done:
                     extra = {
                         "mode": chosen_mode.value,

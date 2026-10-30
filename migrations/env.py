@@ -9,15 +9,16 @@ from sqlalchemy import create_engine, pool
 # Import every module's ORM models here so autogenerate sees them.
 import xuna_backend.core.idempotency
 import xuna_backend.modules.accounts.infrastructure.models
+import xuna_backend.modules.actions.infrastructure.models
 import xuna_backend.modules.audit.infrastructure.models
 import xuna_backend.modules.backups.infrastructure.models
 import xuna_backend.modules.consent.infrastructure.models
+import xuna_backend.modules.hosts.infrastructure.models
 import xuna_backend.modules.identity.infrastructure.models
 import xuna_backend.modules.knowledge.infrastructure.models
 import xuna_backend.modules.memory.infrastructure.models
 import xuna_backend.modules.suggestions.infrastructure.models
 import xuna_backend.modules.transport.infrastructure.models  # noqa: F401
-import xuna_backend.modules.hosts.infrastructure.models  # noqa: F401
 from xuna_backend.core.db import Base
 
 config = context.config

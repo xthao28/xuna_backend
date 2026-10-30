@@ -25,11 +25,27 @@ from xuna_backend.modules.accounts.application.ports import (
     InvalidTokenError,
     TokenVerifier,
 )
+from xuna_backend.modules.actions.api.routes import build_stream_orchestrator
+from xuna_backend.modules.actions.application.catalog import load_tool_catalog_for_owner
+from xuna_backend.modules.actions.application.orchestrator import (
+    ActionContext,
+    EventSink,
+    Orchestrator,
+)
+from xuna_backend.modules.actions.domain.entities import (
+    ActionPendingEvent,
+    ActionResultEvent,
+    ApprovalDecision,
+    BoardHidRequestEvent,
+)
 from xuna_backend.modules.cognition.application.ports import TextGenerator
 from xuna_backend.modules.cognition.domain.types import (
     ChatFinished,
     Locale,
+    Message,
     TextDelta,
+    ToolCall,
+    ToolSpec,
 )
 from xuna_backend.modules.consent.application.ports import ConsentRepository
 from xuna_backend.modules.consent.domain.consent import ConsentClass
@@ -44,6 +60,7 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     PetSelf,
     PetTemperament,
     ReplyBudget,
+    ToolCallRunner,
     TurnContext,
 )
 from xuna_backend.modules.conversation.application.spoken_turn import (
@@ -136,6 +153,18 @@ def _parse_requested_mode(raw_val: object) -> RequestedMode | None:
         return RequestedMode(raw_val)
     except ValueError:
         return None
+
+
+def _parse_client_caps(raw_val: object) -> tuple[str, ...]:
+    if not isinstance(raw_val, list):
+        return ()
+    return tuple(str(item) for item in raw_val[:16] if isinstance(item, str) and item)
+
+
+def _parse_board_available(raw_val: object) -> bool | None:
+    if isinstance(raw_val, dict) and isinstance(raw_val.get("available"), bool):
+        return bool(raw_val["available"])
+    return None
 
 
 def _parse_commit_context(raw: dict[str, Any]) -> _ParsedCommitContext:
@@ -305,6 +334,8 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
         target_locale = Locale.VI
 
     chosen_voice = hello.get("voice")
+    default_client_caps = _parse_client_caps(hello.get("clientCapabilities"))
+    default_board_available = bool(_parse_board_available(hello.get("boardHid")))
 
     session = VoiceSession(
         session_id=session_id,
@@ -362,13 +393,43 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
                     turn_text = str(payload.get("text", "")).strip()
                     raw_ctx = payload.get("context", {})
-                    parsed_ctx = _parse_commit_context(raw_ctx if isinstance(raw_ctx, dict) else {})
+                    ctx_dict = raw_ctx if isinstance(raw_ctx, dict) else {}
+                    parsed_ctx = _parse_commit_context(ctx_dict)
                     requested_mode = _parse_requested_mode(payload.get("mode"))
                     turn_voice = payload.get("voice")
 
+                    turn_caps = (
+                        _parse_client_caps(payload.get("clientCapabilities"))
+                        or _parse_client_caps(ctx_dict.get("clientCapabilities"))
+                        or default_client_caps
+                    )
+                    override_board = _parse_board_available(payload.get("boardHid"))
+                    if override_board is None:
+                        override_board = _parse_board_available(ctx_dict.get("boardHid"))
+                    turn_board_available = (
+                        override_board if override_board is not None else default_board_available
+                    )
+
                     now = datetime.now(UTC)
+                    turn_tools: tuple[ToolSpec, ...] = ()
                     try:
                         async with app.state.database.sessions() as db:
+                            if turn_caps:
+                                try:
+                                    turn_tools = await load_tool_catalog_for_owner(
+                                        owner_id=owner.owner_id,
+                                        client_caps=turn_caps,
+                                        board_available=turn_board_available,
+                                        host_repo=app.state.host_repository(db),
+                                        hub=app.state.host_session_hub,
+                                    )
+                                except Exception:
+                                    logger.debug(
+                                        "Failed to load tool catalog for voice turn",
+                                        exc_info=True,
+                                    )
+                                    turn_tools = ()
+
                             mem_repo = app.state.memory_repository(db)
                             k_repo = app.state.knowledge_repository(db)
                             c_port = app.state.knowledge_candidate_adapter(db)
@@ -421,12 +482,43 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         budget = ReplyBudget(max_output_tokens=400, timeout_s=30.0)
                         turn_generator = app.state.text_generator
 
+                    turn_tool_runner: ToolCallRunner | None = None
+                    if turn_caps:
+                        stream_orch = build_stream_orchestrator(app.state)
+                        eff_locale = target_locale or Locale.VI
+
+                        async def _run_voice_tool(
+                            call: ToolCall,
+                            emit: EventSink,
+                            *,
+                            _orch: Orchestrator = stream_orch,
+                            _locale: Locale = eff_locale,
+                            _caps: frozenset[str] = frozenset(turn_caps),
+                            _board: bool = turn_board_available,
+                        ) -> Message:
+                            return await _orch.handle_call(
+                                call,
+                                ActionContext(
+                                    owner_id=owner.owner_id,
+                                    pet_id=str(pet_id),
+                                    locale=_locale,
+                                    client_caps=_caps,
+                                    board_available=_board,
+                                    emit_event=emit,
+                                    request_id=session_id,
+                                ),
+                            )
+
+                        turn_tool_runner = _run_voice_tool
+
                     async def run_reply(
                         target_text: str,
                         prep: PreparedTurn,
                         req_mode: RequestedMode | None,
                         bud: ReplyBudget,
                         gen: TextGenerator,
+                        tools_arg: tuple[ToolSpec, ...],
+                        runner_arg: ToolCallRunner | None,
                         v: str | None = None,
                     ) -> None:
                         signals = {
@@ -454,11 +546,45 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                 mode=prep.decision.mode,
                                 budget=bud,
                                 generator=gen,
+                                tools=tools_arg,
+                                tool_runner=runner_arg,
                             ):
                                 if isinstance(event, GestureChosen):
                                     await websocket.send_json(
                                         {"type": "gesture", "name": event.gesture.value}
                                     )
+                                elif isinstance(event, ActionPendingEvent):
+                                    await websocket.send_json(
+                                        {
+                                            "type": "action_pending",
+                                            "approvalId": event.approval_id,
+                                            "target": event.target,
+                                            "summary": event.summary,
+                                            "risk": event.risk,
+                                            "expiresIn": event.expires_in,
+                                        }
+                                    )
+                                elif isinstance(event, BoardHidRequestEvent):
+                                    await websocket.send_json(
+                                        {
+                                            "type": "board_hid_request",
+                                            "invocationId": event.invocation_id,
+                                            "approvalId": event.approval_id,
+                                            "key": event.key,
+                                            "usageIndex": event.usage_index,
+                                        }
+                                    )
+                                elif isinstance(event, ActionResultEvent):
+                                    act_msg: dict[str, Any] = {
+                                        "type": "action_result",
+                                        "invocationId": event.invocation_id,
+                                        "target": event.target,
+                                        "summary": event.summary,
+                                        "status": event.status,
+                                    }
+                                    if event.gesture is not None:
+                                        act_msg["gesture"] = event.gesture
+                                    await websocket.send_json(act_msg)
                                 elif isinstance(event, TextDelta):
                                     await websocket.send_json(
                                         {"type": "reply.delta", "text": event.text}
@@ -513,9 +639,38 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                             requested_mode,
                             budget,
                             turn_generator,
+                            turn_tools,
+                            turn_tool_runner,
                             v=turn_voice,
                         )
                     )
+
+                elif msg_type == "action.decide":
+                    raw_aid = payload.get("approvalId")
+                    raw_dec = payload.get("decision")
+                    if isinstance(raw_aid, str) and isinstance(raw_dec, str):
+                        try:
+                            aid = uuid.UUID(raw_aid)
+                            dec = ApprovalDecision(raw_dec)
+                            ws_orch = build_stream_orchestrator(app.state)
+                            await ws_orch.decide_approval(
+                                approval_id=aid,
+                                owner_id=owner.owner_id,
+                                decision=dec,
+                                request_id=session_id,
+                            )
+                        except ValueError:
+                            pass
+
+                elif msg_type == "action.result":
+                    raw_inv = payload.get("invocationId")
+                    raw_st = payload.get("status")
+                    if isinstance(raw_inv, str) and isinstance(raw_st, str):
+                        app.state.local_result_broker.report(
+                            invocation_id=raw_inv,
+                            owner_id=owner.owner_id,
+                            status=raw_st,
+                        )
 
                 elif msg_type == "abort":
                     if active_turn_task and not active_turn_task.done():

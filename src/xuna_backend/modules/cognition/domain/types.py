@@ -37,13 +37,6 @@ class Locale(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
-class Message:
-    role: Role
-    content: str
-    tool_call_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class ToolSpec:
     """A callable tool offered to the model (function calling / MCP)."""
 
@@ -57,6 +50,18 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class Message:
+    role: Role
+    content: str
+    tool_call_id: str | None = None
+    tool_calls: tuple[ToolCall, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.tool_calls and self.role is not Role.ASSISTANT:
+            raise ValueError("tool_calls are only valid for assistant messages")
 
 
 @dataclass(frozen=True, slots=True)
