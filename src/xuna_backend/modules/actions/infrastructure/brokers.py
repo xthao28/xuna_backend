@@ -9,6 +9,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalDecision,
     ApprovalRequest,
     ApprovalState,
+    LocalActionReport,
 )
 from xuna_backend.modules.actions.domain.target_resolver import LAST_TARGET_TTL
 
@@ -123,12 +124,12 @@ class InMemoryApprovalBroker:
 @dataclass
 class _LocalResultSlot:
     owner_id: uuid.UUID
-    status: str | None = None
+    report: LocalActionReport | None = None
     event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class InMemoryLocalResultBroker:
-    """Single-process coordinator for `board_hid_request` results reported by the app."""
+    """Single-process coordinator for `board_hid_request` and `local_action_request` results."""
 
     def __init__(self) -> None:
         self._slots: dict[str, _LocalResultSlot] = {}
@@ -137,28 +138,43 @@ class InMemoryLocalResultBroker:
         self._slots[invocation_id] = _LocalResultSlot(owner_id=owner_id)
 
     async def wait(self, invocation_id: str, timeout_s: float) -> str:
+        res = await self.wait_report(invocation_id, timeout_s)
+        return res.status
+
+    async def wait_report(self, invocation_id: str, timeout_s: float) -> LocalActionReport:
         slot = self._slots.get(invocation_id)
         if slot is None:
-            return "timeout"
-        if slot.status is not None:
+            return LocalActionReport(status="timeout")
+        if slot.report is not None:
             self._slots.pop(invocation_id, None)
-            return slot.status
+            return slot.report
         try:
             await asyncio.wait_for(slot.event.wait(), timeout=timeout_s)
         except TimeoutError:
             self._slots.pop(invocation_id, None)
-            return "timeout"
+            return LocalActionReport(status="timeout")
         current = self._slots.pop(invocation_id, None)
-        if current is None or current.status is None:
-            return "timeout"
-        return current.status
+        if current is None or current.report is None:
+            return LocalActionReport(status="timeout")
+        return current.report
 
-    def report(self, invocation_id: str, owner_id: uuid.UUID, status: str) -> bool:
+    def report(
+        self,
+        invocation_id: str,
+        owner_id: uuid.UUID,
+        status: str,
+        output: dict[str, object] | None = None,
+        error_code: str | None = None,
+    ) -> bool:
         slot = self._slots.get(invocation_id)
         if slot is None or slot.owner_id != owner_id:
             return False
-        if slot.status is None:
-            slot.status = status
+        if slot.report is None:
+            slot.report = LocalActionReport(
+                status=status,
+                output=dict(output) if isinstance(output, dict) else None,
+                error_code=error_code,
+            )
             slot.event.set()
         return True
 

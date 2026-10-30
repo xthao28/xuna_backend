@@ -39,6 +39,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalRequest,
     ApprovalState,
     BoardHidRequestEvent,
+    LocalActionRequestEvent,
     gesture_for_action_status,
 )
 from xuna_backend.modules.actions.domain.schema_validator import (
@@ -114,6 +115,7 @@ class ActionContext:
     board_available: bool
     emit_event: EventSink
     request_id: str = ""
+    self_host_id: str | None = None
 
 
 def _truncate_value(val: object, *, max_str: int = 120) -> object:
@@ -263,12 +265,16 @@ class Orchestrator:
         invocation_id: str,
         owner_id: uuid.UUID,
         status: str,
+        output: dict[str, object] | None = None,
+        error_code: str | None = None,
     ) -> bool:
         """Owner-scoped result callback (`POST /v1/actions/{invocationId}/result`)."""
         return self._local_result_broker.report(
             invocation_id=invocation_id,
             owner_id=owner_id,
             status=status,
+            output=output,
+            error_code=error_code,
         )
 
     async def handle_call(self, call: ToolCall, ctx: ActionContext) -> Message:
@@ -456,7 +462,8 @@ class Orchestrator:
                 continue
             if reference_descriptor is None:
                 reference_descriptor = descriptor
-            if not self._hub.is_online(str(host.host_id)):
+            is_self = ctx.self_host_id is not None and str(host.host_id) == ctx.self_host_id
+            if not self._hub.is_online(str(host.host_id)) and not is_self:
                 continue
             manifests_by_host[host.host_id] = manifest
             grants = await self._host_repo.get_grants(host.host_id)
@@ -668,48 +675,79 @@ class Orchestrator:
                     tool_call_id=call.id,
                 )
 
-        meta: dict[str, object] = {
-            "xuna/invocationId": invocation_id,
-            "xuna/deadlineMs": DEADLINE_MS,
-        }
-        if approval_req is not None:
-            meta["xuna/approval"] = {
-                "approvalId": str(approval_req.approval_id),
-                "argsSha256": approval_req.args_sha256,
-                "expiresAt": approval_req.expires_at.astimezone(UTC).isoformat(),
-            }
-
-        call_params: dict[str, object] = {
-            "name": descriptor.name,
-            "arguments": clean_args,
-            "_meta": meta,
-        }
-
         status = "failed"
         duration_ms = 0
         structured_content: dict[str, object] = {}
 
-        try:
-            raw_result = await self._hub.send_request(
-                str(host.host_id),
-                "tools/call",
-                call_params,
+        if ctx.self_host_id is not None and str(host.host_id) == ctx.self_host_id:
+            self._local_result_broker.register(invocation_id, ctx.owner_id)
+            await ctx.emit_event(
+                LocalActionRequestEvent(
+                    invocation_id=invocation_id,
+                    approval_id=(
+                        str(approval_req.approval_id) if approval_req is not None else None
+                    ),
+                    target=target_alias,
+                    tool=descriptor.name,
+                    arguments=clean_args,
+                )
+            )
+            local_report = await self._local_result_broker.wait_report(
+                invocation_id,
                 timeout_s=DEADLINE_SECONDS,
             )
-            result_meta = raw_result.get("_meta")
-            if isinstance(result_meta, dict):
-                if isinstance(result_meta.get("xuna/status"), str):
-                    status = str(result_meta["xuna/status"])
-                if type(result_meta.get("xuna/durationMs")) is int:
-                    duration_ms = int(result_meta["xuna/durationMs"])
-            sc_raw = raw_result.get("structuredContent")
-            if isinstance(sc_raw, dict):
-                structured_content = dict(sc_raw)
-        except TimeoutError:
-            status = "timeout"
-            duration_ms = DEADLINE_MS
-        except Exception:
-            status = "failed"
+            raw_status = local_report.status
+            if raw_status in ("denied_by_local_policy", "denied"):
+                status = "denied"
+            elif raw_status in ("permission_denied", "needs_permission"):
+                status = "needs_permission"
+            elif raw_status in ("ok", "timeout", "failed", "unsupported", "invalid_args"):
+                status = raw_status
+            else:
+                status = "failed"
+            if isinstance(local_report.output, dict):
+                structured_content = dict(local_report.output)
+            if local_report.error_code and "errorCode" not in structured_content:
+                structured_content["errorCode"] = local_report.error_code
+        else:
+            meta: dict[str, object] = {
+                "xuna/invocationId": invocation_id,
+                "xuna/deadlineMs": DEADLINE_MS,
+            }
+            if approval_req is not None:
+                meta["xuna/approval"] = {
+                    "approvalId": str(approval_req.approval_id),
+                    "argsSha256": approval_req.args_sha256,
+                    "expiresAt": approval_req.expires_at.astimezone(UTC).isoformat(),
+                }
+
+            call_params: dict[str, object] = {
+                "name": descriptor.name,
+                "arguments": clean_args,
+                "_meta": meta,
+            }
+
+            try:
+                raw_result = await self._hub.send_request(
+                    str(host.host_id),
+                    "tools/call",
+                    call_params,
+                    timeout_s=DEADLINE_SECONDS,
+                )
+                result_meta = raw_result.get("_meta")
+                if isinstance(result_meta, dict):
+                    if isinstance(result_meta.get("xuna/status"), str):
+                        status = str(result_meta["xuna/status"])
+                    if type(result_meta.get("xuna/durationMs")) is int:
+                        duration_ms = int(result_meta["xuna/durationMs"])
+                sc_raw = raw_result.get("structuredContent")
+                if isinstance(sc_raw, dict):
+                    structured_content = dict(sc_raw)
+            except TimeoutError:
+                status = "timeout"
+                duration_ms = DEADLINE_MS
+            except Exception:
+                status = "failed"
 
         audit_action = (
             AuditAction.HOST_TOOL_DENIED if status == "denied" else AuditAction.HOST_TOOL_INVOKED

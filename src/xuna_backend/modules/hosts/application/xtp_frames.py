@@ -63,7 +63,7 @@ class HelloEnrollParamsModel(_StrictModel):
 class HelloReconnectParamsModel(_StrictModel):
     protocols: list[str] = Field(min_length=1, max_length=8)
     hostId: str = Field(min_length=36, max_length=36)
-    platform: Literal["windows", "macos"]
+    platform: Literal["windows", "macos", "android", "ios"]
     osVersion: str = Field(min_length=1, max_length=64)
     agentVersion: str = Field(min_length=1, max_length=32)
 

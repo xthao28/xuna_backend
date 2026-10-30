@@ -19,6 +19,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
     BoardHidRequestEvent,
+    LocalActionRequestEvent,
 )
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
@@ -86,6 +87,7 @@ SpokenTurnEvent = (
     | DetailDelta
     | ActionPendingEvent
     | BoardHidRequestEvent
+    | LocalActionRequestEvent
     | ActionResultEvent
     | SpokenAudio
     | SpeechUnavailable

@@ -89,6 +89,26 @@ class BoardHidRequestEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class LocalActionRequestEvent:
+    """SSE / WebSocket event asking the same-device app to execute a host tool (`UDC-5` §5.2)."""
+
+    invocation_id: str
+    approval_id: str | None
+    target: str
+    tool: str
+    arguments: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class LocalActionReport:
+    """Client-reported result for `board_hid_request` or `local_action_request` (`UDC-5` §5.2)."""
+
+    status: str
+    output: dict[str, object] | None = None
+    error_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ActionResultEvent:
     """SSE / WebSocket event emitted when a tool invocation completes."""
 
@@ -99,7 +119,9 @@ class ActionResultEvent:
     gesture: str | None = None
 
 
-ActionStreamEvent = ActionPendingEvent | BoardHidRequestEvent | ActionResultEvent
+ActionStreamEvent = (
+    ActionPendingEvent | BoardHidRequestEvent | LocalActionRequestEvent | ActionResultEvent
+)
 
 
 _BOARD_KEY_LABELS_VI: dict[str, str] = {

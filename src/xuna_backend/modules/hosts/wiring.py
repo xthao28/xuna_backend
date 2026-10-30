@@ -3,7 +3,11 @@
 from fastapi import FastAPI
 
 from xuna_backend.modules.hosts.api.routes import router as hosts_router
-from xuna_backend.modules.hosts.domain.session import HostGatewayLimits, HostRateLimiter
+from xuna_backend.modules.hosts.domain.session import (
+    HostGatewayLimits,
+    HostRateLimiter,
+    SelfEnrollmentChallengeStore,
+)
 from xuna_backend.modules.hosts.infrastructure.repository import (
     SqlEnrollmentRepository,
     SqlHostRepository,
@@ -18,5 +22,6 @@ def wire_hosts(app: FastAPI) -> None:
     app.state.host_gateway_limits = limits
     app.state.host_claim_limiter = HostRateLimiter(limits.claims_per_owner_per_min, 60.0)
     app.state.host_connect_limiter = HostRateLimiter(limits.connects_per_peer_per_min, 60.0)
+    app.state.host_self_challenge_store = SelfEnrollmentChallengeStore(limits.challenge_ttl_s)
     app.state.host_session_hub = InMemoryHostSessionHub()
     app.include_router(hosts_router)

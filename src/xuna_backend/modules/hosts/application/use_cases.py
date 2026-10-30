@@ -18,12 +18,14 @@ from xuna_backend.modules.hosts.application.ports import (
     HostSessionHub,
 )
 from xuna_backend.modules.hosts.domain.crypto import (
+    SIGNATURE_SIZE,
     HostProofPurpose,
     args_sha256,
     decode_b64url_16b,
     host_proof_message,
     public_key_fingerprint_b64url,
     sas,
+    validate_public_key,
 )
 from xuna_backend.modules.hosts.domain.entities import (
     Grant,
@@ -47,6 +49,7 @@ from xuna_backend.modules.hosts.domain.session import (
     HostRateLimiter,
     HostSessionClose,
     HostSessionRejected,
+    SelfEnrollmentChallengeStore,
 )
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
 
@@ -77,6 +80,18 @@ class ClaimEnrollmentCommand:
     enrollment_code: str
     alias: str
     key_fingerprint: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SelfEnrollHostCommand:
+    platform: HostPlatform
+    os_version: str
+    agent_version: str
+    alias: str
+    public_key: bytes
+    signature: bytes
+    hostname: str | None = None
+    tools: list[dict[str, object]] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,6 +436,169 @@ async def record_manifest(
     manifest = Manifest(host_id=host_id, tools=tuple(tools), updated_at=now)
     await hosts.save_manifest(manifest)
     return manifest
+
+
+async def self_enroll_host(
+    hosts: HostRepository,
+    verifier: SignatureVerifier,
+    audit: AuditLog,
+    claim_limiter: HostRateLimiter,
+    challenge_store: SelfEnrollmentChallengeStore,
+    owner_id: uuid.UUID,
+    command: SelfEnrollHostCommand,
+    now: datetime,
+    monotonic_now: float,
+    request_id: str = "",
+) -> tuple[Host, list[Grant], Manifest | None]:
+    """Enrolls (or updates) a phone host directly from an authenticated mobile session
+    using a purpose-1 ECDSA P-256 proof over a challenge nonce (`UDC-5` §5.2)."""
+    if not claim_limiter.allow(str(owner_id), monotonic_now):
+        raise HostError("rate_limited")
+
+    challenge = challenge_store.consume(str(owner_id), monotonic_now)
+    if challenge is None:
+        raise HostError("unauthorized", "missing or expired self-enrollment challenge")
+
+    try:
+        alias = HostAlias(command.alias)
+        validate_public_key(command.public_key)
+    except ValueError as error:
+        raise HostError("validation_failed") from error
+
+    if len(command.signature) != SIGNATURE_SIZE:
+        raise HostError("validation_failed", "proof signature must be 64 bytes")
+
+    candidate_payloads = (
+        challenge.code,
+        bytes(16),
+        owner_id.bytes,
+    )
+    verified = False
+    for payload in candidate_payloads:
+        msg = host_proof_message(
+            nonce=challenge.nonce,
+            purpose=HostProofPurpose.ENROLL,
+            payload=payload,
+        )
+        if verifier.verify(command.public_key, msg, command.signature):
+            verified = True
+            break
+
+    if not verified:
+        await audit.record(
+            AuditEvent(
+                owner_id=owner_id,
+                action=AuditAction.HOST_ENROLL_REJECTED,
+                occurred_at=now,
+                subject="self",
+                request_id=request_id,
+                metadata={
+                    "reason": "invalid_signature",
+                    "platform": command.platform.value,
+                },
+            )
+        )
+        raise HostError("unauthorized", "invalid self-enrollment proof")
+
+    parsed_tools: list[ToolDescriptor] | None = None
+    if command.tools is not None:
+        try:
+            parsed_tools = [ToolDescriptor.from_wire(t) for t in command.tools]
+        except ValueError as error:
+            raise HostError("validation_failed", str(error)) from error
+
+    resolved_hostname = (
+        (command.hostname.strip() if command.hostname else "")
+        or alias.value[:32]
+        or f"{command.platform.value}-host"
+    )[:32]
+
+    owned = await hosts.list_hosts(owner_id)
+    existing = next(
+        (
+            h
+            for h in owned
+            if h.status == HostStatus.ACTIVE and h.public_key == command.public_key
+        ),
+        None,
+    )
+
+    if existing is not None:
+        host = Host(
+            host_id=existing.host_id,
+            owner_id=owner_id,
+            alias=alias,
+            platform=command.platform,
+            hostname=resolved_hostname,
+            os_version=command.os_version[:64],
+            agent_version=command.agent_version[:32],
+            public_key=command.public_key,
+            status=HostStatus.ACTIVE,
+            created_at=existing.created_at,
+            last_seen_at=now,
+        )
+        await hosts.save_host(host)
+        grants = await hosts.get_grants(host.host_id)
+        if not grants:
+            grants = list(default_initial_grants(host.host_id, now))
+            await hosts.set_grants(host.host_id, grants)
+    else:
+        host = Host(
+            host_id=HostId.generate(),
+            owner_id=owner_id,
+            alias=alias,
+            platform=command.platform,
+            hostname=resolved_hostname,
+            os_version=command.os_version[:64],
+            agent_version=command.agent_version[:32],
+            public_key=command.public_key,
+            status=HostStatus.ACTIVE,
+            created_at=now,
+            last_seen_at=now,
+        )
+        grants = list(default_initial_grants(host.host_id, now))
+        await hosts.save_host(host)
+        await hosts.set_grants(host.host_id, grants)
+
+    if parsed_tools is not None:
+        manifest: Manifest | None = await record_manifest(
+            hosts, host.host_id, parsed_tools, now
+        )
+    else:
+        manifest = await hosts.get_manifest(host.host_id)
+
+    await audit.record(
+        AuditEvent(
+            owner_id=owner_id,
+            action=AuditAction.HOST_ENROLLED,
+            occurred_at=now,
+            subject=str(host.host_id),
+            request_id=request_id,
+            metadata={
+                "platform": host.platform.value,
+                "mode": "self",
+            },
+        )
+    )
+    return host, grants, manifest
+
+
+async def update_host_manifest(
+    hosts: HostRepository,
+    owner_id: uuid.UUID,
+    host_id: HostId,
+    raw_tools: list[dict[str, object]],
+    now: datetime,
+) -> Manifest:
+    """Owner-scoped manifest update for a self-enrolled mobile host."""
+    host = await hosts.get_host(host_id)
+    if host is None or host.owner_id != owner_id or host.status != HostStatus.ACTIVE:
+        raise HostError("not_found")
+    try:
+        parsed_tools = [ToolDescriptor.from_wire(t) for t in raw_tools]
+    except ValueError as error:
+        raise HostError("validation_failed", str(error)) from error
+    return await record_manifest(hosts, host_id, parsed_tools, now)
 
 
 async def list_hosts(

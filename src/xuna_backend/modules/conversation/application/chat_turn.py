@@ -25,6 +25,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionResultEvent,
     ActionStreamEvent,
     BoardHidRequestEvent,
+    LocalActionRequestEvent,
 )
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
@@ -468,6 +469,7 @@ TurnEvent = (
     | DetailDelta
     | ActionPendingEvent
     | BoardHidRequestEvent
+    | LocalActionRequestEvent
     | ActionResultEvent
 )
 

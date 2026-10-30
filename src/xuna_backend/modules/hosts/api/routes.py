@@ -1,5 +1,7 @@
 """HTTP routes for `/v1/hosts` enrollment, management and dev invocation (UDC-3 §5.4)."""
 
+import base64
+import secrets
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -20,7 +22,9 @@ from xuna_backend.modules.hosts.api.schemas import (
     ClaimHostRequest,
     ConfirmHostRequest,
     DevInvokeToolRequest,
+    SelfEnrollHostRequest,
     SetHostGrantsRequest,
+    UpdateHostManifestRequest,
 )
 from xuna_backend.modules.hosts.application.ports import (
     EnrollmentRepository,
@@ -31,15 +35,28 @@ from xuna_backend.modules.hosts.application.use_cases import (
     ClaimEnrollmentCommand,
     HostError,
     HostSummaryView,
+    SelfEnrollHostCommand,
     claim_enrollment,
     confirm_enrollment,
     invoke_tool,
     list_hosts,
     revoke_host,
+    self_enroll_host,
     set_grants,
+    update_host_manifest,
+)
+from xuna_backend.modules.hosts.domain.crypto import (
+    ENROLLMENT_CODE_SIZE,
+    NONCE_SIZE,
+    PUBLIC_KEY_SIZE,
+    SIGNATURE_SIZE,
 )
 from xuna_backend.modules.hosts.domain.entities import Grant, Host, HostId, Manifest
-from xuna_backend.modules.hosts.domain.session import HostRateLimiter
+from xuna_backend.modules.hosts.domain.session import (
+    HostRateLimiter,
+    SelfEnrollmentChallengeStore,
+)
+from xuna_backend.modules.identity.application.ports import SignatureVerifier
 
 router = APIRouter(prefix="/v1", tags=["hosts"])
 router.include_router(socket_router)
@@ -132,6 +149,153 @@ def _summary_body(view: HostSummaryView) -> dict[str, Any]:
 
 def _json(response: StoredResponse) -> JSONResponse:
     return JSONResponse(response.body, status_code=response.status.value)
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(encoded: str, expected_len: int) -> bytes:
+    clean = encoded.strip()
+    rem = len(clean) % 4
+    if rem == 2:
+        clean += "=="
+    elif rem == 3:
+        clean += "="
+    elif rem != 0:
+        raise ValueError("invalid base64url length")
+    try:
+        decoded = base64.urlsafe_b64decode(clean.encode("ascii"))
+    except Exception as error:
+        raise ValueError("invalid base64url encoding") from error
+    if len(decoded) != expected_len:
+        raise ValueError(f"expected {expected_len} decoded bytes")
+    return decoded
+
+
+@router.post("/hosts/self/challenge", status_code=HTTPStatus.OK)
+async def self_enroll_challenge_endpoint(
+    request: Request,
+    owner: CurrentOwner,
+) -> dict[str, Any]:
+    """Issues a 32-byte server nonce and 16-byte code for phone self-enrollment (`UDC-5` §5.2)."""
+    store: SelfEnrollmentChallengeStore = state(request, "host_self_challenge_store")
+    nonce = secrets.token_bytes(NONCE_SIZE)
+    code = secrets.token_bytes(ENROLLMENT_CODE_SIZE)
+    store.issue(str(owner.owner_id), nonce, code, time.monotonic())
+    return {
+        "nonce": _b64url_encode(nonce),
+        "enrollmentCode": _b64url_encode(code),
+        "expiresIn": 60,
+    }
+
+
+@router.post("/hosts/self", status_code=HTTPStatus.OK)
+async def self_enroll_host_endpoint(
+    body: SelfEnrollHostRequest,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Enrolls (or updates) the owner's phone as a host without QR (`UDC-5` §5.2)."""
+    now = datetime.now(UTC)
+    claim_limiter: HostRateLimiter = state(request, "host_claim_limiter")
+    challenge_store: SelfEnrollmentChallengeStore = state(request, "host_self_challenge_store")
+    verifier: SignatureVerifier = state(request, "signature_verifier")
+    hub = _hub(request)
+
+    try:
+        pub_bytes = _b64url_decode(body.publicKey, PUBLIC_KEY_SIZE)
+        sig_bytes = _b64url_decode(body.proof, SIGNATURE_SIZE)
+    except ValueError as error:
+        raise AppError(
+            "validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, str(error)
+        ) from error
+
+    command = SelfEnrollHostCommand(
+        platform=body.parsed_platform(),
+        os_version=body.osVersion,
+        agent_version=body.agentVersion,
+        alias=body.alias,
+        public_key=pub_bytes,
+        signature=sig_bytes,
+        hostname=body.hostname,
+        tools=body.tools,
+    )
+
+    async def action() -> StoredResponse:
+        host, grants, manifest = await self_enroll_host(
+            _host_repo(request, session),
+            verifier,
+            _audit(request, session),
+            claim_limiter,
+            challenge_store,
+            owner.owner_id,
+            command,
+            now,
+            time.monotonic(),
+            getattr(request.state, "request_id", ""),
+        )
+        return StoredResponse(
+            HTTPStatus.OK,
+            _host_body(
+                host,
+                grants,
+                online=hub.is_online(str(host.host_id)),
+                manifest=manifest,
+            ),
+        )
+
+    try:
+        if idempotency_key is not None:
+            response = await run_once(
+                session,
+                owner_id=owner.owner_id,
+                key=parse_key(idempotency_key),
+                fingerprint=request_hash("self_enroll_host", body.model_dump(mode="json")),
+                now=now,
+                action=action,
+            )
+        else:
+            response = await action()
+    except HostError as error:
+        await commit_or_conflict(session)
+        raise _problem(error) from error
+    await commit_or_conflict(session)
+    return _json(response)
+
+
+@router.put("/hosts/{host_id}/manifest", status_code=HTTPStatus.OK)
+async def update_host_manifest_endpoint(
+    host_id: str,
+    body: UpdateHostManifestRequest,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+) -> dict[str, Any]:
+    """Updates the saved tool manifest for a self-enrolled phone host."""
+    try:
+        parsed_id = HostId.from_str(host_id)
+    except ValueError as error:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
+    now = datetime.now(UTC)
+    try:
+        manifest = await update_host_manifest(
+            _host_repo(request, session),
+            owner.owner_id,
+            parsed_id,
+            body.tools,
+            now,
+        )
+    except HostError as error:
+        raise _problem(error) from error
+    await commit_or_conflict(session)
+    return {
+        "hostId": str(parsed_id),
+        "tools": [t.to_wire() for t in manifest.tools],
+        "updatedAt": manifest.updated_at.astimezone(UTC).isoformat(),
+    }
 
 
 @router.post("/hosts", status_code=HTTPStatus.ACCEPTED)

@@ -26,6 +26,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
     BoardHidRequestEvent,
+    LocalActionRequestEvent,
 )
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
@@ -178,9 +179,10 @@ class TurnBody(BaseModel):
     knowledge: list[KnowledgeSlotBody] | None = Field(default=None, max_length=5)
     extractKnowledge: bool = True
 
-    # UDC-4 (§5.4): Client capabilities and board HID state.
+    # UDC-4 (§5.4) & UDC-5 (§5.2): Client capabilities, board HID state, and same-device host ID.
     clientCapabilities: list[str] | None = Field(default=None, max_length=16)
     boardHid: BoardHidBody | None = None
+    selfHostId: str | None = Field(default=None, max_length=64)
 
     def base_context(self) -> TurnContext:
         pet = self.pet
@@ -390,6 +392,7 @@ async def turn(
 
     client_caps = tuple(body.clientCapabilities or ())
     board_available = bool(body.boardHid.available) if body.boardHid is not None else False
+    self_host_id = body.selfHostId.strip() if body.selfHostId else None
     tools: tuple[ToolSpec, ...] = ()
     if client_caps:
         try:
@@ -401,6 +404,7 @@ async def turn(
                 board_available=board_available,
                 host_repo=host_factory(session),
                 hub=hub,
+                self_host_id=self_host_id,
             )
         except Exception:
             _logger.debug("Failed to load tool catalog for turn", exc_info=True)
@@ -458,6 +462,7 @@ async def turn(
                     board_available=board_available,
                     emit_event=emit,
                     request_id=request_id_str,
+                    self_host_id=self_host_id,
                 ),
             )
 
@@ -516,6 +521,16 @@ async def turn(
                             "usageIndex": hid_req.usage_index,
                         },
                     )
+                case LocalActionRequestEvent() as local_req:
+                    local_payload: dict[str, Any] = {
+                        "invocationId": local_req.invocation_id,
+                        "target": local_req.target,
+                        "tool": local_req.tool,
+                        "arguments": local_req.arguments,
+                    }
+                    if local_req.approval_id is not None:
+                        local_payload["approvalId"] = local_req.approval_id
+                    yield _sse("local_action_request", local_payload)
                 case ActionResultEvent() as act_res:
                     act_payload: dict[str, Any] = {
                         "invocationId": act_res.invocation_id,

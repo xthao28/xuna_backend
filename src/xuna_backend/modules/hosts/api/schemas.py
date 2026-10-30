@@ -1,10 +1,14 @@
 """Pydantic request/response schemas for `/v1/hosts` HTTP endpoints (UDC-3 §5.4)."""
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from xuna_backend.modules.hosts.domain.entities import RiskTier, ToolFamily
+from xuna_backend.modules.hosts.domain.entities import (
+    HostPlatform,
+    RiskTier,
+    ToolFamily,
+)
 
 
 class _StrictSchema(BaseModel):
@@ -22,12 +26,36 @@ class ConfirmHostRequest(_StrictSchema):
     schemaVersion: Literal[1] = 1
 
 
+class SelfEnrollHostRequest(_StrictSchema):
+    schemaVersion: Literal[1] = 1
+    platform: Literal["android", "ios"]
+    osVersion: str = Field(min_length=1, max_length=64)
+    agentVersion: str = Field(min_length=1, max_length=32)
+    publicKey: str = Field(min_length=80, max_length=120)
+    alias: str = Field(min_length=1, max_length=24)
+    proof: str = Field(min_length=80, max_length=120)
+    hostname: str | None = Field(default=None, min_length=1, max_length=32)
+    tools: list[dict[str, Any]] | None = Field(default=None, max_length=32)
+
+    def parsed_platform(self) -> HostPlatform:
+        return HostPlatform(self.platform)
+
+
+class UpdateHostManifestRequest(_StrictSchema):
+    schemaVersion: Literal[1] = 1
+    tools: list[dict[str, Any]] = Field(max_length=32)
+
+
 class GrantItemInput(_StrictSchema):
     family: Literal[
         "media",
         "window",
         "app",
         "url",
+        "workflow",
+        "host",
+        "ui",
+        "input",
         "timer",
         "clipboard",
         "screen",

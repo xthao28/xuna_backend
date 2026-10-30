@@ -163,6 +163,7 @@ class ToolDescriptor:
     reversible: bool = True
     permission: ToolPermissionState = ToolPermissionState.GRANTED
     policy_version: int = 1
+    platform: str | None = None
 
     def __post_init__(self) -> None:
         validate_tool_name(self.name, expected_family=self.family)
@@ -170,6 +171,8 @@ class ToolDescriptor:
             raise ValueError("tool description must be 1..240 characters")
         if self.policy_version != 1:
             raise ValueError("tool policy version must be 1")
+        if self.platform is not None:
+            HostPlatform(self.platform)
         if (
             self.input_schema.get("type") != "object"
             or self.input_schema.get("additionalProperties") is not False
@@ -202,7 +205,7 @@ class ToolDescriptor:
         policy = meta.get("xuna/policy")
         if not isinstance(policy, dict) or set(meta.keys()) != {"xuna/policy"}:
             raise ValueError("ToolDescriptor._meta must contain only xuna/policy")
-        policy_keys = {
+        required_policy_keys = {
             "version",
             "family",
             "risk",
@@ -210,15 +213,19 @@ class ToolDescriptor:
             "reversible",
             "permission",
         }
-        if set(policy.keys()) != policy_keys:
+        allowed_policy_keys = required_policy_keys | {"platform"}
+        actual_policy_keys = set(policy.keys())
+        if not (required_policy_keys <= actual_policy_keys <= allowed_policy_keys):
             raise ValueError("xuna/policy must have exact keys")
         version = policy["version"]
         observes = policy["observes"]
         reversible = policy["reversible"]
+        raw_platform = policy.get("platform")
         if (
             type(version) is not int
             or not isinstance(observes, bool)
             or not isinstance(reversible, bool)
+            or (raw_platform is not None and not isinstance(raw_platform, str))
         ):
             raise ValueError("invalid xuna/policy scalar types")
         return cls(
@@ -232,23 +239,27 @@ class ToolDescriptor:
             reversible=reversible,
             permission=ToolPermissionState(str(policy["permission"])),
             policy_version=version,
+            platform=raw_platform,
         )
 
     def to_wire(self) -> dict[str, object]:
+        policy_wire: dict[str, object] = {
+            "version": self.policy_version,
+            "family": self.family.value,
+            "risk": self.risk.value,
+            "observes": self.observes,
+            "reversible": self.reversible,
+            "permission": self.permission.value,
+        }
+        if self.platform is not None:
+            policy_wire["platform"] = self.platform
         return {
             "name": self.name,
             "description": self.description,
             "inputSchema": self.input_schema,
             "outputSchema": self.output_schema,
             "_meta": {
-                "xuna/policy": {
-                    "version": self.policy_version,
-                    "family": self.family.value,
-                    "risk": self.risk.value,
-                    "observes": self.observes,
-                    "reversible": self.reversible,
-                    "permission": self.permission.value,
-                }
+                "xuna/policy": policy_wire,
             },
         }
 

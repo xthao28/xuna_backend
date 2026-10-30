@@ -8,6 +8,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalDecision,
     ApprovalRequest,
     ApprovalState,
+    LocalActionReport,
 )
 
 
@@ -40,13 +41,22 @@ class ApprovalBroker(Protocol):
 
 
 class LocalResultBroker(Protocol):
-    """Process-local coordination for client-executed actions (`board.media_key` / local HID)."""
+    """Process-local coordination for client-executed actions."""
 
     def register(self, invocation_id: str, owner_id: uuid.UUID) -> None: ...
 
     async def wait(self, invocation_id: str, timeout_s: float) -> str: ...
 
-    def report(self, invocation_id: str, owner_id: uuid.UUID, status: str) -> bool: ...
+    async def wait_report(self, invocation_id: str, timeout_s: float) -> LocalActionReport: ...
+
+    def report(
+        self,
+        invocation_id: str,
+        owner_id: uuid.UUID,
+        status: str,
+        output: dict[str, object] | None = None,
+        error_code: str | None = None,
+    ) -> bool: ...
 
     def cancel(self, invocation_id: str) -> None: ...
 

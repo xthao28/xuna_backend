@@ -37,6 +37,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionResultEvent,
     ApprovalDecision,
     BoardHidRequestEvent,
+    LocalActionRequestEvent,
 )
 from xuna_backend.modules.cognition.application.ports import TextGenerator
 from xuna_backend.modules.cognition.domain.types import (
@@ -336,6 +337,12 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
     chosen_voice = hello.get("voice")
     default_client_caps = _parse_client_caps(hello.get("clientCapabilities"))
     default_board_available = bool(_parse_board_available(hello.get("boardHid")))
+    raw_hello_self = hello.get("selfHostId")
+    default_self_host_id = (
+        raw_hello_self.strip()[:64]
+        if isinstance(raw_hello_self, str) and raw_hello_self.strip()
+        else None
+    )
 
     session = VoiceSession(
         session_id=session_id,
@@ -409,6 +416,12 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                     turn_board_available = (
                         override_board if override_board is not None else default_board_available
                     )
+                    raw_self_host = payload.get("selfHostId") or ctx_dict.get("selfHostId")
+                    turn_self_host_id = (
+                        raw_self_host.strip()[:64]
+                        if isinstance(raw_self_host, str) and raw_self_host.strip()
+                        else default_self_host_id
+                    )
 
                     now = datetime.now(UTC)
                     turn_tools: tuple[ToolSpec, ...] = ()
@@ -422,6 +435,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         board_available=turn_board_available,
                                         host_repo=app.state.host_repository(db),
                                         hub=app.state.host_session_hub,
+                                        self_host_id=turn_self_host_id,
                                     )
                                 except Exception:
                                     logger.debug(
@@ -495,6 +509,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                             _locale: Locale = eff_locale,
                             _caps: frozenset[str] = frozenset(turn_caps),
                             _board: bool = turn_board_available,
+                            _self_host: str | None = turn_self_host_id,
                         ) -> Message:
                             return await _orch.handle_call(
                                 call,
@@ -506,6 +521,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                     board_available=_board,
                                     emit_event=emit,
                                     request_id=session_id,
+                                    self_host_id=_self_host,
                                 ),
                             )
 
@@ -574,6 +590,17 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                             "usageIndex": event.usage_index,
                                         }
                                     )
+                                elif isinstance(event, LocalActionRequestEvent):
+                                    local_msg: dict[str, Any] = {
+                                        "type": "local_action_request",
+                                        "invocationId": event.invocation_id,
+                                        "target": event.target,
+                                        "tool": event.tool,
+                                        "arguments": event.arguments,
+                                    }
+                                    if event.approval_id is not None:
+                                        local_msg["approvalId"] = event.approval_id
+                                    await websocket.send_json(local_msg)
                                 elif isinstance(event, ActionResultEvent):
                                     act_msg: dict[str, Any] = {
                                         "type": "action_result",
@@ -665,11 +692,15 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                 elif msg_type == "action.result":
                     raw_inv = payload.get("invocationId")
                     raw_st = payload.get("status")
+                    raw_out = payload.get("output")
+                    raw_err = payload.get("errorCode")
                     if isinstance(raw_inv, str) and isinstance(raw_st, str):
                         app.state.local_result_broker.report(
                             invocation_id=raw_inv,
                             owner_id=owner.owner_id,
                             status=raw_st,
+                            output=dict(raw_out) if isinstance(raw_out, dict) else None,
+                            error_code=str(raw_err)[:64] if isinstance(raw_err, str) else None,
                         )
 
                 elif msg_type == "abort":

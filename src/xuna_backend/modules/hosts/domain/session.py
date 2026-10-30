@@ -76,3 +76,41 @@ class HostRateLimiter:
         stale = [k for k, v in self._events.items() if not v or now - v[-1] >= self._window]
         for k in stale:
             del self._events[k]
+
+
+@dataclass(frozen=True, slots=True)
+class SelfEnrollmentChallenge:
+    """Short-lived challenge issued for same-device self-enrollment (UDC-5 §5.2)."""
+
+    nonce: bytes
+    code: bytes
+    expires_at: float
+
+
+class SelfEnrollmentChallengeStore:
+    """In-memory 60 s challenge store for `POST /v1/hosts/self/challenge`."""
+
+    def __init__(self, ttl_s: float = 60.0) -> None:
+        self._ttl_s = ttl_s
+        self._challenges: dict[str, SelfEnrollmentChallenge] = {}
+
+    def issue(
+        self,
+        owner_key: str,
+        nonce: bytes,
+        code: bytes,
+        monotonic_now: float,
+    ) -> SelfEnrollmentChallenge:
+        challenge = SelfEnrollmentChallenge(
+            nonce=nonce,
+            code=code,
+            expires_at=monotonic_now + self._ttl_s,
+        )
+        self._challenges[owner_key] = challenge
+        return challenge
+
+    def consume(self, owner_key: str, monotonic_now: float) -> SelfEnrollmentChallenge | None:
+        challenge = self._challenges.pop(owner_key, None)
+        if challenge is None or monotonic_now >= challenge.expires_at:
+            return None
+        return challenge

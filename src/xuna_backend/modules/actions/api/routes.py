@@ -8,7 +8,7 @@ from http import HTTPStatus
 from typing import Any, Literal
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.accounts.api.dependencies import CurrentOwner, Session, state
@@ -40,7 +40,21 @@ class DecideApprovalBody(BaseModel):
 class ReportActionResultBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    status: Literal["ok", "not_ready", "busy", "failed", "denied", "timeout"]
+    status: Literal[
+        "ok",
+        "not_ready",
+        "busy",
+        "failed",
+        "denied",
+        "denied_by_local_policy",
+        "permission_denied",
+        "needs_permission",
+        "invalid_args",
+        "unsupported",
+        "timeout",
+    ]
+    output: dict[str, Any] | None = None
+    errorCode: str | None = Field(default=None, max_length=64)
 
 
 @asynccontextmanager
@@ -219,6 +233,8 @@ async def report_action_result(
         invocation_id=invocation_id,
         owner_id=owner.owner_id,
         status=body.status,
+        output=body.output,
+        error_code=body.errorCode,
     )
     if not accepted:
         raise AppError("not_found", HTTPStatus.NOT_FOUND)

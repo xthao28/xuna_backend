@@ -156,6 +156,7 @@ async def load_tool_catalog_for_owner(
     board_available: bool,
     host_repo: HostRepository,
     hub: HostSessionHub,
+    self_host_id: str | None = None,
 ) -> tuple[ToolSpec, ...]:
     """Loads the owner's hosts, manifests, and grants and builds the active tool catalog."""
     if CAP_HOST_ACTIONS_V1 not in client_caps and not (
@@ -171,7 +172,8 @@ async def load_tool_catalog_for_owner(
     for host in hosts:
         if host.status != HostStatus.ACTIVE:
             continue
-        if hub.is_online(str(host.host_id)):
+        is_self = self_host_id is not None and str(host.host_id) == self_host_id
+        if hub.is_online(str(host.host_id)) or is_self:
             online_host_ids.add(str(host.host_id))
             manifest = await host_repo.get_manifest(host.host_id)
             if manifest is not None:
