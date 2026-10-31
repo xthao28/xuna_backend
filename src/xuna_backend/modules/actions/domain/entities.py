@@ -332,6 +332,22 @@ class ActionSummary:
             case "pocket.transform_item":
                 mode = str(arguments.get("mode", "summarize"))[:24]
                 return f"Chuyển đổi mục trong túi thông minh ({mode}) trên {target}"[:240]
+            case "watchdog.watch_process_or_port":
+                tk = str(arguments.get("targetKind", "port"))[:16]
+                return f"Đặt đội tuần tra ({tk}) trên {target}"[:240]
+            case "watchdog.watch_resource_threshold":
+                metric = str(arguments.get("metric", "battery_below"))[:24]
+                return f"Đặt cảnh báo ngưỡng tài nguyên ({metric}) trên {target}"[:240]
+            case "watchdog.list_and_clear":
+                return f"Kiểm tra danh sách đội tuần tra trên {target}"[:240]
+            case "coach.decompose_overwhelm":
+                goal = str(arguments.get("goal", "công việc"))[:40]
+                return f"Chia nhỏ mục tiêu '{goal}' thành bước 5 phút trên {target}"[:240]
+            case "meeting.desk_whisper_digest":
+                topic = str(arguments.get("topic", "cuộc họp"))[:40]
+                return f"Tạo nhắc bài thầm lặng ({topic}) từ {target}"[:240]
+            case "habit.propose_workflow":
+                return f"Phân tích thói quen đề xuất quy trình trên {target}"[:240]
             case _:
                 return f"Thực hiện {tool} trên {target}"[:240]
 
@@ -467,6 +483,22 @@ class ActionSummary:
             case "pocket.transform_item":
                 mode = str(arguments.get("mode", "summarize"))[:24]
                 return f"Transform pocket item ({mode}) on {target}"[:240]
+            case "watchdog.watch_process_or_port":
+                tk = str(arguments.get("targetKind", "port"))[:16]
+                return f"Register background watchdog ({tk}) on {target}"[:240]
+            case "watchdog.watch_resource_threshold":
+                metric = str(arguments.get("metric", "battery_below"))[:24]
+                return f"Register resource threshold watchdog ({metric}) on {target}"[:240]
+            case "watchdog.list_and_clear":
+                return f"List or clear background watchdogs on {target}"[:240]
+            case "coach.decompose_overwhelm":
+                goal = str(arguments.get("goal", "task"))[:40]
+                return f"Decompose '{goal}' into a 5-minute starter step on {target}"[:240]
+            case "meeting.desk_whisper_digest":
+                topic = str(arguments.get("topic", "meeting"))[:40]
+                return f"Prepare silent desk whisper ({topic}) on {target}"[:240]
+            case "habit.propose_workflow":
+                return f"Mine repeated habits to propose workflow on {target}"[:240]
             case _:
                 return f"Run {tool} on {target}"[:240]
 

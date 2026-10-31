@@ -73,6 +73,7 @@ from xuna_backend.modules.hosts.domain.entities import (
 )
 from xuna_backend.modules.symbiotic.application.services import (
     DreamConsolidatorService,
+    SerendipityEngine,
 )
 
 DEADLINE_MS = 10000
@@ -107,6 +108,9 @@ class WorkflowTemplate(StrEnum):
     DAILY_STANDUP = "daily_standup"
     FREEZE_FOR_TONIGHT = "freeze_for_tonight"
     REHYDRATE_PROJECT = "rehydrate_project"
+    UNSTUCK_COACH = "unstuck_coach"
+    WATCH_AND_ALERT = "watch_and_alert"
+    DESK_WHISPER = "desk_whisper"
 
 
 HARD_DENIED_SMARTHOME_DOMAINS: frozenset[str] = frozenset(
@@ -716,6 +720,36 @@ class CompositeWorkflowRunner:
             )
         if template == WorkflowTemplate.REHYDRATE_PROJECT:
             return await self._run_rehydrate_project(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.UNSTUCK_COACH:
+            return await self._run_unstuck_coach(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.WATCH_AND_ALERT:
+            return await self._run_watch_and_alert(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.DESK_WHISPER:
+            return await self._run_desk_whisper(
                 call=call,
                 clean_args=clean_args,
                 owner_id=owner_id,
@@ -4424,6 +4458,356 @@ class CompositeWorkflowRunner:
                     "branch": branch,
                     "briefing": briefing,
                     "nextStepHint": next_step_hint,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_unstuck_coach(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """`unstuck_coach` (`R1`, `SYM-2`):
+        Decomposes an overwhelming task into a gentle 5-minute first micro-step and
+        2 follow-up steps via `coach.decompose_overwhelm`, and synthesizes a non-intrusive
+        `SerendipityNote` connecting the task with the workspace context."""
+        online, manifests, _ = await self._load_online_hosts(owner_id, self_host_id)
+        raw_target = clean_args.get("target")
+        requested_alias = raw_target.strip() if isinstance(raw_target, str) else ""
+        raw_goal = clean_args.get("goal")
+        raw_project = clean_args.get("project")
+        goal_str = (
+            raw_goal.strip()[:240]
+            if isinstance(raw_goal, str) and raw_goal.strip()
+            else (
+                raw_project.strip()[:240]
+                if isinstance(raw_project, str) and raw_project.strip()
+                else "Gỡ bí công việc đang làm"
+            )
+        )
+        project_str = (
+            raw_project.strip()[:80]
+            if isinstance(raw_project, str) and raw_project.strip()
+            else "xuna_pet"
+        )
+
+        pc_host: Host | None = None
+        for host in online:
+            if requested_alias and str(host.alias).lower() != requested_alias.lower():
+                continue
+            manifest = manifests.get(host.host_id)
+            if manifest and manifest.find_tool("coach.decompose_overwhelm") is not None:
+                pc_host = host
+                break
+        if pc_host is None and online:
+            pc_host = online[0]
+
+        if pc_host is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("host_offline"),
+                tool_call_id=call.id,
+            )
+
+        coach_args: dict[str, object] = {
+            "goal": goal_str,
+            "project": project_str,
+        }
+        status, sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="coach.decompose_overwhelm",
+            arguments=coach_args,
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(status),
+                tool_call_id=call.id,
+            )
+
+        first_step = str(
+            sc.get(
+                "firstFiveMinuteStep",
+                f"Mở đúng 1 file chính của {project_str} và viết 3 dòng giả mã cho: {goal_str}",
+            )
+        )
+        raw_follow_ups = sc.get("followUpSteps")
+        follow_ups = (
+            [str(item) for item in raw_follow_ups if str(item).strip()]
+            if isinstance(raw_follow_ups, list)
+            else []
+        )
+        encouragement_vi = str(
+            sc.get(
+                "encouragementVi",
+                "Chỉ cần làm 5 phút bước đầu tiên thôi, mình ngồi canh cùng bạn nhé!",
+            )
+        )
+        serendipity_note = SerendipityEngine().generate_note(
+            primary_topic=goal_str,
+            secondary_topic=project_str,
+            first_step_hint=first_step,
+            now=self._clock(),
+        )
+
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {first_step}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.UNSTUCK_COACH.value,
+                    "host": str(pc_host.alias),
+                    "goal": goal_str,
+                    "project": project_str,
+                    "firstFiveMinuteStep": first_step,
+                    "followUpSteps": follow_ups,
+                    "encouragementVi": encouragement_vi,
+                    "serendipityNote": serendipity_note.to_wire(),
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_watch_and_alert(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """`watch_and_alert` (`R1`, `SYM-2`):
+        Registers a physical process/port watchdog (`watchdog.watch_process_or_port`)
+        plus a battery/disk sentinel (`watchdog.watch_resource_threshold`) so XUNA
+        alerts the owner on the board/tray when a build finishes or a port/service changes."""
+        online, manifests, _ = await self._load_online_hosts(owner_id, self_host_id)
+        raw_target = clean_args.get("target")
+        requested_alias = raw_target.strip() if isinstance(raw_target, str) else ""
+        raw_watch = clean_args.get("watch_target")
+        watch_str = (
+            raw_watch.strip()[:80]
+            if isinstance(raw_watch, str) and raw_watch.strip()
+            else "8000"
+        )
+
+        pc_host: Host | None = None
+        for host in online:
+            if requested_alias and str(host.alias).lower() != requested_alias.lower():
+                continue
+            manifest = manifests.get(host.host_id)
+            if (
+                manifest
+                and manifest.find_tool("watchdog.watch_process_or_port") is not None
+            ):
+                pc_host = host
+                break
+        if pc_host is None and online:
+            pc_host = online[0]
+
+        if pc_host is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("host_offline"),
+                tool_call_id=call.id,
+            )
+
+        is_port = watch_str.isdigit()
+        target_kind = "port" if is_port else "process"
+
+        watch_args: dict[str, object] = {
+            "targetKind": target_kind,
+            "targetValue": watch_str,
+            "label": f"Watch {target_kind} {watch_str}",
+            "notifyOn": "state_change",
+        }
+        w_status, w_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="watchdog.watch_process_or_port",
+            arguments=watch_args,
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if w_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(w_status),
+                tool_call_id=call.id,
+            )
+
+        manifest = manifests.get(pc_host.host_id)
+        resource_watchdog_id: str | None = None
+        if (
+            manifest
+            and manifest.find_tool("watchdog.watch_resource_threshold") is not None
+        ):
+            r_status, r_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="watchdog.watch_resource_threshold",
+                arguments={
+                    "metric": "battery_below",
+                    "threshold": 20,
+                    "label": "Pin thấp (<20%)",
+                },
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if r_status == "ok":
+                resource_watchdog_id = str(r_sc.get("watchdogId", "wd-res-1"))
+
+        primary_watchdog_id = str(w_sc.get("watchdogId", "wd-1"))
+        summary_vi = str(
+            w_sc.get(
+                "summaryVi",
+                f"Đang canh {target_kind} {watch_str} trên {pc_host.alias}",
+            )
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {summary_vi}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.WATCH_AND_ALERT.value,
+                    "host": str(pc_host.alias),
+                    "targetKind": target_kind,
+                    "targetValue": watch_str,
+                    "watchdogId": primary_watchdog_id,
+                    "resourceWatchdogId": resource_watchdog_id,
+                    "summaryVi": summary_vi,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_desk_whisper(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """`desk_whisper` (`R1`, `SYM-2`):
+        Synthesizes an ultra-short (`<= 120` chars) silent Desk Whisper card via
+        `meeting.desk_whisper_digest` so XUNA can cue the owner during a call or
+        focus session without making any audio noise."""
+        online, manifests, _ = await self._load_online_hosts(owner_id, self_host_id)
+        raw_target = clean_args.get("target")
+        requested_alias = raw_target.strip() if isinstance(raw_target, str) else ""
+        raw_topic = clean_args.get("whisper_topic")
+        raw_project = clean_args.get("project")
+        topic_str = (
+            raw_topic.strip()[:120]
+            if isinstance(raw_topic, str) and raw_topic.strip()
+            else (
+                raw_project.strip()[:120]
+                if isinstance(raw_project, str) and raw_project.strip()
+                else "Cuộc họp hiện tại"
+            )
+        )
+
+        pc_host: Host | None = None
+        for host in online:
+            if requested_alias and str(host.alias).lower() != requested_alias.lower():
+                continue
+            manifest = manifests.get(host.host_id)
+            if manifest and manifest.find_tool("meeting.desk_whisper_digest") is not None:
+                pc_host = host
+                break
+        if pc_host is None and online:
+            pc_host = online[0]
+
+        if pc_host is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("host_offline"),
+                tool_call_id=call.id,
+            )
+
+        status, sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="meeting.desk_whisper_digest",
+            arguments={
+                "topic": topic_str,
+                "maxChars": 120,
+            },
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(status),
+                tool_call_id=call.id,
+            )
+
+        whisper_line = str(
+            sc.get("whisperLine", f"[{topic_str}] Giữ nhịp ngắn gọn & chốt bước kế tiếp.")
+        )[:120]
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {whisper_line}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.DESK_WHISPER.value,
+                    "host": str(pc_host.alias),
+                    "topic": topic_str,
+                    "whisperLine": whisper_line,
+                    "charCount": len(whisper_line),
+                    "silentMode": True,
                 },
             ),
             tool_call_id=call.id,

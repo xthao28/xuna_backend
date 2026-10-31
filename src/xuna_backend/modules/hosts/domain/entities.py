@@ -283,6 +283,8 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
         family = ToolFamily.MEDIA
     elif family_str == "system":
         family = ToolFamily.HOST
+    elif family_str == "habit":
+        family = ToolFamily.WORKFLOW
     elif name == "tv.launch_app" or family_str in (
         "display",
         "workspace",
@@ -295,6 +297,8 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
         "clipboard",
         "dev",
         "pocket",
+        "watchdog",
+        "coach",
     ):
         family = ToolFamily.APP
     else:

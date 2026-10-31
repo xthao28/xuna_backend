@@ -46,6 +46,9 @@ WORKFLOW_TEMPLATES: tuple[str, ...] = (
     "daily_standup",
     "freeze_for_tonight",
     "rehydrate_project",
+    "unstuck_coach",
+    "watch_and_alert",
+    "desk_whisper",
 )
 WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -128,6 +131,18 @@ WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
         "next_step_hint": {
             "type": "string",
             "maxLength": 240,
+        },
+        "goal": {
+            "type": "string",
+            "maxLength": 240,
+        },
+        "whisper_topic": {
+            "type": "string",
+            "maxLength": 120,
+        },
+        "watch_target": {
+            "type": "string",
+            "maxLength": 64,
         },
     },
     "required": ["template"],

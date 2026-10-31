@@ -14,6 +14,8 @@ from xuna_backend.modules.symbiotic.domain.entities import (
     CoRegulationMode,
     CoRegulationSnapshot,
     DreamVignette,
+    HabitMacroProposal,
+    SerendipityNote,
 )
 
 
@@ -172,3 +174,78 @@ class CoRegulationEvaluator:
             speech_vi=f"Mình vẫn đang ngồi cạnh đồng hành cùng bạn trên {clean_proj} đây!",
             suggested_workflow=None,
         )
+
+
+class SerendipityEngine:
+    """Synthesizes an off-screen 'Mảnh giấy nhớ của XUNA' connecting two knowledge
+    topics or active goals into a gentle spark (SYM-2 S2.2)."""
+
+    def generate_note(
+        self,
+        *,
+        primary_topic: str,
+        secondary_topic: str = "xuna_pet",
+        first_step_hint: str = "",
+        now: datetime | None = None,
+    ) -> SerendipityNote:
+        ts = now or datetime.now(UTC)
+        clean_a = primary_topic.strip() or "ý tưởng mới"
+        clean_b = secondary_topic.strip() or "dự án hiện tại"
+        title_vi = f"Mảnh giấy nhớ của XUNA: {clean_a[:48]} + {clean_b[:32]}"[:120]
+        spark_vi = (
+            f"Lúc nãy ngồi ngẫm nghĩ một mình, mình chợt nhận ra chủ đề '{clean_a[:80]}' "
+            f"có điểm giao rất thú vị với '{clean_b[:60]}' mà tụi mình đang làm. "
+            "Nếu kết hợp hai mảnh này lại thì bài toán sẽ nhẹ nhàng hơn nhiều đó!"
+        )[:500]
+        default_action_vi = (
+            f"Thử áp dụng ý tưởng từ '{clean_a[:60]}' "
+            f"vào bước 5 phút đầu tiên trên {clean_b[:40]}."
+        )
+        action_vi = (
+            first_step_hint.strip()[:240]
+            if first_step_hint.strip()
+            else default_action_vi
+        )[:240]
+        return SerendipityNote(
+            note_id=f"srp-{uuid.uuid4().hex[:10]}",
+            title_vi=title_vi,
+            spark_vi=spark_vi,
+            connected_topics=(clean_a[:80], clean_b[:80]),
+            suggested_action_vi=action_vi,
+            created_at=ts,
+        )
+
+
+class HabitWorkflowMiner:
+    """Mines repeated tool execution sequences into bounded `<= R2` 1-tap macro
+    proposals (SYM-2 S2.2)."""
+
+    def mine_from_history(
+        self,
+        tool_history: tuple[str, ...] | list[str],
+        *,
+        min_occurrences: int = 2,
+    ) -> list[HabitMacroProposal]:
+        pair_counts: dict[tuple[str, str], int] = {}
+        seq = list(tool_history)
+        for idx in range(len(seq) - 1):
+            a, b = seq[idx].strip(), seq[idx + 1].strip()
+            if not a or not b or a == b:
+                continue
+            key = (a, b)
+            pair_counts[key] = pair_counts.get(key, 0) + 1
+
+        proposals: list[HabitMacroProposal] = []
+        for idx, ((tool_a, tool_b), count) in enumerate(pair_counts.items(), start=1):
+            if count >= min_occurrences:
+                proposals.append(
+                    HabitMacroProposal(
+                        proposal_id=f"hab-{idx}",
+                        title_vi=f"Quy trình tự học #{idx}: {tool_a} → {tool_b}"[:120],
+                        trigger_phrase_vi=f"chạy thói quen {idx}",
+                        steps=(tool_a, tool_b),
+                        occurrences=count,
+                        max_risk="R1",
+                    )
+                )
+        return proposals

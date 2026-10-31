@@ -83,3 +83,70 @@ class CoRegulationSnapshot:
             "suggestedWorkflow": self.suggested_workflow,
         }
 
+
+@dataclass(frozen=True, slots=True)
+class SerendipityNote:
+    """Off-screen inner life & proactive Serendipity Postcard ('Mảnh giấy nhớ của XUNA',
+    SYM-2 S2.2)."""
+
+    note_id: str
+    title_vi: str
+    spark_vi: str
+    connected_topics: tuple[str, ...]
+    suggested_action_vi: str
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.note_id.strip():
+            raise ValueError("note_id must not be empty")
+        if not 1 <= len(self.title_vi.strip()) <= 120:
+            raise ValueError("title_vi must be 1..120 characters")
+        if not 1 <= len(self.spark_vi.strip()) <= 500:
+            raise ValueError("spark_vi must be 1..500 characters")
+        if not 1 <= len(self.suggested_action_vi.strip()) <= 240:
+            raise ValueError("suggested_action_vi must be 1..240 characters")
+        if self.created_at.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware")
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "noteId": self.note_id,
+            "titleVi": self.title_vi,
+            "sparkVi": self.spark_vi,
+            "connectedTopics": list(self.connected_topics),
+            "suggestedActionVi": self.suggested_action_vi,
+            "createdAt": self.created_at.isoformat(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HabitMacroProposal:
+    """Self-evolving workflow macro mined from repeated owner tool sequences (SYM-2 S2.2)."""
+
+    proposal_id: str
+    title_vi: str
+    trigger_phrase_vi: str
+    steps: tuple[str, ...]
+    occurrences: int
+    max_risk: str = "R1"
+
+    def __post_init__(self) -> None:
+        if not self.proposal_id.strip():
+            raise ValueError("proposal_id must not be empty")
+        if not 1 <= len(self.steps) <= 5:
+            raise ValueError("steps must contain 1..5 tool names")
+        if self.occurrences < 1:
+            raise ValueError("occurrences must be >= 1")
+        if self.max_risk not in ("R0", "R1", "R2"):
+            raise ValueError("habit macro max_risk cannot exceed R2")
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "proposalId": self.proposal_id,
+            "titleVi": self.title_vi,
+            "triggerPhraseVi": self.trigger_phrase_vi,
+            "steps": list(self.steps),
+            "occurrences": self.occurrences,
+            "maxRisk": self.max_risk,
+        }
+
