@@ -279,7 +279,7 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
     family_str = name.split(".", 1)[0]
     if family_str == "browser":
         family = ToolFamily.URL
-    elif family_str in ("display", "workspace"):
+    elif family_str in ("display", "workspace", "selection", "mcp"):
         family = ToolFamily.APP
     else:
         try:

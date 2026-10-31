@@ -35,6 +35,9 @@ WORKFLOW_TEMPLATES: tuple[str, ...] = (
     "pause_everywhere",
     "resume_work",
     "wrap_up_work",
+    "custom_workflow",
+    "focus_session",
+    "away_guard",
 )
 WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -70,6 +73,15 @@ WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
         "prompt": {
             "type": "string",
             "maxLength": 500,
+        },
+        "workflow_name": {
+            "type": "string",
+            "maxLength": 64,
+        },
+        "duration_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 240,
         },
     },
     "required": ["template"],

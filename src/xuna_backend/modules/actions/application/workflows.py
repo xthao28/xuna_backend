@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -68,6 +69,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     Manifest,
     RiskTier,
     ToolFamily,
+    validate_tool_name,
 )
 
 DEADLINE_MS = 10000
@@ -91,6 +93,9 @@ class WorkflowTemplate(StrEnum):
     PAUSE_EVERYWHERE = "pause_everywhere"
     RESUME_WORK = "resume_work"
     WRAP_UP_WORK = "wrap_up_work"
+    CUSTOM_WORKFLOW = "custom_workflow"
+    FOCUS_SESSION = "focus_session"
+    AWAY_GUARD = "away_guard"
 
 
 def validate_https_public_url(raw_url: str) -> str:
@@ -181,6 +186,194 @@ class InMemoryBoardWorkflowSlotStore:
 
 
 @dataclass(frozen=True, slots=True)
+class CustomWorkflowStep:
+    """Single bounded step inside an owner-taught custom workflow (`UDC-12` S12.4).
+    Enforces `validate_tool_name` and `risk.level <= RiskTier.R2.level`."""
+
+    tool: str
+    arguments: dict[str, object]
+    risk: RiskTier = RiskTier.R1
+
+    def __post_init__(self) -> None:
+        validate_tool_name(self.tool)
+        if self.risk.level >= RiskTier.R3.level:
+            raise ValueError("custom_workflow_risk_forbidden")
+
+
+@dataclass(frozen=True, slots=True)
+class CustomWorkflowDefinition:
+    """Owner-taught multi-step workflow (`<= 5` steps, max `R2`, `UDC-12` S12.4)."""
+
+    owner_id: uuid.UUID
+    name: str
+    trigger_phrase: str
+    steps: tuple[CustomWorkflowStep, ...]
+    host_alias: str | None = None
+
+    def __post_init__(self) -> None:
+        clean_name = self.name.strip()
+        clean_trigger = self.trigger_phrase.strip()
+        if not 1 <= len(clean_name) <= 64:
+            raise ValueError("invalid_workflow_name")
+        if not 1 <= len(clean_trigger) <= 120:
+            raise ValueError("invalid_trigger_phrase")
+        if not 1 <= len(self.steps) <= 5:
+            raise ValueError("custom_workflow_step_limit")
+        for step in self.steps:
+            if step.risk.level >= RiskTier.R3.level:
+                raise ValueError("custom_workflow_risk_forbidden")
+        object.__setattr__(self, "name", clean_name)
+        object.__setattr__(self, "trigger_phrase", clean_trigger)
+
+    @property
+    def effective_risk(self) -> RiskTier:
+        highest = RiskTier.R0
+        for step in self.steps:
+            if step.risk.level > highest.level:
+                highest = step.risk
+        return highest
+
+
+class InMemoryCustomWorkflowStore:
+    """Stores owner-confirmed teachable custom workflows (`UDC-12` S12.4)."""
+
+    def __init__(self) -> None:
+        self._by_owner_name: dict[tuple[uuid.UUID, str], CustomWorkflowDefinition] = {}
+
+    def save(self, definition: CustomWorkflowDefinition) -> CustomWorkflowDefinition:
+        key = (definition.owner_id, definition.name.lower())
+        self._by_owner_name[key] = definition
+        return definition
+
+    def get_workflow(
+        self,
+        owner_id: uuid.UUID,
+        name_or_trigger: str,
+    ) -> CustomWorkflowDefinition | None:
+        key = name_or_trigger.strip().lower()
+        direct = self._by_owner_name.get((owner_id, key))
+        if direct is not None:
+            return direct
+        for (oid, _), item in self._by_owner_name.items():
+            if oid == owner_id and item.trigger_phrase.lower() == key:
+                return item
+        return None
+
+    def list_workflows(self, owner_id: uuid.UUID) -> list[CustomWorkflowDefinition]:
+        return [
+            item
+            for (oid, _), item in self._by_owner_name.items()
+            if oid == owner_id
+        ]
+
+    def delete_workflow(self, owner_id: uuid.UUID, name: str) -> bool:
+        return self._by_owner_name.pop((owner_id, name.strip().lower()), None) is not None
+
+
+_TEACH_ROUTINE_RE = re.compile(
+    r"(?:mỗi\s+khi|khi)\s+mình\s+nói\s+['\"“”]?([^'\"“”,]+?)['\"“”]?\s+thì\s+(.+)",
+    re.IGNORECASE,
+)
+
+
+def extract_custom_workflow_candidate(
+    owner_id: uuid.UUID,
+    text: str,
+    *,
+    default_host_alias: str | None = None,
+) -> CustomWorkflowDefinition | None:
+    """Parses a Vietnamese conversational routine teaching statement such as:
+    `"Khi mình nói 'chế độ chiến' thì bật màn hình, mở dự án xuna_pet, mở spotify và dừng nhạc"`
+    into a validated `CustomWorkflowDefinition` (`<= 5` steps, max `R2`).
+    Still requires explicit owner confirmation before saving (`D6`)."""
+    match = _TEACH_ROUTINE_RE.search(text.strip())
+    if match is None:
+        return None
+    trigger = match.group(1).strip()
+    actions_blob = match.group(2).strip()
+    if not trigger or not actions_blob:
+        return None
+
+    clauses = [
+        c.strip()
+        for c in re.split(r",|\bvà\b|\brồi\b|;", actions_blob, flags=re.IGNORECASE)
+        if c.strip()
+    ]
+    steps: list[CustomWorkflowStep] = []
+    for clause in clauses:
+        low = clause.lower()
+        if any(k in low for k in ("bật màn hình", "đánh thức màn hình", "bật mac", "bật máy")):
+            steps.append(
+                CustomWorkflowStep(
+                    tool="display.wake",
+                    arguments={},
+                    risk=RiskTier.R1,
+                )
+            )
+        elif "mở dự án" in low or "mở project" in low:
+            proj_match = re.search(
+                r"(?:mở\s+dự\s+án|mở\s+project)\s+([a-zA-Z0-9_.-]+)",
+                clause,
+                re.I,
+            )
+            proj_name = proj_match.group(1) if proj_match else "recent"
+            steps.append(
+                CustomWorkflowStep(
+                    tool="workspace.open",
+                    arguments={"project": proj_name, "ide": "auto"},
+                    risk=RiskTier.R2,
+                )
+            )
+        elif any(k in low for k in ("tiếp tục code", "mở claude", "chạy claude")):
+            steps.append(
+                CustomWorkflowStep(
+                    tool="workspace.coding_agent",
+                    arguments={"project": "recent", "agent": "claude_code", "resume": True},
+                    risk=RiskTier.R2,
+                )
+            )
+        elif any(k in low for k in ("tắt nhạc", "dừng nhạc", "tạm dừng nhạc", "bật nhạc")):
+            steps.append(
+                CustomWorkflowStep(
+                    tool="media.play_pause",
+                    arguments={},
+                    risk=RiskTier.R1,
+                )
+            )
+        elif "khóa màn hình" in low or "lock máy" in low:
+            steps.append(
+                CustomWorkflowStep(
+                    tool="host.lock_screen",
+                    arguments={},
+                    risk=RiskTier.R1,
+                )
+            )
+        elif low.startswith("mở "):
+            app_id = clause[3:].strip().split()[0].lower()
+            if app_id:
+                steps.append(
+                    CustomWorkflowStep(
+                        tool="app.launch",
+                        arguments={"id": app_id},
+                        risk=RiskTier.R2,
+                    )
+                )
+        if len(steps) >= 5:
+            break
+
+    if not steps:
+        return None
+    slug = re.sub(r"[^a-z0-9_]+", "_", trigger.lower()).strip("_") or "custom_routine"
+    return CustomWorkflowDefinition(
+        owner_id=owner_id,
+        name=slug[:64],
+        trigger_phrase=trigger[:120],
+        steps=tuple(steps[:5]),
+        host_alias=default_host_alias,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class BoardWorkflowTriggerResult:
     """Result of `POST /v1/actions/workflow-trigger` (`UDC-9` S9.3)."""
 
@@ -235,6 +428,7 @@ class CompositeWorkflowRunner:
         local_result_broker: LocalResultBroker,
         audit: AuditLog,
         slot_store: InMemoryBoardWorkflowSlotStore | None = None,
+        custom_workflow_store: InMemoryCustomWorkflowStore | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._host_repo = host_repo
@@ -244,6 +438,7 @@ class CompositeWorkflowRunner:
         self._local_result_broker = local_result_broker
         self._audit = audit
         self._slot_store = slot_store or InMemoryBoardWorkflowSlotStore()
+        self._custom_workflow_store = custom_workflow_store or InMemoryCustomWorkflowStore()
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def handle_template_call(
@@ -313,6 +508,36 @@ class CompositeWorkflowRunner:
             )
         if template == WorkflowTemplate.WRAP_UP_WORK:
             return await self._run_wrap_up_work(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.CUSTOM_WORKFLOW:
+            return await self._run_custom_workflow(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.FOCUS_SESSION:
+            return await self._run_focus_session(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.AWAY_GUARD:
+            return await self._run_away_guard(
                 call=call,
                 clean_args=clean_args,
                 owner_id=owner_id,
@@ -1850,6 +2075,491 @@ class CompositeWorkflowRunner:
                     "untrackedCount": untracked_count,
                     "mediaPaused": media_paused,
                     "wrapUpSummary": wrap_up_summary,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_custom_workflow(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """Executes an owner-taught custom workflow (`UDC-12` S12.4):
+        - Looks up `workflow_name` in `InMemoryCustomWorkflowStore`.
+        - Enforces `<= 5` steps and max `R2` risk.
+        - Requests a single consolidated plan approval if any step is `R2`."""
+        now = self._clock()
+        wf_name = str(clean_args.get("workflow_name", "")).strip()
+        if not wf_name:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("invalid_args"),
+                tool_call_id=call.id,
+            )
+        definition = self._custom_workflow_store.get_workflow(owner_id, wf_name)
+        if definition is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("not_found", {"workflowName": wf_name}),
+                tool_call_id=call.id,
+            )
+
+        req_target = str(
+            clean_args.get("source_target")
+            or clean_args.get("destination_target")
+            or definition.host_alias
+            or ""
+        ).strip()
+        pc_host, choices, manifest, host_grants = await self._resolve_desktop_host_for_dev_workflow(
+            owner_id=owner_id,
+            requested_alias=req_target,
+            now=now,
+        )
+        if pc_host is None:
+            if choices:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload("ask_target", choices=choices),
+                    tool_call_id=call.id,
+                )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+        if not self._hub.is_online(str(pc_host.host_id)) or manifest is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("host_offline"),
+                tool_call_id=call.id,
+            )
+
+        effective_risk = definition.effective_risk
+        approval_id_val: uuid.UUID | None = None
+        expires_at_val: datetime | None = None
+
+        if effective_risk.level >= RiskTier.R2.level:
+            step_labels = ", ".join(s.tool for s in definition.steps)
+            pending_summary = (
+                (
+                    f"Run custom routine '{definition.trigger_phrase}' "
+                    f"({step_labels}) on {pc_host.alias}"
+                )
+                if locale == Locale.EN
+                else (
+                    f"Chạy quy trình tự dạy '{definition.trigger_phrase}' "
+                    f"({step_labels}) trên {pc_host.alias}"
+                )
+            )[:240]
+            decision, approval_req = await self._request_single_plan_approval(
+                owner_id=owner_id,
+                host_id=pc_host.host_id,
+                target_label=str(pc_host.alias)[:32],
+                tool_label=WorkflowTemplate.CUSTOM_WORKFLOW.value,
+                summary=pending_summary,
+                approval_args={
+                    "template": WorkflowTemplate.CUSTOM_WORKFLOW.value,
+                    "workflowName": definition.name,
+                    "host": str(pc_host.alias),
+                },
+                emit_event=emit_event,
+                request_id=request_id,
+            )
+            if decision != ApprovalState.APPROVED:
+                final_state = "rejected" if decision == ApprovalState.REJECTED else "expired"
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(final_state),
+                    tool_call_id=call.id,
+                )
+            approval_id_val = approval_req.approval_id
+            expires_at_val = approval_req.expires_at
+
+        completed_steps: list[str] = []
+        for idx, step in enumerate(definition.steps, start=1):
+            desc = manifest.find_tool(step.tool)
+            if desc is None or not is_tool_granted(desc, host_grants, now):
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "denied",
+                        {
+                            "template": WorkflowTemplate.CUSTOM_WORKFLOW.value,
+                            "failedStep": idx,
+                            "failedTool": step.tool,
+                        },
+                    ),
+                    tool_call_id=call.id,
+                )
+            st_status, _ = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name=step.tool,
+                arguments=dict(step.arguments),
+                risk=step.risk,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+                approval_id=approval_id_val if step.risk.level >= RiskTier.R2.level else None,
+                expires_at=expires_at_val if step.risk.level >= RiskTier.R2.level else None,
+            )
+            if st_status != "ok":
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        st_status,
+                        {
+                            "template": WorkflowTemplate.CUSTOM_WORKFLOW.value,
+                            "failedStep": idx,
+                            "failedTool": step.tool,
+                            "failedHost": str(pc_host.alias),
+                        },
+                    ),
+                    tool_call_id=call.id,
+                )
+            completed_steps.append(step.tool)
+
+        summary_msg = (
+            (
+                f"Completed routine '{definition.trigger_phrase}' "
+                f"({len(completed_steps)} steps) on {pc_host.alias}"
+            )
+            if locale == Locale.EN
+            else (
+                f"Đã chạy quy trình '{definition.trigger_phrase}' "
+                f"({len(completed_steps)} bước) trên {pc_host.alias}"
+            )
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {summary_msg}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.CUSTOM_WORKFLOW.value,
+                    "workflowName": definition.name,
+                    "triggerPhrase": definition.trigger_phrase,
+                    "host": str(pc_host.alias),
+                    "completedSteps": completed_steps,
+                    "summary": summary_msg,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_focus_session(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """Executes `focus_session` (`UDC-12` S12.5, `R1`):
+        1. Pauses active media playback if playing (`media.now_playing` + `media.play_pause`).
+        2. Reads active workspace Git summary (`workspace.git_summary`) if available.
+        3. Sends a focus timer notification (`host.notify`) on the host."""
+        now = self._clock()
+        raw_dur = clean_args.get("duration_minutes")
+        duration_minutes = raw_dur if isinstance(raw_dur, int) and 1 <= raw_dur <= 240 else 25
+        req_target = str(
+            clean_args.get("source_target")
+            or clean_args.get("destination_target")
+            or ""
+        ).strip()
+        pc_host, choices, manifest, host_grants = await self._resolve_desktop_host_for_dev_workflow(
+            owner_id=owner_id,
+            requested_alias=req_target,
+            now=now,
+        )
+        if pc_host is None:
+            if choices:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload("ask_target", choices=choices),
+                    tool_call_id=call.id,
+                )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+        if not self._hub.is_online(str(pc_host.host_id)) or manifest is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("host_offline"),
+                tool_call_id=call.id,
+            )
+
+        media_paused = False
+        np_desc = manifest.find_tool("media.now_playing")
+        pp_desc = manifest.find_tool("media.play_pause")
+        if (
+            np_desc is not None
+            and pp_desc is not None
+            and is_tool_granted(np_desc, host_grants, now)
+            and is_tool_granted(pp_desc, host_grants, now)
+        ):
+            np_status, np_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="media.now_playing",
+                arguments={},
+                risk=RiskTier.R0,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if np_status == "ok" and str(np_sc.get("state", "")).lower() == "playing":
+                pp_status, _ = await self._invoke_host_step(
+                    owner_id=owner_id,
+                    host=pc_host,
+                    tool_name="media.play_pause",
+                    arguments={},
+                    risk=RiskTier.R1,
+                    request_id=request_id,
+                    self_host_id=self_host_id,
+                    emit_event=emit_event,
+                )
+                media_paused = pp_status == "ok"
+
+        resolved_workspace = str(clean_args.get("project", "")).strip() or "recent"
+        git_desc = manifest.find_tool("workspace.git_summary")
+        if git_desc is not None and is_tool_granted(git_desc, host_grants, now):
+            git_status, git_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="workspace.git_summary",
+                arguments={"project": resolved_workspace},
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if git_status == "ok":
+                resolved_workspace = str(git_sc.get("workspace", resolved_workspace))
+
+        notify_desc = manifest.find_tool("host.notify")
+        if notify_desc is not None and is_tool_granted(notify_desc, host_grants, now):
+            await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="host.notify",
+                arguments={
+                    "title": "XUNA Focus Co-Pilot",
+                    "body": f"Bắt đầu {duration_minutes} phút tập trung ({resolved_workspace}).",
+                },
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+
+        focus_summary = (
+            f"Started {duration_minutes}m focus session on {pc_host.alias} ({resolved_workspace})"
+            if locale == Locale.EN
+            else (
+                f"Đã bật chế độ tập trung {duration_minutes} phút "
+                f"trên {pc_host.alias} ({resolved_workspace})"
+            )
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {focus_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.FOCUS_SESSION.value,
+                    "host": str(pc_host.alias),
+                    "workspace": resolved_workspace,
+                    "durationMinutes": duration_minutes,
+                    "mediaPaused": media_paused,
+                    "focusSummary": focus_summary,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_away_guard(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """Executes `away_guard` (`UDC-12` S12.5, `R1`):
+        1. Pauses active media playback if playing (`media.now_playing` + `media.play_pause`).
+        2. Captures current workspace Git summary (`workspace.git_summary`) if available.
+        3. Locks the host workstation screen (`host.lock_screen`, `R1`)."""
+        now = self._clock()
+        req_target = str(
+            clean_args.get("source_target")
+            or clean_args.get("destination_target")
+            or ""
+        ).strip()
+        pc_host, choices, manifest, host_grants = await self._resolve_desktop_host_for_dev_workflow(
+            owner_id=owner_id,
+            requested_alias=req_target,
+            now=now,
+        )
+        if pc_host is None:
+            if choices:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload("ask_target", choices=choices),
+                    tool_call_id=call.id,
+                )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+        if not self._hub.is_online(str(pc_host.host_id)) or manifest is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("host_offline"),
+                tool_call_id=call.id,
+            )
+
+        lock_desc = manifest.find_tool("host.lock_screen")
+        if lock_desc is None or not is_tool_granted(lock_desc, host_grants, now):
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("denied"),
+                tool_call_id=call.id,
+            )
+
+        media_paused = False
+        np_desc = manifest.find_tool("media.now_playing")
+        pp_desc = manifest.find_tool("media.play_pause")
+        if (
+            np_desc is not None
+            and pp_desc is not None
+            and is_tool_granted(np_desc, host_grants, now)
+            and is_tool_granted(pp_desc, host_grants, now)
+        ):
+            np_status, np_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="media.now_playing",
+                arguments={},
+                risk=RiskTier.R0,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if np_status == "ok" and str(np_sc.get("state", "")).lower() == "playing":
+                pp_status, _ = await self._invoke_host_step(
+                    owner_id=owner_id,
+                    host=pc_host,
+                    tool_name="media.play_pause",
+                    arguments={},
+                    risk=RiskTier.R1,
+                    request_id=request_id,
+                    self_host_id=self_host_id,
+                    emit_event=emit_event,
+                )
+                media_paused = pp_status == "ok"
+
+        resolved_workspace = str(clean_args.get("project", "")).strip() or "recent"
+        git_desc = manifest.find_tool("workspace.git_summary")
+        if git_desc is not None and is_tool_granted(git_desc, host_grants, now):
+            git_status, git_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="workspace.git_summary",
+                arguments={"project": resolved_workspace},
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if git_status == "ok":
+                resolved_workspace = str(git_sc.get("workspace", resolved_workspace))
+
+        lock_status, _ = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="host.lock_screen",
+            arguments={},
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if lock_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    lock_status,
+                    {
+                        "template": WorkflowTemplate.AWAY_GUARD.value,
+                        "failedStep": 3,
+                        "failedTool": "host.lock_screen",
+                        "failedHost": str(pc_host.alias),
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        away_summary = (
+            f"Paused media, saved {resolved_workspace} state, and locked {pc_host.alias}"
+            if locale == Locale.EN
+            else (
+                f"Đã tạm dừng nhạc, lưu trạng thái {resolved_workspace} "
+                f"và khóa màn hình {pc_host.alias}"
+            )
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {away_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.AWAY_GUARD.value,
+                    "host": str(pc_host.alias),
+                    "workspace": resolved_workspace,
+                    "locked": True,
+                    "mediaPaused": media_paused,
+                    "awaySummary": away_summary,
                 },
             ),
             tool_call_id=call.id,

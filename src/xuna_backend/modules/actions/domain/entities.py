@@ -256,6 +256,19 @@ class ActionSummary:
                 proj = str(arguments.get("project", "recent"))[:40]
                 agent = str(arguments.get("agent", "auto"))[:24]
                 return f"Mở {agent} tại dự án {proj} và tiếp tục công việc trên {target}"[:240]
+            case "selection.read":
+                return f"Đọc đoạn văn bản đang chọn trên {target}"[:240]
+            case "host.lock_screen":
+                return f"Khóa màn hình {target}"[:240]
+            case "workspace.watch_task":
+                proj = str(arguments.get("project", "recent"))[:40]
+                return f"Theo dõi tiến độ tác vụ tại dự án {proj} trên {target}"[:240]
+            case "mcp.list_servers":
+                return f"Xem danh sách MCP server trên {target}"[:240]
+            case "mcp.call":
+                srv = str(arguments.get("server", ""))[:32]
+                t_name = str(arguments.get("tool", ""))[:40]
+                return f"Gọi công cụ MCP {srv}.{t_name} trên {target}"[:240]
             case _:
                 return f"Thực hiện {tool} trên {target}"[:240]
 
@@ -315,6 +328,19 @@ class ActionSummary:
                 proj = str(arguments.get("project", "recent"))[:40]
                 agent = str(arguments.get("agent", "auto"))[:24]
                 return f"Launch {agent} in {proj} and continue work on {target}"[:240]
+            case "selection.read":
+                return f"Read selected text on {target}"[:240]
+            case "host.lock_screen":
+                return f"Lock screen on {target}"[:240]
+            case "workspace.watch_task":
+                proj = str(arguments.get("project", "recent"))[:40]
+                return f"Watch task status in {proj} on {target}"[:240]
+            case "mcp.list_servers":
+                return f"List local MCP servers on {target}"[:240]
+            case "mcp.call":
+                srv = str(arguments.get("server", ""))[:32]
+                t_name = str(arguments.get("tool", ""))[:40]
+                return f"Call MCP tool {srv}.{t_name} on {target}"[:240]
             case _:
                 return f"Run {tool} on {target}"[:240]
 
