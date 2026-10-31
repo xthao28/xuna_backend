@@ -283,6 +283,27 @@ class ActionSummary:
                 return f"Chạy chuỗi {count} bước liên hoàn trên {target}"[:240]
             case "action.undo":
                 return f"Hoàn tác thao tác vừa thực hiện trên {target}"[:240]
+            case "tv.list_devices":
+                return f"Quét danh sách Smart TV trong mạng LAN từ {target}"[:240]
+            case "tv.control":
+                act = str(arguments.get("action", "play_pause"))[:24]
+                tv_dev = str(arguments.get("device", "TV"))[:32]
+                return f"Điều khiển {tv_dev} ({act}) qua {target}"[:240]
+            case "tv.launch_app":
+                app_id = str(arguments.get("appId", "youtube"))[:24]
+                tv_dev = str(arguments.get("device", "TV"))[:32]
+                return f"Mở ứng dụng {app_id} trên {tv_dev} qua {target}"[:240]
+            case "tv.cast_media":
+                raw_url = str(arguments.get("url", ""))
+                host = urlparse(raw_url).hostname or "media"
+                tv_dev = str(arguments.get("device", "TV"))[:32]
+                return f"Chiếu nội dung từ {host} lên {tv_dev} qua {target}"[:240]
+            case "smarthome.list_entities":
+                return f"Xem danh sách thiết bị nhà thông minh từ {target}"[:240]
+            case "smarthome.control":
+                ent = str(arguments.get("entityId", "thiết bị"))[:40]
+                act = str(arguments.get("action", "toggle"))[:24]
+                return f"Điều khiển {ent} ({act}) qua {target}"[:240]
             case _:
                 return f"Thực hiện {tool} trên {target}"[:240]
 
@@ -369,6 +390,27 @@ class ActionSummary:
                 return f"Run {count}-step batch workflow on {target}"[:240]
             case "action.undo":
                 return f"Undo last action on {target}"[:240]
+            case "tv.list_devices":
+                return f"Scan Smart TVs on LAN from {target}"[:240]
+            case "tv.control":
+                act = str(arguments.get("action", "play_pause"))[:24]
+                tv_dev = str(arguments.get("device", "TV"))[:32]
+                return f"Control {tv_dev} ({act}) via {target}"[:240]
+            case "tv.launch_app":
+                app_id = str(arguments.get("appId", "youtube"))[:24]
+                tv_dev = str(arguments.get("device", "TV"))[:32]
+                return f"Launch {app_id} on {tv_dev} via {target}"[:240]
+            case "tv.cast_media":
+                raw_url = str(arguments.get("url", ""))
+                host = urlparse(raw_url).hostname or "media"
+                tv_dev = str(arguments.get("device", "TV"))[:32]
+                return f"Cast {host} to {tv_dev} via {target}"[:240]
+            case "smarthome.list_entities":
+                return f"List smart-home entities via {target}"[:240]
+            case "smarthome.control":
+                ent = str(arguments.get("entityId", "device"))[:40]
+                act = str(arguments.get("action", "toggle"))[:24]
+                return f"Control {ent} ({act}) via {target}"[:240]
             case _:
                 return f"Run {tool} on {target}"[:240]
 

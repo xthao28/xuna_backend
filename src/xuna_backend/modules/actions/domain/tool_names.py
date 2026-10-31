@@ -38,6 +38,9 @@ WORKFLOW_TEMPLATES: tuple[str, ...] = (
     "custom_workflow",
     "focus_session",
     "away_guard",
+    "cast_to_tv",
+    "cinema_mode",
+    "goodnight_mode",
 )
 WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -82,6 +85,31 @@ WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
             "type": "integer",
             "minimum": 1,
             "maximum": 240,
+        },
+        "tv_device": {
+            "type": "string",
+            "maxLength": 64,
+        },
+        "tv_app_id": {
+            "type": "string",
+            "enum": [
+                "youtube",
+                "netflix",
+                "spotify",
+                "prime_video",
+                "disney_plus",
+                "apple_tv",
+                "plex",
+                "browser",
+            ],
+        },
+        "url": {
+            "type": "string",
+            "maxLength": 2048,
+        },
+        "light_entity_id": {
+            "type": "string",
+            "maxLength": 80,
         },
     },
     "required": ["template"],

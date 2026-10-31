@@ -277,9 +277,11 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
     if not _TOOL_NAME_RE.match(name):
         raise ValueError(f"invalid tool name format: {name}")
     family_str = name.split(".", 1)[0]
-    if family_str == "browser":
+    if family_str == "browser" or name == "tv.cast_media":
         family = ToolFamily.URL
-    elif family_str in (
+    elif name in ("tv.list_devices", "tv.control"):
+        family = ToolFamily.MEDIA
+    elif name == "tv.launch_app" or family_str in (
         "display",
         "workspace",
         "selection",
@@ -287,6 +289,7 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
         "window",
         "beam",
         "action",
+        "smarthome",
     ):
         family = ToolFamily.APP
     else:

@@ -96,6 +96,30 @@ class WorkflowTemplate(StrEnum):
     CUSTOM_WORKFLOW = "custom_workflow"
     FOCUS_SESSION = "focus_session"
     AWAY_GUARD = "away_guard"
+    CAST_TO_TV = "cast_to_tv"
+    CINEMA_MODE = "cinema_mode"
+    GOODNIGHT_MODE = "goodnight_mode"
+
+
+HARD_DENIED_SMARTHOME_DOMAINS: frozenset[str] = frozenset(
+    {
+        "lock",
+        "alarm_control_panel",
+        "camera",
+        "garage_door",
+        "siren",
+    }
+)
+
+
+def is_hard_denied_smarthome_entity(entity_id: str) -> bool:
+    """UDC-T36 (`UDC-14` S14.4): physical locks, alarms, cameras, garage doors,
+    and sirens are permanently hard-denied."""
+    norm = entity_id.strip().lower()
+    if "." not in norm:
+        return norm in HARD_DENIED_SMARTHOME_DOMAINS
+    domain = norm.split(".", 1)[0]
+    return domain in HARD_DENIED_SMARTHOME_DOMAINS
 
 
 def validate_https_public_url(raw_url: str) -> str:
@@ -372,6 +396,31 @@ def extract_custom_workflow_candidate(
                     risk=RiskTier.R1,
                 )
             )
+        elif any(k in low for k in ("bật tv", "mở tv", "đánh thức tv")):
+            steps.append(
+                CustomWorkflowStep(
+                    tool="tv.control",
+                    arguments={"action": "power_wake"},
+                    risk=RiskTier.R1,
+                )
+            )
+        elif "tắt tv" in low:
+            steps.append(
+                CustomWorkflowStep(
+                    tool="tv.control",
+                    arguments={"action": "power_off"},
+                    risk=RiskTier.R1,
+                )
+            )
+        elif "bật đèn" in low or "tắt đèn" in low:
+            act = "turn_on" if "bật đèn" in low else "turn_off"
+            steps.append(
+                CustomWorkflowStep(
+                    tool="smarthome.control",
+                    arguments={"entityId": "light.living_room", "action": act},
+                    risk=RiskTier.R2,
+                )
+            )
         elif low.startswith("mở "):
             app_id = clause[3:].strip().split()[0].lower()
             if app_id:
@@ -562,6 +611,36 @@ class CompositeWorkflowRunner:
             )
         if template == WorkflowTemplate.AWAY_GUARD:
             return await self._run_away_guard(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.CAST_TO_TV:
+            return await self._run_cast_to_tv(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.CINEMA_MODE:
+            return await self._run_cinema_mode(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.GOODNIGHT_MODE:
+            return await self._run_goodnight_mode(
                 call=call,
                 clean_args=clean_args,
                 owner_id=owner_id,
@@ -2588,6 +2667,774 @@ class CompositeWorkflowRunner:
                     "locked": True,
                     "mediaPaused": media_paused,
                     "awaySummary": away_summary,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_cast_to_tv(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """UDC-14 S14.3 `cast_to_tv` (`R2`):
+        1. Reads active browser `https://` URL via `browser.current_url` (or explicit `url`).
+        2. Requests one `R2` approval showing `{host} -> {tv} · {domain}` (never full URL).
+        3. Pauses local media playback on the PC (`media.play_pause` if playing).
+        4. Casts the media URL to the Smart TV via `tv.cast_media`."""
+        now = self._clock()
+        online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
+        desktop_candidates: list[Host] = []
+        for h in online:
+            if h.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS, HostPlatform.LINUX):
+                m = manifests[h.host_id]
+                g = grants[h.host_id]
+                c_desc = m.find_tool("tv.cast_media")
+                if c_desc is not None and is_tool_granted(c_desc, g, now):
+                    desktop_candidates.append(h)
+
+        if not desktop_candidates:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+
+        req_src = str(clean_args.get("source_target", "")).strip()
+        if req_src:
+            matched = [
+                h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()
+            ]
+            if not matched:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "ask_target",
+                        choices=[str(h.alias) for h in desktop_candidates],
+                    ),
+                    tool_call_id=call.id,
+                )
+            pc_host = matched[0]
+        elif len(desktop_candidates) == 1:
+            pc_host = desktop_candidates[0]
+        else:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "ask_target",
+                    choices=[str(h.alias) for h in desktop_candidates],
+                ),
+                tool_call_id=call.id,
+            )
+
+        manifest = manifests[pc_host.host_id]
+        host_grants = grants[pc_host.host_id]
+        tv_device = str(clean_args.get("tv_device", "")).strip() or "Smart TV"
+        browser_arg = str(clean_args.get("browser", "auto"))
+
+        explicit_url = str(clean_args.get("url", "")).strip()
+        if explicit_url:
+            raw_url = explicit_url
+        else:
+            b_desc = manifest.find_tool("browser.current_url")
+            if b_desc is None or not is_tool_granted(b_desc, host_grants, now):
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload("grant_denied"),
+                    tool_call_id=call.id,
+                )
+            b_status, b_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="browser.current_url",
+                arguments={"browser": browser_arg},
+                risk=RiskTier.R2,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if b_status != "ok":
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        b_status,
+                        {
+                            "template": WorkflowTemplate.CAST_TO_TV.value,
+                            "failedStep": 1,
+                            "failedTool": "browser.current_url",
+                            "failedHost": str(pc_host.alias),
+                        },
+                    ),
+                    tool_call_id=call.id,
+                )
+            raw_url = str(b_sc.get("url", ""))
+
+        try:
+            domain = validate_https_public_url(raw_url)
+        except ValueError:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "invalid_args",
+                    {
+                        "template": WorkflowTemplate.CAST_TO_TV.value,
+                        "failedStep": 1,
+                        "failedTool": "browser.current_url",
+                        "failedHost": str(pc_host.alias),
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        target_label = f"{pc_host.alias} → {tv_device}"[:32]
+        plan_summary = (
+            f"{pc_host.alias} → {tv_device} · Cast {domain} to TV"
+            if locale == Locale.EN
+            else f"{pc_host.alias} → {tv_device} · Chiếu {domain} lên TV"
+        )
+        decision, req = await self._request_single_plan_approval(
+            owner_id=owner_id,
+            host_id=pc_host.host_id,
+            target_label=target_label,
+            tool_label="workflow.template:cast_to_tv",
+            summary=plan_summary,
+            approval_args={
+                "template": WorkflowTemplate.CAST_TO_TV.value,
+                "host": str(pc_host.alias),
+                "tvDevice": tv_device,
+                "domain": domain,
+            },
+            emit_event=emit_event,
+            request_id=request_id,
+        )
+        if decision != ApprovalState.APPROVED:
+            final_state = "rejected" if decision == ApprovalState.REJECTED else "expired"
+            await emit_event(
+                ActionResultEvent(
+                    invocation_id=str(req.approval_id),
+                    target=target_label,
+                    summary=f"✗ {plan_summary} ({final_state})"[:240],
+                    status=final_state,
+                    gesture=gesture_for_action_status(final_state),
+                )
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    final_state,
+                    {"template": WorkflowTemplate.CAST_TO_TV.value, "domain": domain},
+                ),
+                tool_call_id=call.id,
+            )
+
+        media_paused = False
+        np_desc = manifest.find_tool("media.now_playing")
+        pp_desc = manifest.find_tool("media.play_pause")
+        if (
+            np_desc is not None
+            and pp_desc is not None
+            and is_tool_granted(np_desc, host_grants, now)
+            and is_tool_granted(pp_desc, host_grants, now)
+        ):
+            np_status, np_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="media.now_playing",
+                arguments={},
+                risk=RiskTier.R0,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if np_status == "ok" and str(np_sc.get("state", "")).lower() == "playing":
+                pp_status, _ = await self._invoke_host_step(
+                    owner_id=owner_id,
+                    host=pc_host,
+                    tool_name="media.play_pause",
+                    arguments={},
+                    risk=RiskTier.R1,
+                    request_id=request_id,
+                    self_host_id=self_host_id,
+                    emit_event=emit_event,
+                )
+                media_paused = pp_status == "ok"
+
+        cast_args: dict[str, object] = {"url": raw_url}
+        if clean_args.get("tv_device"):
+            cast_args["device"] = tv_device
+        cast_status, cast_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="tv.cast_media",
+            arguments=cast_args,
+            risk=RiskTier.R2,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+            approval_id=req.approval_id,
+            expires_at=req.expires_at,
+        )
+        if cast_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    cast_status,
+                    {
+                        "template": WorkflowTemplate.CAST_TO_TV.value,
+                        "failedStep": 2,
+                        "failedTool": "tv.cast_media",
+                        "failedHost": str(pc_host.alias),
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        resolved_tv = str(cast_sc.get("deviceName", tv_device))
+        resolved_app = str(cast_sc.get("appId", "youtube"))
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(req.approval_id),
+                target=target_label,
+                summary=f"✓ {plan_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.CAST_TO_TV.value,
+                    "host": str(pc_host.alias),
+                    "tvDevice": resolved_tv,
+                    "appId": resolved_app,
+                    "domain": domain,
+                    "mediaPaused": media_paused,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_cinema_mode(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """UDC-14 S14.5 `cinema_mode` (`R2`):
+        1. Wakes/turns on Smart TV (`tv.control(power_wake)`).
+        2. Launches streaming app (`tv.launch_app`, default `netflix` or `youtube`).
+        3. Dims room lights (`smarthome.control(set_brightness, 15)`) if granted & allowlisted.
+        4. Pauses PC music (`media.play_pause`) under one `R2` approval."""
+        light_entity_id = (
+            str(clean_args.get("light_entity_id", "")).strip() or "light.living_room"
+        )
+        if is_hard_denied_smarthome_entity(light_entity_id):
+            await self._audit.record(
+                AuditEvent(
+                    owner_id=owner_id,
+                    action=AuditAction.HOST_TOOL_DENIED,
+                    occurred_at=self._clock(),
+                    subject="cinema_mode",
+                    request_id=request_id,
+                    metadata={
+                        "tool": "smarthome.control",
+                        "reason": "smarthome_domain_forbidden",
+                    },
+                )
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "denied",
+                    {
+                        "template": WorkflowTemplate.CINEMA_MODE.value,
+                        "reason": "smarthome_domain_forbidden",
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        now = self._clock()
+        online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
+        desktop_candidates: list[Host] = []
+        for h in online:
+            if h.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS, HostPlatform.LINUX):
+                m = manifests[h.host_id]
+                g = grants[h.host_id]
+                ctl_desc = m.find_tool("tv.control")
+                app_desc = m.find_tool("tv.launch_app")
+                if (
+                    ctl_desc is not None
+                    and app_desc is not None
+                    and is_tool_granted(ctl_desc, g, now)
+                    and is_tool_granted(app_desc, g, now)
+                ):
+                    desktop_candidates.append(h)
+
+        if not desktop_candidates:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+
+        req_src = str(clean_args.get("source_target", "")).strip()
+        if req_src:
+            matched = [
+                h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()
+            ]
+            if not matched:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "ask_target",
+                        choices=[str(h.alias) for h in desktop_candidates],
+                    ),
+                    tool_call_id=call.id,
+                )
+            pc_host = matched[0]
+        elif len(desktop_candidates) == 1:
+            pc_host = desktop_candidates[0]
+        else:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "ask_target",
+                    choices=[str(h.alias) for h in desktop_candidates],
+                ),
+                tool_call_id=call.id,
+            )
+
+        manifest = manifests[pc_host.host_id]
+        host_grants = grants[pc_host.host_id]
+        tv_device = str(clean_args.get("tv_device", "")).strip() or "Smart TV"
+        tv_app_id = str(clean_args.get("tv_app_id", "")).strip() or "netflix"
+
+        plan_summary = (
+            f"Cinema mode on {tv_device} ({tv_app_id}) via {pc_host.alias}"
+            if locale == Locale.EN
+            else f"Chế độ xem phim trên {tv_device} ({tv_app_id}) qua {pc_host.alias}"
+        )
+        decision, req = await self._request_single_plan_approval(
+            owner_id=owner_id,
+            host_id=pc_host.host_id,
+            target_label=str(pc_host.alias),
+            tool_label="workflow.template:cinema_mode",
+            summary=plan_summary,
+            approval_args={
+                "template": WorkflowTemplate.CINEMA_MODE.value,
+                "host": str(pc_host.alias),
+                "tvDevice": tv_device,
+                "tvAppId": tv_app_id,
+                "lightEntityId": light_entity_id,
+            },
+            emit_event=emit_event,
+            request_id=request_id,
+        )
+        if decision != ApprovalState.APPROVED:
+            final_state = "rejected" if decision == ApprovalState.REJECTED else "expired"
+            await emit_event(
+                ActionResultEvent(
+                    invocation_id=str(req.approval_id),
+                    target=str(pc_host.alias),
+                    summary=f"✗ {plan_summary} ({final_state})"[:240],
+                    status=final_state,
+                    gesture=gesture_for_action_status(final_state),
+                )
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    final_state,
+                    {"template": WorkflowTemplate.CINEMA_MODE.value},
+                ),
+                tool_call_id=call.id,
+            )
+
+        wake_args: dict[str, object] = {"action": "power_wake"}
+        if clean_args.get("tv_device"):
+            wake_args["device"] = tv_device
+        wake_status, wake_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="tv.control",
+            arguments=wake_args,
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if wake_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    wake_status,
+                    {
+                        "template": WorkflowTemplate.CINEMA_MODE.value,
+                        "failedStep": 1,
+                        "failedTool": "tv.control",
+                        "failedHost": str(pc_host.alias),
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        launch_args: dict[str, object] = {"appId": tv_app_id}
+        if clean_args.get("tv_device"):
+            launch_args["device"] = tv_device
+        app_status, app_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="tv.launch_app",
+            arguments=launch_args,
+            risk=RiskTier.R2,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+            approval_id=req.approval_id,
+            expires_at=req.expires_at,
+        )
+        if app_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    app_status,
+                    {
+                        "template": WorkflowTemplate.CINEMA_MODE.value,
+                        "failedStep": 2,
+                        "failedTool": "tv.launch_app",
+                        "failedHost": str(pc_host.alias),
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        lights_dimmed = False
+        sh_desc = manifest.find_tool("smarthome.control")
+        if sh_desc is not None and is_tool_granted(sh_desc, host_grants, now):
+            sh_status, _ = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="smarthome.control",
+                arguments={
+                    "entityId": light_entity_id,
+                    "action": "set_brightness",
+                    "value": 15,
+                },
+                risk=RiskTier.R2,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+                approval_id=req.approval_id,
+                expires_at=req.expires_at,
+            )
+            lights_dimmed = sh_status == "ok"
+
+        media_paused = False
+        np_desc = manifest.find_tool("media.now_playing")
+        pp_desc = manifest.find_tool("media.play_pause")
+        if (
+            np_desc is not None
+            and pp_desc is not None
+            and is_tool_granted(np_desc, host_grants, now)
+            and is_tool_granted(pp_desc, host_grants, now)
+        ):
+            np_status, np_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="media.now_playing",
+                arguments={},
+                risk=RiskTier.R0,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if np_status == "ok" and str(np_sc.get("state", "")).lower() == "playing":
+                pp_status, _ = await self._invoke_host_step(
+                    owner_id=owner_id,
+                    host=pc_host,
+                    tool_name="media.play_pause",
+                    arguments={},
+                    risk=RiskTier.R1,
+                    request_id=request_id,
+                    self_host_id=self_host_id,
+                    emit_event=emit_event,
+                )
+                media_paused = pp_status == "ok"
+
+        resolved_tv = str(
+            app_sc.get("deviceName", wake_sc.get("deviceName", tv_device))
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(req.approval_id),
+                target=str(pc_host.alias),
+                summary=f"✓ {plan_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.CINEMA_MODE.value,
+                    "host": str(pc_host.alias),
+                    "tvDevice": resolved_tv,
+                    "tvAppId": tv_app_id,
+                    "lightsDimmed": lights_dimmed,
+                    "mediaPaused": media_paused,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_goodnight_mode(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """UDC-14 S14.5 `goodnight_mode` (`R1`):
+        1. Checks uncommitted Git work (`workspace.git_summary`).
+        2. Pauses local media playback (`media.play_pause` if playing).
+        3. Turns off Smart TV (`tv.control(power_off)` if granted).
+        4. Turns off room lights (`smarthome.control(turn_off)` if granted & allowlisted).
+        5. Locks PC screen (`host.lock_screen`)."""
+        light_entity_id = str(clean_args.get("light_entity_id", "")).strip()
+        if light_entity_id and is_hard_denied_smarthome_entity(light_entity_id):
+            await self._audit.record(
+                AuditEvent(
+                    owner_id=owner_id,
+                    action=AuditAction.HOST_TOOL_DENIED,
+                    occurred_at=self._clock(),
+                    subject="goodnight_mode",
+                    request_id=request_id,
+                    metadata={
+                        "tool": "smarthome.control",
+                        "reason": "smarthome_domain_forbidden",
+                    },
+                )
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "denied",
+                    {
+                        "template": WorkflowTemplate.GOODNIGHT_MODE.value,
+                        "reason": "smarthome_domain_forbidden",
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        now = self._clock()
+        online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
+        desktop_candidates: list[Host] = []
+        for h in online:
+            if h.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS, HostPlatform.LINUX):
+                m = manifests[h.host_id]
+                g = grants[h.host_id]
+                lock_desc = m.find_tool("host.lock_screen")
+                if lock_desc is not None and is_tool_granted(lock_desc, g, now):
+                    desktop_candidates.append(h)
+
+        if not desktop_candidates:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+
+        req_src = str(clean_args.get("source_target", "")).strip()
+        if req_src:
+            matched = [
+                h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()
+            ]
+            if not matched:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "ask_target",
+                        choices=[str(h.alias) for h in desktop_candidates],
+                    ),
+                    tool_call_id=call.id,
+                )
+            pc_host = matched[0]
+        elif len(desktop_candidates) == 1:
+            pc_host = desktop_candidates[0]
+        else:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "ask_target",
+                    choices=[str(h.alias) for h in desktop_candidates],
+                ),
+                tool_call_id=call.id,
+            )
+
+        manifest = manifests[pc_host.host_id]
+        host_grants = grants[pc_host.host_id]
+
+        resolved_workspace = str(clean_args.get("project", "")).strip() or "recent"
+        git_desc = manifest.find_tool("workspace.git_summary")
+        if git_desc is not None and is_tool_granted(git_desc, host_grants, now):
+            git_status, git_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="workspace.git_summary",
+                arguments={"project": resolved_workspace},
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if git_status == "ok":
+                resolved_workspace = str(git_sc.get("workspace", resolved_workspace))
+
+        media_paused = False
+        np_desc = manifest.find_tool("media.now_playing")
+        pp_desc = manifest.find_tool("media.play_pause")
+        if (
+            np_desc is not None
+            and pp_desc is not None
+            and is_tool_granted(np_desc, host_grants, now)
+            and is_tool_granted(pp_desc, host_grants, now)
+        ):
+            np_status, np_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="media.now_playing",
+                arguments={},
+                risk=RiskTier.R0,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if np_status == "ok" and str(np_sc.get("state", "")).lower() == "playing":
+                pp_status, _ = await self._invoke_host_step(
+                    owner_id=owner_id,
+                    host=pc_host,
+                    tool_name="media.play_pause",
+                    arguments={},
+                    risk=RiskTier.R1,
+                    request_id=request_id,
+                    self_host_id=self_host_id,
+                    emit_event=emit_event,
+                )
+                media_paused = pp_status == "ok"
+
+        tv_powered_off = False
+        tv_desc = manifest.find_tool("tv.control")
+        if tv_desc is not None and is_tool_granted(tv_desc, host_grants, now):
+            tv_args: dict[str, object] = {"action": "power_off"}
+            if clean_args.get("tv_device"):
+                tv_args["device"] = str(clean_args["tv_device"]).strip()
+            tv_status, _ = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="tv.control",
+                arguments=tv_args,
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            tv_powered_off = tv_status == "ok"
+
+        lights_off = False
+        sh_desc = manifest.find_tool("smarthome.control")
+        if (
+            light_entity_id
+            and sh_desc is not None
+            and is_tool_granted(sh_desc, host_grants, now)
+        ):
+            sh_status, _ = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="smarthome.control",
+                arguments={"entityId": light_entity_id, "action": "turn_off"},
+                risk=RiskTier.R2,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            lights_off = sh_status == "ok"
+
+        lock_status, _ = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="host.lock_screen",
+            arguments={},
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if lock_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    lock_status,
+                    {
+                        "template": WorkflowTemplate.GOODNIGHT_MODE.value,
+                        "failedStep": 5,
+                        "failedTool": "host.lock_screen",
+                        "failedHost": str(pc_host.alias),
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        goodnight_summary = (
+            f"Goodnight: saved {resolved_workspace}, turned off TV, and locked {pc_host.alias}"
+            if locale == Locale.EN
+            else (
+                f"Chúc ngủ ngon: đã kiểm tra {resolved_workspace}, "
+                f"tắt TV và khóa màn hình {pc_host.alias}"
+            )
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {goodnight_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.GOODNIGHT_MODE.value,
+                    "host": str(pc_host.alias),
+                    "workspace": resolved_workspace,
+                    "tvPoweredOff": tv_powered_off,
+                    "lightsOff": lights_off,
+                    "mediaPaused": media_paused,
+                    "locked": True,
+                    "goodnightSummary": goodnight_summary,
                 },
             ),
             tool_call_id=call.id,
