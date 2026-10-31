@@ -7,6 +7,7 @@ Stdlib only. Implements:
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime
 
@@ -16,6 +17,8 @@ from xuna_backend.modules.symbiotic.domain.entities import (
     DreamVignette,
     HabitMacroProposal,
     SerendipityNote,
+    SocialEncounterNote,
+    SocialPostcard,
 )
 
 
@@ -249,3 +252,88 @@ class HabitWorkflowMiner:
                     )
                 )
         return proposals
+
+
+class SocialEcologyService:
+    """Synthesizes first-person ('mình - bạn') Friendship Journal entries and
+    signed U0-safe skill postcards when two XUNA boards meet in close proximity
+    (SYM-4 S4.2)."""
+
+    _ALLOWED_SKILLS = frozenset(
+        {
+            "spin_dance",
+            "curious_peek",
+            "cozy_nuzzle",
+            "daily_standup",
+            "unstuck_coach",
+        }
+    )
+
+    def record_encounter(
+        self,
+        *,
+        my_short_id: str,
+        peer_short_id: str,
+        peer_trait: str = "playfulness",
+        peer_tint: str = "golden_amber",
+        shared_trick: str = "spin_dance",
+        now: datetime | None = None,
+    ) -> tuple[SocialEncounterNote, SocialPostcard]:
+        ts = now or datetime.now(UTC)
+        clean_me = my_short_id.strip()[:16] or "A1B2C3D4"
+        clean_peer = peer_short_id.strip()[:16] or "11223344"
+        if clean_me.lower() == clean_peer.lower():
+            raise ValueError("cannot record social encounter with self")
+
+        clean_trait = peer_trait.strip().lower() or "playfulness"
+        clean_tint = peer_tint.strip().lower() or "golden_amber"
+        clean_skill = (
+            shared_trick.strip().lower()
+            if shared_trick.strip().lower() in self._ALLOWED_SKILLS
+            else "spin_dance"
+        )
+
+        if clean_trait == "sensitivity":
+            greeting = "shy_peek"
+            scene_vi = "ngó nghiêng làm quen thật dịu dàng"
+        elif clean_trait in ("curiosity", "playfulness"):
+            greeting = "harmonious_spark"
+            scene_vi = "xoay vòng bắt nhịp cực kỳ ăn ý"
+        else:
+            greeting = "warm_nuzzle"
+            scene_vi = "dụi đầu chào hỏi ấm áp"
+
+        narrative_vi = (
+            f"Hôm nay mình tình cờ gặp bạn XUNA #{clean_peer} (sắc thái {clean_tint}, "
+            f"tính cách {clean_trait}) ở ngay cạnh bàn! Hai đứa đã {scene_vi} và "
+            f"trao nhau bưu thiếp chiêu trò '{clean_skill}' đó bạn ơi!"
+        )[:400]
+
+        note = SocialEncounterNote(
+            encounter_id=f"enc-{uuid.uuid4().hex[:10]}",
+            peer_short_id=clean_peer,
+            peer_trait=clean_trait,
+            peer_tint=clean_tint,
+            greeting_kind=greeting,
+            narrative_vi=narrative_vi,
+            shared_trick=clean_skill,
+            occurred_at=ts,
+        )
+
+        msg_vi = (
+            f"Chào bạn XUNA #{clean_me}! Mình là #{clean_peer}, tặng bạn chiêu trò "
+            f"'{clean_skill}' để cùng tập với chủ nhân nhé!"
+        )[:240]
+        canonical = f"{clean_peer}:{clean_me}:{clean_skill}:{ts.isoformat()}"
+        sig_hex = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+        postcard = SocialPostcard(
+            postcard_id=f"psc-{uuid.uuid4().hex[:10]}",
+            from_short_id=clean_peer,
+            to_short_id=clean_me,
+            shared_skill_id=clean_skill,
+            message_vi=msg_vi,
+            signature_hex=sig_hex,
+            created_at=ts,
+        )
+        return note, postcard

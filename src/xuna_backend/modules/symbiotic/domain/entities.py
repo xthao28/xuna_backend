@@ -150,3 +150,78 @@ class HabitMacroProposal:
             "maxRisk": self.max_risk,
         }
 
+
+@dataclass(frozen=True, slots=True)
+class SocialEncounterNote:
+    """XUNA-to-XUNA proximity encounter journal entry ('Nhật ký Kết bạn XUNA',
+    SYM-4 S4.2). Contains zero owner PII (U0-safe)."""
+
+    encounter_id: str
+    peer_short_id: str
+    peer_trait: str
+    peer_tint: str
+    greeting_kind: str
+    narrative_vi: str
+    shared_trick: str
+    occurred_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.encounter_id.strip():
+            raise ValueError("encounter_id must not be empty")
+        if not 1 <= len(self.peer_short_id.strip()) <= 16:
+            raise ValueError("peer_short_id must be 1..16 characters")
+        if not 1 <= len(self.narrative_vi.strip()) <= 400:
+            raise ValueError("narrative_vi must be 1..400 characters")
+        if self.occurred_at.tzinfo is None:
+            raise ValueError("occurred_at must be timezone-aware")
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "encounterId": self.encounter_id,
+            "peerShortId": self.peer_short_id,
+            "peerTrait": self.peer_trait,
+            "peerTint": self.peer_tint,
+            "greetingKind": self.greeting_kind,
+            "narrativeVi": self.narrative_vi,
+            "sharedTrick": self.shared_trick,
+            "occurredAt": self.occurred_at.isoformat(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SocialPostcard:
+    """Signed skill/trick postcard exchanged between two XUNA pets (SYM-4 S4.2)."""
+
+    postcard_id: str
+    from_short_id: str
+    to_short_id: str
+    shared_skill_id: str
+    message_vi: str
+    signature_hex: str
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.postcard_id.strip():
+            raise ValueError("postcard_id must not be empty")
+        if not 1 <= len(self.from_short_id.strip()) <= 16:
+            raise ValueError("from_short_id must be 1..16 characters")
+        if not 1 <= len(self.to_short_id.strip()) <= 16:
+            raise ValueError("to_short_id must be 1..16 characters")
+        if not 1 <= len(self.message_vi.strip()) <= 240:
+            raise ValueError("message_vi must be 1..240 characters")
+        if len(self.signature_hex.strip()) != 64:
+            raise ValueError("signature_hex must be a 64-char SHA-256 hex digest")
+        if self.created_at.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware")
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "postcardId": self.postcard_id,
+            "fromShortId": self.from_short_id,
+            "toShortId": self.to_short_id,
+            "sharedSkillId": self.shared_skill_id,
+            "messageVi": self.message_vi,
+            "signatureHex": self.signature_hex,
+            "createdAt": self.created_at.isoformat(),
+        }
+
