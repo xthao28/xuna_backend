@@ -153,6 +153,19 @@ class InMemoryHostSessionHub:
             return
         await current.send_text(rpc_notification_frame(method, params))
 
+    async def stop_host(self, host_id: str, reason: str = "owner_app") -> bool:
+        """Cancels in-flight calls and sends `xuna/stop` without closing the WebSocket."""
+        current = self._live.get(host_id)
+        if current is None:
+            return False
+        for fut in list(current.in_flight.values()):
+            if not fut.done():
+                fut.set_exception(RuntimeError(f"stopped:{reason}"))
+        current.in_flight.clear()
+        with contextlib.suppress(Exception):
+            await current.send_text(rpc_notification_frame("xuna/stop", {"reason": reason}))
+        return True
+
     async def disconnect_host(self, host_id: str, reason: str = "revoked") -> None:
         current = self._live.pop(host_id, None)
         if current is None:

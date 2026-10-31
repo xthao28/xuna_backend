@@ -1,16 +1,18 @@
-"""Deterministic tool-call orchestrator for XUNA Brain (UDC-4 §5.3).
+"""Deterministic tool-call orchestrator for XUNA Brain (UDC-4 §5.3, UDC-7).
 
 Executes the 8-step pipeline per tool call:
 1. Function name mapping & forbidden-tool rejection.
 2. Strict JSON Schema subset argument validation.
-3. Deterministic target resolution without cross-host fallback.
-4. Per-host capability grant verification.
-5. Owner approval gate (60 s TTL) for R2+ tools and `board.media_key`, bound to `args_sha256`.
+3. Deterministic target resolution without cross-host fallback (including pronouns).
+4. Per-host capability grant verification (including expiry & suspension).
+5. Owner approval gate (60 s TTL, `once` or R2 `conversation_15m`, R3 phone-signed)
+   bound to `args_sha256`.
 6. Dispatch via `HostSessionHub` (`tools/call`) or `LocalResultBroker` (`board_hid_request`).
 7. Content-free audit logging.
 8. Compact `Role.TOOL` JSON response (<= 2 KiB) and `ActionResultEvent` with deterministic gesture.
 """
 
+import base64
 import json
 import uuid
 from collections.abc import Awaitable, Callable, Collection
@@ -25,6 +27,7 @@ from xuna_backend.modules.actions.application.catalog import (
 from xuna_backend.modules.actions.application.ports import (
     ApprovalBroker,
     ApprovalRepository,
+    ApprovalScopeStore,
     LastTargetStore,
     LocalResultBroker,
 )
@@ -37,8 +40,10 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionSummary,
     ApprovalDecision,
     ApprovalRequest,
+    ApprovalScope,
     ApprovalState,
     BoardHidRequestEvent,
+    EmergencyStopSummary,
     LocalActionRequestEvent,
     gesture_for_action_status,
 )
@@ -62,17 +67,23 @@ from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.audit.domain.event import AuditAction, AuditEvent
 from xuna_backend.modules.cognition.domain.types import Locale, Message, Role, ToolCall
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
-from xuna_backend.modules.hosts.domain.crypto import args_sha256
+from xuna_backend.modules.hosts.domain.crypto import (
+    approval_proof_message,
+    args_sha256,
+    validate_public_key,
+)
 from xuna_backend.modules.hosts.domain.entities import (
     Grant,
     Host,
     HostId,
+    HostPlatform,
     HostStatus,
     Manifest,
     RiskTier,
     ToolDescriptor,
     ToolPermissionState,
 )
+from xuna_backend.modules.identity.application.ports import SignatureVerifier
 
 DEADLINE_MS = 10000
 DEADLINE_SECONDS = 10.0
@@ -123,7 +134,10 @@ def _truncate_value(val: object, *, max_str: int = 120) -> object:
     if isinstance(val, str):
         return val[:max_str]
     if isinstance(val, dict):
-        return {str(k)[:40]: _truncate_value(v, max_str=max_str) for k, v in list(val.items())[:16]}
+        return {
+            str(k)[:40]: _truncate_value(v, max_str=max_str)
+            for k, v in list(val.items())[:16]
+        }
     if isinstance(val, list | tuple):
         return [_truncate_value(item, max_str=max_str) for item in list(val)[:16]]
     if isinstance(val, int | float | bool) or val is None:
@@ -149,7 +163,7 @@ def _encode_tool_payload(
 
 
 class Orchestrator:
-    """Deterministic tool-call orchestrator (UDC-4 §5.3)."""
+    """Deterministic tool-call orchestrator (UDC-4 §5.3, UDC-7)."""
 
     def __init__(
         self,
@@ -161,6 +175,8 @@ class Orchestrator:
         local_result_broker: LocalResultBroker,
         last_target_store: LastTargetStore,
         audit: AuditLog,
+        scope_store: ApprovalScopeStore | None = None,
+        verifier: SignatureVerifier | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._host_repo = host_repo
@@ -170,7 +186,65 @@ class Orchestrator:
         self._local_result_broker = local_result_broker
         self._last_target_store = last_target_store
         self._audit = audit
+        self._scope_store = scope_store
+        self._verifier = verifier
         self._clock = clock or (lambda: datetime.now(UTC))
+
+    async def emergency_stop(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        reason: str = "owner_app",
+        request_id: str = "",
+    ) -> EmergencyStopSummary:
+        """Cancels all active invocations, rejects pending approvals, sends `xuna/stop`
+        to every live host, suspends R2+ grants, and audits `host.stopped` (`UDC-7` S7.3)."""
+        now = self._clock()
+        hosts = await self._host_repo.list_hosts(owner_id)
+        hosts_notified = 0
+        for host in hosts:
+            if host.status == HostStatus.ACTIVE and await self._hub.stop_host(
+                str(host.host_id), reason=reason
+            ):
+                hosts_notified += 1
+
+        broker_rejected = self._approval_broker.reject_all_for_owner(owner_id, now)
+        db_rejected = await self._approval_repo.reject_pending_for_owner(owner_id, now)
+        approvals_cancelled = max(len(broker_rejected), db_rejected)
+
+        self._local_result_broker.cancel_for_owner(owner_id)
+        self._last_target_store.clear_owner(owner_id)
+        if self._scope_store is not None:
+            self._scope_store.clear_owner(owner_id)
+
+        grants_suspended = await self._host_repo.suspend_r2_plus_grants_for_owner(owner_id, now)
+
+        safe_reason = (
+            reason
+            if reason in ("owner_app", "owner_host", "owner_board", "revoked")
+            else "owner_app"
+        )
+        await self._audit.record(
+            AuditEvent(
+                owner_id=owner_id,
+                action=AuditAction.HOST_STOPPED,
+                occurred_at=now,
+                subject="all_hosts",
+                request_id=request_id,
+                metadata={
+                    "reason": safe_reason,
+                    "hostsNotified": hosts_notified,
+                    "approvalsCancelled": approvals_cancelled,
+                    "grantsSuspended": grants_suspended,
+                },
+            )
+        )
+        return EmergencyStopSummary(
+            stopped=True,
+            hosts_notified=hosts_notified,
+            approvals_cancelled=approvals_cancelled,
+            grants_suspended=grants_suspended,
+        )
 
     async def decide_approval(
         self,
@@ -178,6 +252,9 @@ class Orchestrator:
         approval_id: uuid.UUID,
         owner_id: uuid.UUID,
         decision: ApprovalDecision,
+        scope: ApprovalScope = ApprovalScope.ONCE,
+        signature: bytes | None = None,
+        signer_public_key: bytes | None = None,
         request_id: str = "",
     ) -> ApprovalRequest | None:
         """Owner-scoped, idempotent approval decision entry point
@@ -187,12 +264,62 @@ class Orchestrator:
         if existing is None or existing.owner_id != owner_id:
             return None
 
+        # R3 and board.media_key are always `once` (`UDC-7` S7.1).
+        if scope == ApprovalScope.CONVERSATION_15M and (
+            existing.risk.level >= RiskTier.R3.level or existing.host_id is None
+        ):
+            raise ValueError("r3_requires_once_scope")
+
+        resolved_pub_key = signer_public_key
+        if (
+            decision == ApprovalDecision.APPROVE
+            and existing.risk == RiskTier.R3
+            and existing.host_id is not None
+            and signature is not None
+        ):
+            if len(signature) != 64:
+                raise ValueError("approval_signature_invalid")
+            expires_iso = existing.expires_at.astimezone(UTC).isoformat()
+            msg = approval_proof_message(
+                str(existing.approval_id),
+                existing.args_sha256,
+                str(existing.host_id),
+                expires_iso,
+            )
+            owned_hosts = await self._host_repo.list_hosts(owner_id)
+            phone_keys = [
+                h.public_key
+                for h in owned_hosts
+                if h.status == HostStatus.ACTIVE
+                and h.platform in (HostPlatform.ANDROID, HostPlatform.IOS)
+            ]
+            if resolved_pub_key is not None:
+                validate_public_key(resolved_pub_key)
+                if phone_keys and resolved_pub_key not in phone_keys:
+                    raise ValueError("approval_signature_invalid")
+                candidate_keys = [resolved_pub_key]
+            else:
+                candidate_keys = phone_keys
+
+            if self._verifier is not None and candidate_keys:
+                matched_key: bytes | None = None
+                for cand in candidate_keys:
+                    if self._verifier.verify(cand, msg, signature):
+                        matched_key = cand
+                        break
+                if matched_key is None:
+                    raise ValueError("approval_signature_invalid")
+                resolved_pub_key = matched_key
+
         was_pending = existing.state == ApprovalState.PENDING
         updated = await self._approval_broker.decide(
             approval_id=approval_id,
             owner_id=owner_id,
             decision=decision,
             now=now,
+            scope=scope,
+            signature=signature,
+            signer_public_key=resolved_pub_key,
         )
         if updated is None:
             if existing.state != ApprovalState.PENDING:
@@ -211,6 +338,7 @@ class Orchestrator:
                     expires_at=existing.expires_at,
                     state=ApprovalState.EXPIRED,
                     decided_at=now,
+                    scope=existing.scope,
                 )
                 await self._approval_repo.save(expired_req)
                 return expired_req
@@ -232,6 +360,9 @@ class Orchestrator:
                 expires_at=existing.expires_at,
                 state=new_state,
                 decided_at=now,
+                scope=scope,
+                signature=signature,
+                signer_public_key=resolved_pub_key,
             )
 
         await self._approval_repo.save(updated)
@@ -255,6 +386,7 @@ class Orchestrator:
                         "approvalId": str(updated.approval_id),
                         "tool": updated.tool,
                         "risk": updated.risk.value,
+                        "scope": updated.scope.value,
                     },
                 )
             )
@@ -326,6 +458,7 @@ class Orchestrator:
         target_label = BOARD_TARGET_LABEL_EN if ctx.locale == Locale.EN else BOARD_TARGET_LABEL_VI
         invocation_id = str(uuid.uuid4())
         now = self._clock()
+        expires_at = now + timedelta(seconds=APPROVAL_TTL_SECONDS)
 
         approval_req = ApprovalRequest(
             approval_id=uuid.uuid4(),
@@ -337,7 +470,7 @@ class Orchestrator:
             risk=RiskTier.R2,
             summary=ActionSummary.format_pending(BOARD_TOOL, clean_args, target_label, ctx.locale),
             created_at=now,
-            expires_at=now + timedelta(seconds=APPROVAL_TTL_SECONDS),
+            expires_at=expires_at,
         )
         await self._approval_repo.save(approval_req)
         await self._approval_broker.create(approval_req)
@@ -349,6 +482,9 @@ class Orchestrator:
                 summary=approval_req.summary,
                 risk=approval_req.risk.value,
                 expires_in=APPROVAL_TTL_SECONDS,
+                host_id=None,
+                args_sha256=approval_req.args_sha256,
+                expires_at=expires_at.astimezone(UTC).isoformat(),
             )
         )
 
@@ -445,6 +581,7 @@ class Orchestrator:
         call: ToolCall,
         ctx: ActionContext,
     ) -> Message:
+        now = self._clock()
         hosts = await self._host_repo.list_hosts(ctx.owner_id)
         active_hosts = [h for h in hosts if h.status == HostStatus.ACTIVE]
 
@@ -470,7 +607,7 @@ class Orchestrator:
             grants = await self._host_repo.get_grants(host.host_id)
             grants_by_host[host.host_id] = grants
             online_hosts_with_tool.append(host)
-            if is_tool_granted(descriptor, grants):
+            if is_tool_granted(descriptor, grants, now):
                 eligible_hosts.append(host)
 
         if reference_descriptor is None:
@@ -502,7 +639,6 @@ class Orchestrator:
                 tool_call_id=call.id,
             )
 
-        now = self._clock()
         last_target = self._last_target_store.get_last_target(ctx.owner_id, ctx.pet_id, now)
         last_alias = last_target[0] if last_target is not None else None
         last_at = last_target[1] if last_target is not None else None
@@ -594,7 +730,7 @@ class Orchestrator:
                 tool_call_id=call.id,
             )
 
-        if not is_tool_granted(descriptor, host_grants):
+        if not is_tool_granted(descriptor, host_grants, now):
             await self._audit.record(
                 AuditEvent(
                     owner_id=ctx.owner_id,
@@ -632,61 +768,130 @@ class Orchestrator:
 
         approval_req: ApprovalRequest | None = None
         if descriptor.risk.level >= RiskTier.R2.level:
-            approval_req = ApprovalRequest(
-                approval_id=uuid.uuid4(),
-                owner_id=ctx.owner_id,
-                host_id=host.host_id,
-                target_alias=target_alias,
-                tool=descriptor.name,
-                args_sha256=args_sha256(clean_args),
-                risk=descriptor.risk,
-                summary=ActionSummary.format_pending(
-                    descriptor.name, clean_args, target_alias, ctx.locale
-                ),
-                created_at=now,
-                expires_at=now + timedelta(seconds=APPROVAL_TTL_SECONDS),
-            )
-            await self._approval_repo.save(approval_req)
-            await self._approval_broker.create(approval_req)
-
-            await ctx.emit_event(
-                ActionPendingEvent(
-                    approval_id=str(approval_req.approval_id),
-                    target=target_alias,
-                    summary=approval_req.summary,
-                    risk=approval_req.risk.value,
-                    expires_in=APPROVAL_TTL_SECONDS,
+            has_15m_scope = (
+                descriptor.risk == RiskTier.R2
+                and self._scope_store is not None
+                and self._scope_store.has_valid_scope(
+                    ctx.owner_id, ctx.pet_id, host.host_id, descriptor.name, now
                 )
             )
-
-            decision_state = await self._approval_broker.wait(
-                approval_req.approval_id,
-                timeout_s=float(APPROVAL_TTL_SECONDS),
-            )
-            await self._sync_approval_after_wait(approval_req, decision_state, ctx.request_id)
-
-            if decision_state != ApprovalState.APPROVED:
-                final_status = "rejected" if decision_state == ApprovalState.REJECTED else "expired"
-                await ctx.emit_event(
-                    ActionResultEvent(
-                        invocation_id=invocation_id,
-                        target=target_alias,
-                        summary=ActionSummary.format_result(
-                            descriptor.name,
-                            clean_args,
-                            target_alias,
-                            final_status,
-                            ctx.locale,
-                        ),
-                        status=final_status,
-                        gesture=gesture_for_action_status(final_status),
+            expires_at = now + timedelta(seconds=APPROVAL_TTL_SECONDS)
+            if has_15m_scope:
+                approval_req = ApprovalRequest(
+                    approval_id=uuid.uuid4(),
+                    owner_id=ctx.owner_id,
+                    host_id=host.host_id,
+                    target_alias=target_alias,
+                    tool=descriptor.name,
+                    args_sha256=args_sha256(clean_args),
+                    risk=descriptor.risk,
+                    summary=ActionSummary.format_pending(
+                        descriptor.name, clean_args, target_alias, ctx.locale
+                    ),
+                    created_at=now,
+                    expires_at=expires_at,
+                    state=ApprovalState.APPROVED,
+                    decided_at=now,
+                    scope=ApprovalScope.CONVERSATION_15M,
+                )
+                await self._approval_repo.save(approval_req)
+                await self._audit.record(
+                    AuditEvent(
+                        owner_id=ctx.owner_id,
+                        action=AuditAction.HOST_APPROVAL_GRANTED,
+                        occurred_at=now,
+                        subject=str(host.host_id),
+                        request_id=ctx.request_id,
+                        metadata={
+                            "approvalId": str(approval_req.approval_id),
+                            "tool": descriptor.name,
+                            "risk": descriptor.risk.value,
+                            "scope": ApprovalScope.CONVERSATION_15M.value,
+                        },
                     )
                 )
-                return Message(
-                    role=Role.TOOL,
-                    content=_encode_tool_payload(final_status),
-                    tool_call_id=call.id,
+            else:
+                approval_req = ApprovalRequest(
+                    approval_id=uuid.uuid4(),
+                    owner_id=ctx.owner_id,
+                    host_id=host.host_id,
+                    target_alias=target_alias,
+                    tool=descriptor.name,
+                    args_sha256=args_sha256(clean_args),
+                    risk=descriptor.risk,
+                    summary=ActionSummary.format_pending(
+                        descriptor.name, clean_args, target_alias, ctx.locale
+                    ),
+                    created_at=now,
+                    expires_at=expires_at,
                 )
+                await self._approval_repo.save(approval_req)
+                await self._approval_broker.create(approval_req)
+
+                await ctx.emit_event(
+                    ActionPendingEvent(
+                        approval_id=str(approval_req.approval_id),
+                        target=target_alias,
+                        summary=approval_req.summary,
+                        risk=approval_req.risk.value,
+                        expires_in=APPROVAL_TTL_SECONDS,
+                        host_id=str(host.host_id),
+                        args_sha256=approval_req.args_sha256,
+                        expires_at=expires_at.astimezone(UTC).isoformat(),
+                    )
+                )
+
+                decision_state = await self._approval_broker.wait(
+                    approval_req.approval_id,
+                    timeout_s=float(APPROVAL_TTL_SECONDS),
+                )
+                await self._sync_approval_after_wait(approval_req, decision_state, ctx.request_id)
+
+                if decision_state != ApprovalState.APPROVED:
+                    final_status = (
+                        "rejected" if decision_state == ApprovalState.REJECTED else "expired"
+                    )
+                    await ctx.emit_event(
+                        ActionResultEvent(
+                            invocation_id=invocation_id,
+                            target=target_alias,
+                            summary=ActionSummary.format_result(
+                                descriptor.name,
+                                clean_args,
+                                target_alias,
+                                final_status,
+                                ctx.locale,
+                            ),
+                            status=final_status,
+                            gesture=gesture_for_action_status(final_status),
+                        )
+                    )
+                    return Message(
+                        role=Role.TOOL,
+                        content=_encode_tool_payload(final_status),
+                        tool_call_id=call.id,
+                    )
+
+                slot_req = self._approval_broker.get_slot_request(approval_req.approval_id)
+                if slot_req is not None:
+                    approval_req = slot_req
+                else:
+                    stored_req = await self._approval_repo.get(approval_req.approval_id)
+                    if stored_req is not None:
+                        approval_req = stored_req
+
+                if (
+                    approval_req.scope == ApprovalScope.CONVERSATION_15M
+                    and descriptor.risk == RiskTier.R2
+                    and self._scope_store is not None
+                ):
+                    self._scope_store.grant_scope(
+                        ctx.owner_id,
+                        ctx.pet_id,
+                        host.host_id,
+                        descriptor.name,
+                        self._clock(),
+                    )
 
             if args_sha256(clean_args) != approval_req.args_sha256:
                 await ctx.emit_event(
@@ -750,11 +955,21 @@ class Orchestrator:
                 "xuna/deadlineMs": DEADLINE_MS,
             }
             if approval_req is not None:
-                meta["xuna/approval"] = {
+                approval_meta: dict[str, object] = {
                     "approvalId": str(approval_req.approval_id),
                     "argsSha256": approval_req.args_sha256,
                     "expiresAt": approval_req.expires_at.astimezone(UTC).isoformat(),
+                    "scope": approval_req.scope.value,
                 }
+                if approval_req.signature is not None:
+                    approval_meta["signature"] = base64.b64encode(approval_req.signature).decode(
+                        "ascii"
+                    )
+                if approval_req.signer_public_key is not None:
+                    approval_meta["publicKey"] = base64.b64encode(
+                        approval_req.signer_public_key
+                    ).decode("ascii")
+                meta["xuna/approval"] = approval_meta
 
             call_params: dict[str, object] = {
                 "name": descriptor.name,
@@ -831,6 +1046,7 @@ class Orchestrator:
         if stored is not None and stored.state != ApprovalState.PENDING:
             return
 
+        slot_req = self._approval_broker.get_slot_request(req.approval_id)
         now = self._clock()
         updated = ApprovalRequest(
             approval_id=req.approval_id,
@@ -845,6 +1061,11 @@ class Orchestrator:
             expires_at=req.expires_at,
             state=state,
             decided_at=now,
+            scope=slot_req.scope if slot_req is not None else req.scope,
+            signature=slot_req.signature if slot_req is not None else req.signature,
+            signer_public_key=(
+                slot_req.signer_public_key if slot_req is not None else req.signer_public_key
+            ),
         )
         await self._approval_repo.save(updated)
         if state in (ApprovalState.APPROVED, ApprovalState.REJECTED):
@@ -864,6 +1085,7 @@ class Orchestrator:
                         "approvalId": str(req.approval_id),
                         "tool": req.tool,
                         "risk": req.risk.value,
+                        "scope": updated.scope.value,
                     },
                 )
             )

@@ -25,7 +25,10 @@ from xuna_backend.modules.accounts.application.ports import (
     InvalidTokenError,
     TokenVerifier,
 )
-from xuna_backend.modules.actions.api.routes import build_stream_orchestrator
+from xuna_backend.modules.actions.api.routes import (
+    _decode_b64_flex,
+    build_stream_orchestrator,
+)
 from xuna_backend.modules.actions.application.catalog import load_tool_catalog_for_owner
 from xuna_backend.modules.actions.application.orchestrator import (
     ActionContext,
@@ -36,6 +39,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
     ApprovalDecision,
+    ApprovalScope,
     BoardHidRequestEvent,
     LocalActionRequestEvent,
 )
@@ -570,16 +574,21 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         {"type": "gesture", "name": event.gesture.value}
                                     )
                                 elif isinstance(event, ActionPendingEvent):
-                                    await websocket.send_json(
-                                        {
-                                            "type": "action_pending",
-                                            "approvalId": event.approval_id,
-                                            "target": event.target,
-                                            "summary": event.summary,
-                                            "risk": event.risk,
-                                            "expiresIn": event.expires_in,
-                                        }
-                                    )
+                                    pending_msg: dict[str, Any] = {
+                                        "type": "action_pending",
+                                        "approvalId": event.approval_id,
+                                        "target": event.target,
+                                        "summary": event.summary,
+                                        "risk": event.risk,
+                                        "expiresIn": event.expires_in,
+                                    }
+                                    if event.host_id is not None:
+                                        pending_msg["hostId"] = event.host_id
+                                    if event.args_sha256 is not None:
+                                        pending_msg["argsSha256"] = event.args_sha256
+                                    if event.expires_at is not None:
+                                        pending_msg["expiresAt"] = event.expires_at
+                                    await websocket.send_json(pending_msg)
                                 elif isinstance(event, BoardHidRequestEvent):
                                     await websocket.send_json(
                                         {
@@ -675,19 +684,60 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                 elif msg_type == "action.decide":
                     raw_aid = payload.get("approvalId")
                     raw_dec = payload.get("decision")
+                    raw_scope = payload.get("scope")
+                    raw_sig = payload.get("signature")
+                    raw_pub = payload.get("publicKey")
                     if isinstance(raw_aid, str) and isinstance(raw_dec, str):
                         try:
                             aid = uuid.UUID(raw_aid)
                             dec = ApprovalDecision(raw_dec)
+                            scope = (
+                                ApprovalScope(raw_scope)
+                                if isinstance(raw_scope, str)
+                                else ApprovalScope.ONCE
+                            )
+                            sig_bytes = (
+                                _decode_b64_flex(raw_sig, 64)
+                                if isinstance(raw_sig, str)
+                                else None
+                            )
+                            pub_bytes = (
+                                _decode_b64_flex(raw_pub, 65)
+                                if isinstance(raw_pub, str)
+                                else None
+                            )
                             ws_orch = build_stream_orchestrator(app.state)
                             await ws_orch.decide_approval(
                                 approval_id=aid,
                                 owner_id=owner.owner_id,
                                 decision=dec,
                                 request_id=session_id,
+                                scope=scope,
+                                signature=sig_bytes,
+                                signer_public_key=pub_bytes,
                             )
                         except ValueError:
                             pass
+
+                elif msg_type == "action.stop":
+                    raw_reason = payload.get("reason")
+                    ws_orch = build_stream_orchestrator(app.state)
+                    stop_summary = await ws_orch.emergency_stop(
+                        owner_id=owner.owner_id,
+                        reason=str(raw_reason)[:64]
+                        if isinstance(raw_reason, str) and raw_reason.strip()
+                        else "owner_ws",
+                        request_id=session_id,
+                    )
+                    await websocket.send_json(
+                        {
+                            "type": "action_stopped",
+                            "stopped": stop_summary.stopped,
+                            "hostsNotified": stop_summary.hosts_notified,
+                            "approvalsCancelled": stop_summary.approvals_cancelled,
+                            "grantsSuspended": stop_summary.grants_suspended,
+                        }
+                    )
 
                 elif msg_type == "action.result":
                     raw_inv = payload.get("invocationId")

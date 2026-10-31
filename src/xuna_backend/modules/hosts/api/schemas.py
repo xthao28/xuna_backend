@@ -1,8 +1,8 @@
-"""Pydantic request/response schemas for `/v1/hosts` HTTP endpoints (UDC-3 §5.4)."""
+"""Pydantic request/response schemas for `/v1/hosts` HTTP endpoints (UDC-3 §5.4, UDC-7 S7.1)."""
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from xuna_backend.modules.hosts.domain.entities import (
     HostPlatform,
@@ -46,7 +46,9 @@ class UpdateHostManifestRequest(_StrictSchema):
     tools: list[dict[str, Any]] = Field(max_length=32)
 
 
-class GrantItemInput(_StrictSchema):
+class GrantItemInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     family: Literal[
         "media",
         "window",
@@ -64,6 +66,8 @@ class GrantItemInput(_StrictSchema):
     ]
     maxRisk: Literal["R0", "R1", "R2", "R3"]
     enabled: bool
+    expiresAt: AwareDatetime | None = None
+    suspended: bool | None = None
 
     def parsed_family(self) -> ToolFamily:
         return ToolFamily(self.family)
@@ -72,9 +76,12 @@ class GrantItemInput(_StrictSchema):
         return RiskTier(self.maxRisk)
 
 
-class SetHostGrantsRequest(_StrictSchema):
+class SetHostGrantsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
     schemaVersion: Literal[1] = 1
-    grants: list[GrantItemInput] = Field(min_length=1, max_length=9)
+    grants: list[GrantItemInput] = Field(default_factory=list, max_length=16)
+    suspendAll: bool | None = None
 
 
 class DevInvokeToolRequest(_StrictSchema):

@@ -1,12 +1,12 @@
-"""`GET /v1/hosts/connect`: Host Agent WebSocket over XTP v1 (UDC-3 §5.2, §5.4).
+"""`GET /v1/hosts/connect`: Host Agent WebSocket over XTP v1 (UDC-3 §5.2, §5.4, UDC-7).
 
 Supports:
 - Mode A (Enrollment): `xuna/hello {enroll}` -> `xuna/challenge {purpose:1}` ->
   `xuna/proof {purpose:1}` -> `xuna/enrollPending` -> owner confirms ->
   `xuna/enrolled` -> `xuna/challenge {purpose:2}` -> `xuna/proof {purpose:2}` ->
-  `xuna/ready` -> `tools/list`.
+  `xuna/ready` -> `xuna/lanPeer` -> `tools/list`.
 - Mode B (Reconnect): `xuna/hello {hostId}` -> `xuna/challenge {purpose:2}` ->
-  `xuna/proof {purpose:2}` -> `xuna/ready` -> `tools/list`.
+  `xuna/proof {purpose:2}` -> `xuna/ready` -> `xuna/lanPeer` -> `tools/list`.
 """
 
 import asyncio
@@ -31,14 +31,17 @@ from xuna_backend.modules.hosts.application.use_cases import (
     StartEnrollmentCommand,
     close_host_session,
     open_host_session,
+    owner_phone_public_keys_b64,
     record_duplicate_session_rejection,
     record_manifest,
     start_enrollment,
     touch_host_session,
+    update_host_lan_peer,
 )
 from xuna_backend.modules.hosts.application.xtp_frames import (
     ParsedHelloEnroll,
     ParsedHelloReconnect,
+    ParsedLanPeer,
     ParsedPing,
     ParsedProgress,
     ParsedProof,
@@ -50,6 +53,7 @@ from xuna_backend.modules.hosts.application.xtp_frames import (
     enroll_pending_notification_frame,
     enrolled_notification_frame,
     hello_response_frame,
+    lan_peer_notification_frame,
     parse_agent_frame,
     parse_tools_list_result,
     ping_response_frame,
@@ -281,7 +285,15 @@ async def _serve_session(
     app = websocket.app
     next_manifest_req_id = -1
     pending_manifest_ids: set[int | str] = {"tools_list_initial"}
+
     await websocket.send_text(rpc_request_frame("tools_list_initial", "tools/list", {}))
+
+    if host.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS):
+        async with app.state.database.sessions() as db:
+            repos = _Repos(app, db)
+            phone_keys = await owner_phone_public_keys_b64(repos.hosts, host.owner_id)
+        if phone_keys:
+            await websocket.send_text(lan_peer_notification_frame(phone_keys))
 
     while True:
         raw = await _receive_text(
@@ -309,8 +321,30 @@ async def _serve_session(
         if isinstance(msg, ParsedProgress):
             continue
 
+        if isinstance(msg, ParsedLanPeer):
+            async with app.state.database.sessions() as db:
+                repos = _Repos(app, db)
+                await update_host_lan_peer(
+                    repos.hosts,
+                    host.host_id,
+                    msg.params.enabled,
+                    msg.params.certFingerprint,
+                    msg.params.port,
+                    datetime.now(UTC),
+                )
+                await db.commit()
+            continue
+
         if isinstance(msg, ParsedStop):
             logger.info("host stop notification reason=%s", msg.params.reason)
+            if hasattr(app.state, "approval_broker"):
+                from xuna_backend.modules.actions.api.routes import build_stream_orchestrator
+
+                orch = build_stream_orchestrator(app.state)
+                await orch.emergency_stop(
+                    owner_id=host.owner_id,
+                    reason=msg.params.reason,
+                )
             continue
 
         if isinstance(msg, ParsedRpcResponse):

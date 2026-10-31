@@ -1,4 +1,4 @@
-"""Domain entities, value objects, summaries, and stream events for `actions` (UDC-4 §5.2-§5.4).
+"""Domain entities, value objects, summaries, and stream events for `actions` (UDC-4, UDC-7).
 
 Stdlib only.
 """
@@ -6,7 +6,7 @@ Stdlib only.
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from urllib.parse import urlparse
 
@@ -16,6 +16,7 @@ from xuna_backend.modules.hosts.domain.entities import HostId, RiskTier
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 APPROVAL_TTL_SECONDS = 60
+CONVERSATION_SCOPE_TTL = timedelta(minutes=15)
 MAX_TOOL_OUTPUT_BYTES = 2048
 MAX_TOOL_ROUNDS = 3
 MAX_CALLS_PER_ROUND = 3
@@ -34,6 +35,11 @@ class ApprovalDecision(StrEnum):
     REJECT = "reject"
 
 
+class ApprovalScope(StrEnum):
+    ONCE = "once"
+    CONVERSATION_15M = "conversation_15m"
+
+
 @dataclass(frozen=True, slots=True)
 class ApprovalRequest:
     """Owner approval request bound to `args_sha256` (no raw arguments stored)."""
@@ -50,6 +56,9 @@ class ApprovalRequest:
     expires_at: datetime
     state: ApprovalState = ApprovalState.PENDING
     decided_at: datetime | None = None
+    scope: ApprovalScope = ApprovalScope.ONCE
+    signature: bytes | None = None
+    signer_public_key: bytes | None = None
 
     def __post_init__(self) -> None:
         if not _SHA256_HEX_RE.match(self.args_sha256):
@@ -62,9 +71,23 @@ class ApprovalRequest:
             raise ValueError("timestamps must be timezone-aware")
         if self.decided_at is not None and self.decided_at.tzinfo is None:
             raise ValueError("decided_at must be timezone-aware")
+        if self.signature is not None and len(self.signature) != 64:
+            raise ValueError("signature must be 64 bytes")
+        if self.signer_public_key is not None and (
+            len(self.signer_public_key) != 65 or self.signer_public_key[0] != 0x04
+        ):
+            raise ValueError("signer_public_key must be 65-byte uncompressed P-256 point")
 
     def is_expired(self, now: datetime) -> bool:
         return now >= self.expires_at
+
+
+@dataclass(frozen=True, slots=True)
+class EmergencyStopSummary:
+    stopped: bool
+    hosts_notified: int
+    approvals_cancelled: int
+    grants_suspended: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +99,9 @@ class ActionPendingEvent:
     summary: str
     risk: str
     expires_in: int
+    host_id: str | None = None
+    args_sha256: str = ""
+    expires_at: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +195,7 @@ class ActionSummary:
             case "board.media_key":
                 key = str(arguments.get("key", "play_pause"))
                 label = _BOARD_KEY_LABELS_VI.get(key, key)
-                return f"XUNA sẽ bấm {label} trên máy đang ghép"[:240]
+                return f"XUNA sẽ bấm {label} trên {target}"[:240]
             case "media.play_pause":
                 return f"Phát/tạm dừng nhạc trên {target}"[:240]
             case "media.next":
@@ -212,7 +238,7 @@ class ActionSummary:
             case "board.media_key":
                 key = str(arguments.get("key", "play_pause"))
                 label = _BOARD_KEY_LABELS_EN.get(key, key)
-                return f"XUNA will press {label} on the paired host"[:240]
+                return f"XUNA will press {label} on {target}"[:240]
             case "media.play_pause":
                 return f"Play/pause media on {target}"[:240]
             case "media.next":

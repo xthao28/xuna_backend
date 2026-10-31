@@ -1,8 +1,9 @@
-"""Tool catalog builder for LLM function calling (UDC-4 §5.2)."""
+"""Tool catalog builder for LLM function calling (UDC-4 §5.2, UDC-7 S7.1)."""
 
 import copy
 import uuid
 from collections.abc import Collection, Mapping, Sequence
+from datetime import UTC, datetime
 
 from xuna_backend.modules.actions.domain.schema_validator import (
     SchemaDefinitionError,
@@ -51,14 +52,20 @@ _PRIORITY_ORDER: tuple[str, ...] = (
 )
 
 
-def is_tool_granted(descriptor: ToolDescriptor, grants: Sequence[Grant]) -> bool:
-    """Returns True iff the tool is supported on the host and the host has an enabled
-    grant for `descriptor.family` whose `max_risk` covers `descriptor.risk`."""
+def is_tool_granted(
+    descriptor: ToolDescriptor,
+    grants: Sequence[Grant],
+    now: datetime | None = None,
+) -> bool:
+    """Returns True iff the tool is supported on the host and the host has an active
+    (enabled, non-expired, non-suspended) grant for `descriptor.family` whose `max_risk`
+    covers `descriptor.risk`."""
     if descriptor.permission == ToolPermissionState.UNSUPPORTED:
         return False
+    check_now = now or datetime.now(UTC)
     for grant in grants:
         if grant.family == descriptor.family:
-            return grant.enabled and grant.max_risk.allows(descriptor.risk)
+            return grant.is_active(check_now) and grant.max_risk.allows(descriptor.risk)
     return False
 
 
@@ -70,6 +77,7 @@ def build_tool_catalog(
     online_host_ids: Collection[str],
     client_caps: Collection[str],
     board_available: bool = False,
+    now: datetime | None = None,
 ) -> tuple[ToolSpec, ...]:
     """Builds up to `MAX_CATALOG_TOOLS` (`8`) `ToolSpec` entries for `ChatRequest.tools`.
 
@@ -82,11 +90,11 @@ def build_tool_catalog(
     if not include_host_tools and not include_board_tool:
         return ()
 
+    check_now = now or datetime.now(UTC)
     host_limit = MAX_CATALOG_TOOLS - (1 if include_board_tool else 0)
     specs: list[ToolSpec] = []
 
     if include_host_tools and host_limit > 0:
-        # Map tool_name -> (first valid ToolDescriptor, list of eligible aliases)
         by_tool: dict[str, tuple[ToolDescriptor, list[str]]] = {}
         active_online_hosts = [
             h for h in hosts if h.status == HostStatus.ACTIVE and str(h.host_id) in online_host_ids
@@ -101,7 +109,7 @@ def build_tool_catalog(
             for descriptor in manifest.tools:
                 if is_forbidden_tool_name(descriptor.name):
                     continue
-                if not is_tool_granted(descriptor, grants):
+                if not is_tool_granted(descriptor, grants, check_now):
                     continue
                 try:
                     SchemaValidator.validate_schema_definition(descriptor.input_schema)
@@ -164,6 +172,7 @@ async def load_tool_catalog_for_owner(
     host_repo: HostRepository,
     hub: HostSessionHub,
     self_host_id: str | None = None,
+    now: datetime | None = None,
 ) -> tuple[ToolSpec, ...]:
     """Loads the owner's hosts, manifests, and grants and builds the active tool catalog."""
     if CAP_HOST_ACTIONS_V1 not in client_caps and not (
@@ -195,4 +204,5 @@ async def load_tool_catalog_for_owner(
         online_host_ids=online_host_ids,
         client_caps=client_caps,
         board_available=board_available,
+        now=now,
     )

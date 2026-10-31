@@ -1,4 +1,4 @@
-"""HTTP routes for `/v1/hosts` enrollment, management and dev invocation (UDC-3 §5.4)."""
+"""HTTP routes for `/v1/hosts` enrollment, management and dev invocation (UDC-3 §5.4, UDC-7)."""
 
 import base64
 import secrets
@@ -33,6 +33,7 @@ from xuna_backend.modules.hosts.application.ports import (
 )
 from xuna_backend.modules.hosts.application.use_cases import (
     ClaimEnrollmentCommand,
+    GrantUpdateSpec,
     HostError,
     HostSummaryView,
     SelfEnrollHostCommand,
@@ -40,6 +41,7 @@ from xuna_backend.modules.hosts.application.use_cases import (
     confirm_enrollment,
     invoke_tool,
     list_hosts,
+    owner_phone_public_keys_b64,
     revoke_host,
     self_enroll_host,
     set_grants,
@@ -50,8 +52,16 @@ from xuna_backend.modules.hosts.domain.crypto import (
     NONCE_SIZE,
     PUBLIC_KEY_SIZE,
     SIGNATURE_SIZE,
+    public_key_fingerprint_b64url,
 )
-from xuna_backend.modules.hosts.domain.entities import Grant, Host, HostId, Manifest
+from xuna_backend.modules.hosts.domain.entities import (
+    Grant,
+    Host,
+    HostId,
+    HostPlatform,
+    HostStatus,
+    Manifest,
+)
 from xuna_backend.modules.hosts.domain.session import (
     HostRateLimiter,
     SelfEnrollmentChallengeStore,
@@ -110,6 +120,16 @@ def _grant_body(grant: Grant) -> dict[str, Any]:
         "maxRisk": grant.max_risk.value,
         "enabled": grant.enabled,
         "updatedAt": grant.updated_at.astimezone(UTC).isoformat(),
+        "expiresAt": (
+            grant.expires_at.astimezone(UTC).isoformat()
+            if grant.expires_at is not None
+            else None
+        ),
+        "suspendedAt": (
+            grant.suspended_at.astimezone(UTC).isoformat()
+            if grant.suspended_at is not None
+            else None
+        ),
     }
 
 
@@ -129,6 +149,10 @@ def _host_body(
         "agentVersion": host.agent_version,
         "status": host.status.value,
         "online": online,
+        "keyFingerprint": public_key_fingerprint_b64url(host.public_key),
+        "publicKey": base64.b64encode(host.public_key).decode("ascii"),
+        "lanFingerprint": host.lan_fingerprint,
+        "lanPort": host.lan_port,
         "createdAt": host.created_at.astimezone(UTC).isoformat(),
         "lastSeenAt": (
             host.last_seen_at.astimezone(UTC).isoformat() if host.last_seen_at is not None else None
@@ -225,8 +249,9 @@ async def self_enroll_host_endpoint(
     )
 
     async def action() -> StoredResponse:
+        repo = _host_repo(request, session)
         host, grants, manifest = await self_enroll_host(
-            _host_repo(request, session),
+            repo,
             verifier,
             _audit(request, session),
             claim_limiter,
@@ -237,6 +262,18 @@ async def self_enroll_host_endpoint(
             time.monotonic(),
             getattr(request.state, "request_id", ""),
         )
+        phone_keys = await owner_phone_public_keys_b64(repo, owner.owner_id)
+        all_hosts = await repo.list_hosts(owner.owner_id)
+        for h in all_hosts:
+            if h.status == HostStatus.ACTIVE and h.platform in (
+                HostPlatform.WINDOWS,
+                HostPlatform.MACOS,
+            ):
+                await hub.notify(
+                    str(h.host_id),
+                    "xuna/lanPeer",
+                    {"phonePublicKeys": phone_keys},
+                )
         return StoredResponse(
             HTTPStatus.OK,
             _host_body(
@@ -469,15 +506,27 @@ async def set_host_grants_endpoint(
         raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
     now = datetime.now(UTC)
 
+    specs: list[tuple[Any, Any, bool] | GrantUpdateSpec] = [
+        GrantUpdateSpec(
+            family=g.parsed_family(),
+            max_risk=g.parsed_max_risk(),
+            enabled=g.enabled,
+            expires_at=g.expiresAt,
+            suspended=g.suspended,
+        )
+        for g in body.grants
+    ]
+
     async def action() -> StoredResponse:
         grants = await set_grants(
             _host_repo(request, session),
             _audit(request, session),
             owner.owner_id,
             parsed_id,
-            [(g.parsed_family(), g.parsed_max_risk(), g.enabled) for g in body.grants],
+            specs,
             now,
             getattr(request.state, "request_id", ""),
+            suspend_all=body.suspendAll,
         )
         return StoredResponse(
             HTTPStatus.OK,

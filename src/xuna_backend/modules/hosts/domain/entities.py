@@ -323,10 +323,21 @@ class Grant:
     max_risk: RiskTier
     enabled: bool
     updated_at: datetime
+    expires_at: datetime | None = None
+    suspended_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if self.updated_at.tzinfo is None:
             raise ValueError("updated_at must be timezone-aware")
+        if self.expires_at is not None and self.expires_at.tzinfo is None:
+            raise ValueError("expires_at must be timezone-aware")
+        if self.suspended_at is not None and self.suspended_at.tzinfo is None:
+            raise ValueError("suspended_at must be timezone-aware")
+
+    def is_active(self, now: datetime | None = None) -> bool:
+        if not self.enabled or self.suspended_at is not None:
+            return False
+        return not (self.expires_at is not None and now is not None and now >= self.expires_at)
 
 
 def default_initial_grants(host_id: HostId, now: datetime) -> tuple[Grant, ...]:
@@ -424,6 +435,8 @@ class Host:
     status: HostStatus
     created_at: datetime
     last_seen_at: datetime | None = field(default=None)
+    lan_fingerprint: str | None = field(default=None)
+    lan_port: int | None = field(default=None)
 
     def __post_init__(self) -> None:
         if len(self.public_key) != 65 or self.public_key[0] != 0x04:

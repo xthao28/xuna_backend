@@ -1,10 +1,11 @@
-"""Application use cases for the Host Registry & XTP v1 module (UDC-3 §5.4).
+"""Application use cases for the Host Registry & XTP v1 module (UDC-3 §5.4, UDC-7).
 
 Covers enrollment (start, claim, confirm), authenticated sessions (open, touch,
-close), manifest recording, host listing, grant updates, revocation, and dev/test
-tool invocation.
+close), manifest recording, host listing, grant updates (including expiry and
+suspension), LAN peer metadata, revocation, and dev/test tool invocation.
 """
 
+import base64
 import hashlib
 import uuid
 from dataclasses import dataclass
@@ -102,6 +103,15 @@ class OpenHostSessionCommand:
     platform: HostPlatform
     os_version: str
     agent_version: str
+
+
+@dataclass(frozen=True, slots=True)
+class GrantUpdateSpec:
+    family: ToolFamily
+    max_risk: RiskTier
+    enabled: bool
+    expires_at: datetime | None = None
+    suspended: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,7 +255,6 @@ async def confirm_enrollment(
     if pending is None or pending.is_expired(now):
         if pending is not None:
             await enrollments.delete_pending(pending.pending_id)
-        # Idempotent retry check: if host already exists for this owner, return it.
         existing = await hosts.get_host(pending_id)
         if (
             existing is not None
@@ -344,6 +353,8 @@ async def open_host_session(
         status=HostStatus.ACTIVE,
         created_at=host.created_at,
         last_seen_at=now,
+        lan_fingerprint=host.lan_fingerprint,
+        lan_port=host.lan_port,
     )
     await hosts.save_host(updated)
     await audit.record(
@@ -398,6 +409,8 @@ async def touch_host_session(
         status=host.status,
         created_at=host.created_at,
         last_seen_at=now,
+        lan_fingerprint=host.lan_fingerprint,
+        lan_port=host.lan_port,
     )
     await hosts.save_host(updated)
     return None
@@ -423,8 +436,60 @@ async def close_host_session(
         status=host.status,
         created_at=host.created_at,
         last_seen_at=now,
+        lan_fingerprint=host.lan_fingerprint,
+        lan_port=host.lan_port,
     )
     await hosts.save_host(updated)
+
+
+async def update_host_lan_peer(
+    hosts: HostRepository,
+    host_id: HostId,
+    enabled: bool,
+    cert_fingerprint: str | None,
+    port: int | None,
+    now: datetime,
+) -> Host | None:
+    """Stores or clears the Desktop Agent's LAN certificate fingerprint & port (`UDC-7` S7.4)."""
+    host = await hosts.get_host(host_id)
+    if host is None or host.status != HostStatus.ACTIVE:
+        return None
+    updated = Host(
+        host_id=host.host_id,
+        owner_id=host.owner_id,
+        alias=host.alias,
+        platform=host.platform,
+        hostname=host.hostname,
+        os_version=host.os_version,
+        agent_version=host.agent_version,
+        public_key=host.public_key,
+        status=host.status,
+        created_at=host.created_at,
+        last_seen_at=now,
+        lan_fingerprint=cert_fingerprint if enabled else None,
+        lan_port=port if enabled else None,
+    )
+    await hosts.save_host(updated)
+    return updated
+
+
+async def owner_phone_public_keys_b64(
+    hosts: HostRepository,
+    owner_id: uuid.UUID,
+) -> list[str]:
+    """Returns base64-encoded 65-byte uncompressed P-256 public keys of the owner's
+    active mobile (`android`/`ios`) hosts (`UDC-7` S7.4, S7.5)."""
+    owned = await hosts.list_hosts(owner_id)
+    keys: list[str] = []
+    for h in owned:
+        if h.status == HostStatus.ACTIVE and h.platform in (
+            HostPlatform.ANDROID,
+            HostPlatform.IOS,
+        ):
+            encoded = base64.b64encode(h.public_key).decode("ascii")
+            if encoded not in keys:
+                keys.append(encoded)
+    return keys
 
 
 async def record_manifest(
@@ -536,6 +601,8 @@ async def self_enroll_host(
             status=HostStatus.ACTIVE,
             created_at=existing.created_at,
             last_seen_at=now,
+            lan_fingerprint=existing.lan_fingerprint,
+            lan_port=existing.lan_port,
         )
         await hosts.save_host(host)
         grants = await hosts.get_grants(host.host_id)
@@ -668,21 +735,61 @@ async def set_grants(
     audit: AuditLog,
     owner_id: uuid.UUID,
     host_id: HostId,
-    grants_input: list[tuple[ToolFamily, RiskTier, bool]],
+    grants_input: list[tuple[ToolFamily, RiskTier, bool] | GrantUpdateSpec],
     now: datetime,
     request_id: str = "",
+    *,
+    suspend_all: bool | None = None,
 ) -> list[Grant]:
     host = await hosts.get_host(host_id)
     if host is None or host.owner_id != owner_id or host.status != HostStatus.ACTIVE:
         raise HostError("not_found")
+    if not grants_input and suspend_all is None:
+        raise HostError("validation_failed", "grants or suspendAll must be provided")
+
     existing = {g.family: g for g in await hosts.get_grants(host_id)}
-    for family, max_risk, enabled in grants_input:
+
+    if suspend_all is not None:
+        for fam, prev in list(existing.items()):
+            existing[fam] = Grant(
+                host_id=host_id,
+                family=fam,
+                max_risk=prev.max_risk,
+                enabled=prev.enabled,
+                updated_at=now,
+                expires_at=prev.expires_at,
+                suspended_at=now if suspend_all else None,
+            )
+
+    for item in grants_input:
+        if isinstance(item, GrantUpdateSpec):
+            family = item.family
+            max_risk = item.max_risk
+            enabled = item.enabled
+            expires_at = item.expires_at
+            prev_grant = existing.get(family)
+            if item.suspended is True:
+                suspended_at: datetime | None = (
+                    prev_grant.suspended_at
+                    if prev_grant is not None and prev_grant.suspended_at is not None
+                    else now
+                )
+            elif item.suspended is False:
+                suspended_at = None
+            else:
+                suspended_at = prev_grant.suspended_at if prev_grant is not None else None
+        else:
+            family, max_risk, enabled = item
+            expires_at = None
+            suspended_at = None
         existing[family] = Grant(
             host_id=host_id,
             family=family,
             max_risk=max_risk,
             enabled=enabled,
             updated_at=now,
+            expires_at=expires_at,
+            suspended_at=suspended_at,
         )
     updated_list = sorted(existing.values(), key=lambda g: g.family.value)
     await hosts.set_grants(host_id, updated_list)
@@ -702,13 +809,14 @@ async def set_grants(
     return updated_list
 
 
-def _is_tool_granted(tool: ToolDescriptor, grants: list[Grant]) -> bool:
-    # R0 tools (read-only status/lists) are allowed on an enrolled active host.
+def _is_tool_granted(
+    tool: ToolDescriptor, grants: list[Grant], now: datetime | None = None
+) -> bool:
     if tool.risk == RiskTier.R0:
         return True
     for grant in grants:
         if grant.family == tool.family:
-            return grant.enabled and grant.max_risk.allows(tool.risk)
+            return grant.is_active(now) and grant.max_risk.allows(tool.risk)
     return False
 
 
@@ -744,7 +852,7 @@ async def invoke_tool(
     grants = await hosts.get_grants(host_id)
     invocation_id = str(uuid.uuid4())
 
-    if not _is_tool_granted(descriptor, grants):
+    if not _is_tool_granted(descriptor, grants, now):
         await audit.record(
             AuditEvent(
                 owner_id=owner_id,

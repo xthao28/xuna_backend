@@ -44,6 +44,7 @@ class AuditAction(StrEnum):
     HOST_CONNECTED = "host.connected"
     HOST_REJECTED = "host.rejected"
     HOST_REVOKED = "host.revoked"
+    HOST_STOPPED = "host.stopped"
     HOST_GRANT_CHANGED = "host.grant_changed"
     HOST_TOOL_INVOKED = "host.tool_invoked"
     HOST_TOOL_DENIED = "host.tool_denied"

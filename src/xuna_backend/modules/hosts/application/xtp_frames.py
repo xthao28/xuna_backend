@@ -96,6 +96,12 @@ class StopParamsModel(_StrictModel):
     reason: Literal["owner_app", "owner_host", "owner_board", "revoked"]
 
 
+class LanPeerParamsModel(_StrictModel):
+    enabled: bool
+    port: int | None = Field(default=47821, ge=1024, le=65535)
+    certFingerprint: str | None = Field(default=None, min_length=16, max_length=96)
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedHelloEnroll:
     request_id: int | str
@@ -135,6 +141,11 @@ class ParsedStop:
 
 
 @dataclass(frozen=True, slots=True)
+class ParsedLanPeer:
+    params: LanPeerParamsModel
+
+
+@dataclass(frozen=True, slots=True)
 class ParsedRpcResponse:
     request_id: int | str
     result: dict[str, object]
@@ -155,6 +166,7 @@ InboundAgentMessage = (
     | ParsedToolsListChanged
     | ParsedProgress
     | ParsedStop
+    | ParsedLanPeer
     | ParsedRpcResponse
     | ParsedRpcError
 )
@@ -279,6 +291,8 @@ def _parse_agent_notification(method: str, params: dict[str, object]) -> Inbound
             return ParsedProgress(params=ProgressParamsModel.model_validate(params))
         if method == "xuna/stop":
             return ParsedStop(params=StopParamsModel.model_validate(params))
+        if method == "xuna/lanPeer":
+            return ParsedLanPeer(params=LanPeerParamsModel.model_validate(params))
     except (ValidationError, ValueError) as error:
         raise HostSessionRejected(UNSUPPORTED_PROTOCOL) from error
     raise HostSessionRejected(UNSUPPORTED_PROTOCOL)
@@ -350,6 +364,16 @@ def ready_notification_frame(server_time_iso: str, heartbeat_s: int) -> str:
             "jsonrpc": "2.0",
             "method": "xuna/ready",
             "params": {"serverTime": server_time_iso, "heartbeatS": heartbeat_s},
+        }
+    )
+
+
+def lan_peer_notification_frame(phone_public_keys_b64: list[str]) -> str:
+    return _dump(
+        {
+            "jsonrpc": "2.0",
+            "method": "xuna/lanPeer",
+            "params": {"phonePublicKeys": phone_public_keys_b64},
         }
     )
 

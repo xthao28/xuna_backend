@@ -6,7 +6,15 @@ Tables: `hosts`, `host_enrollments`, `host_manifests`, `host_grants`.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    LargeBinary,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,6 +40,8 @@ class HostModel(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lan_fingerprint: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    lan_port: Mapped[int | None] = mapped_column(Integer(), nullable=True)
 
 
 class HostEnrollmentModel(Base):
@@ -86,3 +96,5 @@ class HostGrantModel(Base):
     max_risk: Mapped[str] = mapped_column(String(4), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    suspended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

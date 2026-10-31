@@ -1,6 +1,7 @@
 """SQLAlchemy repositories for the Host Registry & XTP v1 module (UDC-3 §5.4)."""
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,6 +58,8 @@ def _to_host(row: HostModel) -> Host:
         status=HostStatus(row.status),
         created_at=row.created_at,
         last_seen_at=row.last_seen_at,
+        lan_fingerprint=row.lan_fingerprint,
+        lan_port=row.lan_port,
     )
 
 
@@ -67,6 +70,8 @@ def _to_grant(row: HostGrantModel) -> Grant:
         max_risk=RiskTier(row.max_risk),
         enabled=row.enabled,
         updated_at=row.updated_at,
+        expires_at=row.expires_at,
+        suspended_at=row.suspended_at,
     )
 
 
@@ -149,6 +154,8 @@ class SqlHostRepository:
                     status=host.status.value,
                     created_at=host.created_at,
                     last_seen_at=host.last_seen_at,
+                    lan_fingerprint=host.lan_fingerprint,
+                    lan_port=host.lan_port,
                 )
             )
         else:
@@ -161,6 +168,8 @@ class SqlHostRepository:
             row.public_key = host.public_key
             row.status = host.status.value
             row.last_seen_at = host.last_seen_at
+            row.lan_fingerprint = host.lan_fingerprint
+            row.lan_port = host.lan_port
         await self._session.flush()
 
     async def list_hosts(self, owner_id: uuid.UUID) -> list[Host]:
@@ -194,9 +203,43 @@ class SqlHostRepository:
                     max_risk=grant.max_risk.value,
                     enabled=grant.enabled,
                     updated_at=grant.updated_at,
+                    expires_at=grant.expires_at,
+                    suspended_at=grant.suspended_at,
                 )
             )
         await self._session.flush()
+
+    async def suspend_r2_plus_grants_for_owner(
+        self, owner_id: uuid.UUID, now: datetime
+    ) -> int:
+        hosts = await self.list_hosts(owner_id)
+        suspended_count = 0
+        for host in hosts:
+            if host.status != HostStatus.ACTIVE:
+                continue
+            grants = await self.get_grants(host.host_id)
+            changed = False
+            next_grants: list[Grant] = []
+            for grant in grants:
+                if grant.max_risk.level >= RiskTier.R2.level and grant.suspended_at is None:
+                    next_grants.append(
+                        Grant(
+                            host_id=grant.host_id,
+                            family=grant.family,
+                            max_risk=grant.max_risk,
+                            enabled=grant.enabled,
+                            updated_at=now,
+                            expires_at=grant.expires_at,
+                            suspended_at=now,
+                        )
+                    )
+                    suspended_count += 1
+                    changed = True
+                else:
+                    next_grants.append(grant)
+            if changed:
+                await self.set_grants(host.host_id, next_grants)
+        return suspended_count
 
     async def get_manifest(self, host_id: HostId) -> Manifest | None:
         row = await self._session.get(HostManifestModel, host_id.value)

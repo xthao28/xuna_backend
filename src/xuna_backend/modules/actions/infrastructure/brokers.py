@@ -1,4 +1,4 @@
-"""In-memory brokers for approvals, local HID results, and last-target memory (UDC-4 §5.2)."""
+"""In-memory brokers for approvals, local HID results, last-target memory, and 15m scopes."""
 
 import asyncio
 import uuid
@@ -6,12 +6,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from xuna_backend.modules.actions.domain.entities import (
+    CONVERSATION_SCOPE_TTL,
     ApprovalDecision,
     ApprovalRequest,
+    ApprovalScope,
     ApprovalState,
     LocalActionReport,
 )
 from xuna_backend.modules.actions.domain.target_resolver import LAST_TARGET_TTL
+from xuna_backend.modules.hosts.domain.entities import HostId
 
 
 @dataclass
@@ -28,6 +31,10 @@ class InMemoryApprovalBroker:
 
     async def create(self, req: ApprovalRequest) -> None:
         self._slots[req.approval_id] = _ApprovalSlot(request=req)
+
+    def get_slot_request(self, approval_id: uuid.UUID) -> ApprovalRequest | None:
+        slot = self._slots.get(approval_id)
+        return slot.request if slot is not None else None
 
     async def wait(self, approval_id: uuid.UUID, timeout_s: float) -> ApprovalState:
         slot = self._slots.get(approval_id)
@@ -53,6 +60,7 @@ class InMemoryApprovalBroker:
                     expires_at=current.request.expires_at,
                     state=ApprovalState.EXPIRED,
                     decided_at=current.request.expires_at,
+                    scope=current.request.scope,
                 )
             return ApprovalState.EXPIRED
         current = self._slots.get(approval_id)
@@ -66,13 +74,16 @@ class InMemoryApprovalBroker:
         owner_id: uuid.UUID,
         decision: ApprovalDecision,
         now: datetime,
+        *,
+        scope: ApprovalScope = ApprovalScope.ONCE,
+        signature: bytes | None = None,
+        signer_public_key: bytes | None = None,
     ) -> ApprovalRequest | None:
         slot = self._slots.get(approval_id)
         if slot is None:
             return None
         if slot.request.owner_id != owner_id:
             return None
-        # Idempotent if already decided
         if slot.request.state != ApprovalState.PENDING:
             return slot.request
         if slot.request.is_expired(now):
@@ -89,6 +100,7 @@ class InMemoryApprovalBroker:
                 expires_at=slot.request.expires_at,
                 state=ApprovalState.EXPIRED,
                 decided_at=now,
+                scope=slot.request.scope,
             )
             slot.event.set()
             return slot.request
@@ -111,9 +123,37 @@ class InMemoryApprovalBroker:
             expires_at=slot.request.expires_at,
             state=new_state,
             decided_at=now,
+            scope=scope,
+            signature=signature,
+            signer_public_key=signer_public_key,
         )
         slot.event.set()
         return slot.request
+
+    def reject_all_for_owner(
+        self, owner_id: uuid.UUID, now: datetime
+    ) -> list[ApprovalRequest]:
+        rejected: list[ApprovalRequest] = []
+        for slot in list(self._slots.values()):
+            if slot.request.owner_id == owner_id and slot.request.state == ApprovalState.PENDING:
+                slot.request = ApprovalRequest(
+                    approval_id=slot.request.approval_id,
+                    owner_id=slot.request.owner_id,
+                    host_id=slot.request.host_id,
+                    target_alias=slot.request.target_alias,
+                    tool=slot.request.tool,
+                    args_sha256=slot.request.args_sha256,
+                    risk=slot.request.risk,
+                    summary=slot.request.summary,
+                    created_at=slot.request.created_at,
+                    expires_at=slot.request.expires_at,
+                    state=ApprovalState.REJECTED,
+                    decided_at=now,
+                    scope=slot.request.scope,
+                )
+                slot.event.set()
+                rejected.append(slot.request)
+        return rejected
 
     def cancel(self, approval_id: uuid.UUID) -> None:
         slot = self._slots.pop(approval_id, None)
@@ -178,6 +218,16 @@ class InMemoryLocalResultBroker:
             slot.event.set()
         return True
 
+    def cancel_for_owner(self, owner_id: uuid.UUID) -> int:
+        count = 0
+        for inv_id, slot in list(self._slots.items()):
+            if slot.owner_id == owner_id and slot.report is None:
+                slot.report = LocalActionReport(status="denied", error_code="stopped")
+                slot.event.set()
+                self._slots.pop(inv_id, None)
+                count += 1
+        return count
+
     def cancel(self, invocation_id: str) -> None:
         slot = self._slots.pop(invocation_id, None)
         if slot is not None:
@@ -204,3 +254,53 @@ class InMemoryLastTargetStore:
 
     def set_last_target(self, owner_id: uuid.UUID, pet_id: str, alias: str, now: datetime) -> None:
         self._entries[(owner_id, pet_id)] = (alias, now)
+
+    def clear_owner(self, owner_id: uuid.UUID) -> None:
+        for key in list(self._entries.keys()):
+            if key[0] == owner_id:
+                self._entries.pop(key, None)
+
+
+class InMemoryApprovalScopeStore:
+    """In-memory 15-minute `conversation_15m` R2 approval scope store (`UDC-7` S7.1)."""
+
+    def __init__(self) -> None:
+        self._scopes: dict[tuple[uuid.UUID, str, str, str], datetime] = {}
+
+    def has_valid_scope(
+        self,
+        owner_id: uuid.UUID,
+        pet_id: str,
+        host_id: HostId,
+        tool: str,
+        now: datetime,
+    ) -> bool:
+        key = (owner_id, pet_id, str(host_id), tool)
+        expires_at = self._scopes.get(key)
+        if expires_at is None:
+            return False
+        if now >= expires_at:
+            self._scopes.pop(key, None)
+            return False
+        return True
+
+    def grant_scope(
+        self,
+        owner_id: uuid.UUID,
+        pet_id: str,
+        host_id: HostId,
+        tool: str,
+        now: datetime,
+    ) -> datetime:
+        key = (owner_id, pet_id, str(host_id), tool)
+        expires_at = now + CONVERSATION_SCOPE_TTL
+        self._scopes[key] = expires_at
+        return expires_at
+
+    def clear_owner(self, owner_id: uuid.UUID) -> int:
+        count = 0
+        for key in list(self._scopes.keys()):
+            if key[0] == owner_id:
+                self._scopes.pop(key, None)
+                count += 1
+        return count

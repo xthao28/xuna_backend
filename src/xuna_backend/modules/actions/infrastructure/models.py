@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM model for `action_approvals` (UDC-4 §5.2).
+"""SQLAlchemy ORM model for `action_approvals` (UDC-4 §5.2, UDC-7).
 
 No raw arguments are stored — only `args_sha256` and the deterministic summary.
 """
@@ -6,7 +6,7 @@ No raw arguments are stored — only `args_sha256` and the deterministic summary
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, LargeBinary, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -38,3 +38,6 @@ class ActionApprovalModel(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scope: Mapped[str] = mapped_column(String(24), nullable=False, default="once")
+    signature: Mapped[bytes | None] = mapped_column(LargeBinary(64), nullable=True)
+    signer_public_key: Mapped[bytes | None] = mapped_column(LargeBinary(65), nullable=True)

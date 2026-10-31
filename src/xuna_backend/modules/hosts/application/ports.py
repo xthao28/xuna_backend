@@ -2,6 +2,7 @@
 
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Protocol
 
 from xuna_backend.modules.hosts.domain.entities import (
@@ -34,6 +35,10 @@ class HostRepository(Protocol):
     async def get_grants(self, host_id: HostId) -> list[Grant]: ...
 
     async def set_grants(self, host_id: HostId, grants: list[Grant]) -> None: ...
+
+    async def suspend_r2_plus_grants_for_owner(
+        self, owner_id: uuid.UUID, now: datetime
+    ) -> int: ...
 
     async def get_manifest(self, host_id: HostId) -> Manifest | None: ...
 
@@ -91,5 +96,7 @@ class HostSessionHub(Protocol):
         method: str,
         params: dict[str, object],
     ) -> None: ...
+
+    async def stop_host(self, host_id: str, reason: str = "owner_app") -> bool: ...
 
     async def disconnect_host(self, host_id: str, reason: str = "revoked") -> None: ...

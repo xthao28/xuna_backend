@@ -13,6 +13,7 @@ from xuna_backend.modules.hosts.domain.entities import HostId
 
 DOMAIN = b"xuna.host.proof.v1\x00"
 SAS_DOMAIN = b"xuna.host.sas.v1"
+APPROVAL_DOMAIN = b"xuna.approval.v1\x00"
 NONCE_SIZE = 32
 ENROLLMENT_CODE_SIZE = 16
 PUBLIC_KEY_SIZE = 65
@@ -104,6 +105,21 @@ def canonical_json(value: object) -> str:
 def args_sha256(arguments: dict[str, object]) -> str:
     """Computes `hex(sha256(canonical_json(arguments)))`."""
     return hashlib.sha256(canonical_json(arguments).encode("utf-8")).hexdigest()
+
+
+def approval_proof_message(
+    approval_id: str,
+    args_sha256_hex: str,
+    host_id: str,
+    expires_at_iso: str,
+) -> bytes:
+    """Builds the phone-signed R3 approval message (`UDC-7` S7.5, ADR-0013):
+    `b"xuna.approval.v1\\x00" || approvalId || "|" || argsSha256 || "|" || hostId || "|"
+    || expiresAt`."""
+    if not approval_id or not args_sha256_hex or not host_id or not expires_at_iso:
+        raise ValueError("approval proof fields must be non-empty")
+    body = f"{approval_id}|{args_sha256_hex}|{host_id}|{expires_at_iso}".encode()
+    return APPROVAL_DOMAIN + body
 
 
 def _reject_floats(value: object) -> None:

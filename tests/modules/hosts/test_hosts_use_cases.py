@@ -90,6 +90,26 @@ class FakeHostRepository:
     async def set_grants(self, host_id: HostId, grants: list[Grant]) -> None:
         self.grants[host_id.value] = list(grants)
 
+    async def suspend_r2_plus_grants_for_owner(
+        self, owner_id: uuid.UUID, now: datetime
+    ) -> int:
+        from dataclasses import replace
+
+        suspended = 0
+        for h in self.hosts.values():
+            if h.owner_id != owner_id:
+                continue
+            current = self.grants.get(h.host_id.value, [])
+            updated: list[Grant] = []
+            for g in current:
+                if g.enabled and g.max_risk.level >= RiskTier.R2.level and g.suspended_at is None:
+                    updated.append(replace(g, suspended_at=now, updated_at=now))
+                    suspended += 1
+                else:
+                    updated.append(g)
+            self.grants[h.host_id.value] = updated
+        return suspended
+
     async def get_manifest(self, host_id: HostId) -> Manifest | None:
         return self.manifests.get(host_id.value)
 
