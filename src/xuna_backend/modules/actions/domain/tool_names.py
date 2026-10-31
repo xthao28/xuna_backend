@@ -41,6 +41,9 @@ WORKFLOW_TEMPLATES: tuple[str, ...] = (
     "cast_to_tv",
     "cinema_mode",
     "goodnight_mode",
+    "meeting_ready",
+    "preview_on_phone",
+    "daily_standup",
 )
 WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -110,6 +113,11 @@ WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
         "light_entity_id": {
             "type": "string",
             "maxLength": 80,
+        },
+        "port": {
+            "type": "integer",
+            "minimum": 1024,
+            "maximum": 65535,
         },
     },
     "required": ["template"],

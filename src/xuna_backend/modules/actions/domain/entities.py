@@ -304,6 +304,18 @@ class ActionSummary:
                 ent = str(arguments.get("entityId", "thiết bị"))[:40]
                 act = str(arguments.get("action", "toggle"))[:24]
                 return f"Điều khiển {ent} ({act}) qua {target}"[:240]
+            case "clipboard.write":
+                raw_txt = str(arguments.get("text", ""))
+                return f"Chép {len(raw_txt)} ký tự vào clipboard của {target}"[:240]
+            case "meeting.status":
+                return f"Kiểm tra trạng thái cuộc họp và mic trên {target}"[:240]
+            case "meeting.control":
+                act = str(arguments.get("action", "toggle_mic"))[:24]
+                return f"Điều khiển mic cuộc họp ({act}) trên {target}"[:240]
+            case "dev.ports":
+                return f"Quét cổng dev localhost trên {target}"[:240]
+            case "system.vitals":
+                return f"Kiểm tra pin, RAM và ổ cứng trên {target}"[:240]
             case _:
                 return f"Thực hiện {tool} trên {target}"[:240]
 
@@ -411,6 +423,18 @@ class ActionSummary:
                 ent = str(arguments.get("entityId", "device"))[:40]
                 act = str(arguments.get("action", "toggle"))[:24]
                 return f"Control {ent} ({act}) via {target}"[:240]
+            case "clipboard.write":
+                raw_txt = str(arguments.get("text", ""))
+                return f"Copy {len(raw_txt)} characters to clipboard on {target}"[:240]
+            case "meeting.status":
+                return f"Check meeting & microphone status on {target}"[:240]
+            case "meeting.control":
+                act = str(arguments.get("action", "toggle_mic"))[:24]
+                return f"Control meeting microphone ({act}) on {target}"[:240]
+            case "dev.ports":
+                return f"Scan active localhost dev ports on {target}"[:240]
+            case "system.vitals":
+                return f"Check battery, memory, and disk vitals on {target}"[:240]
             case _:
                 return f"Run {tool} on {target}"[:240]
 

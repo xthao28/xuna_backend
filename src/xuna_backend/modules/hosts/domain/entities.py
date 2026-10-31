@@ -279,8 +279,10 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
     family_str = name.split(".", 1)[0]
     if family_str == "browser" or name == "tv.cast_media":
         family = ToolFamily.URL
-    elif name in ("tv.list_devices", "tv.control"):
+    elif name in ("tv.list_devices", "tv.control") or family_str == "meeting":
         family = ToolFamily.MEDIA
+    elif family_str == "system":
+        family = ToolFamily.HOST
     elif name == "tv.launch_app" or family_str in (
         "display",
         "workspace",
@@ -290,6 +292,8 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
         "beam",
         "action",
         "smarthome",
+        "clipboard",
+        "dev",
     ):
         family = ToolFamily.APP
     else:

@@ -99,6 +99,9 @@ class WorkflowTemplate(StrEnum):
     CAST_TO_TV = "cast_to_tv"
     CINEMA_MODE = "cinema_mode"
     GOODNIGHT_MODE = "goodnight_mode"
+    MEETING_READY = "meeting_ready"
+    PREVIEW_ON_PHONE = "preview_on_phone"
+    DAILY_STANDUP = "daily_standup"
 
 
 HARD_DENIED_SMARTHOME_DOMAINS: frozenset[str] = frozenset(
@@ -421,6 +424,23 @@ def extract_custom_workflow_candidate(
                     risk=RiskTier.R2,
                 )
             )
+        elif "tắt mic" in low or "bật mic" in low:
+            mic_act = "mute_mic" if "tắt mic" in low else "unmute_mic"
+            steps.append(
+                CustomWorkflowStep(
+                    tool="meeting.control",
+                    arguments={"action": mic_act},
+                    risk=RiskTier.R1,
+                )
+            )
+        elif "kiểm tra pin" in low or "xem pin" in low:
+            steps.append(
+                CustomWorkflowStep(
+                    tool="system.vitals",
+                    arguments={},
+                    risk=RiskTier.R1,
+                )
+            )
         elif low.startswith("mở "):
             app_id = clause[3:].strip().split()[0].lower()
             if app_id:
@@ -641,6 +661,36 @@ class CompositeWorkflowRunner:
             )
         if template == WorkflowTemplate.GOODNIGHT_MODE:
             return await self._run_goodnight_mode(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.MEETING_READY:
+            return await self._run_meeting_ready(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.PREVIEW_ON_PHONE:
+            return await self._run_preview_on_phone(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.DAILY_STANDUP:
+            return await self._run_daily_standup(
                 call=call,
                 clean_args=clean_args,
                 owner_id=owner_id,
@@ -3435,6 +3485,586 @@ class CompositeWorkflowRunner:
                     "mediaPaused": media_paused,
                     "locked": True,
                     "goodnightSummary": goodnight_summary,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_meeting_ready(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """UDC-15 S15.2: `meeting_ready` (`R1` workflow, no phone approval needed):
+        1. Pauses local PC music (`media.play_pause`) if playing.
+        2. Mutes Smart TV (`tv.control(mute_toggle)`) if advertised.
+        3. Mutes meeting microphone (`meeting.control(mute_mic)`).
+        4. Reads meeting status (`meeting.status`)."""
+        now = self._clock()
+        online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
+
+        desktop_candidates: list[Host] = []
+        for h in online:
+            m = manifests[h.host_id]
+            g = grants[h.host_id]
+            if h.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS, HostPlatform.LINUX):
+                mc_desc = m.find_tool("meeting.control")
+                if mc_desc is not None and is_tool_granted(mc_desc, g, now):
+                    desktop_candidates.append(h)
+
+        if not desktop_candidates:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+
+        req_dst = str(
+            clean_args.get("destination_target")
+            or clean_args.get("source_target")
+            or ""
+        ).strip()
+        if req_dst:
+            matched = [
+                h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()
+            ]
+            if not matched:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "ask_target",
+                        choices=[str(h.alias) for h in desktop_candidates],
+                    ),
+                    tool_call_id=call.id,
+                )
+            pc_host = matched[0]
+        elif len(desktop_candidates) == 1:
+            pc_host = desktop_candidates[0]
+        else:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "ask_target",
+                    choices=[str(h.alias) for h in desktop_candidates],
+                ),
+                tool_call_id=call.id,
+            )
+
+        manifest = manifests[pc_host.host_id]
+        host_grants = grants[pc_host.host_id]
+
+        # 1. Pause media if playing
+        media_paused = False
+        np_desc = manifest.find_tool("media.now_playing")
+        pp_desc = manifest.find_tool("media.play_pause")
+        if (
+            np_desc is not None
+            and pp_desc is not None
+            and is_tool_granted(np_desc, host_grants, now)
+            and is_tool_granted(pp_desc, host_grants, now)
+        ):
+            np_status, np_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="media.now_playing",
+                arguments={},
+                risk=RiskTier.R0,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if np_status == "ok" and np_sc.get("state") == "playing":
+                pp_status, _ = await self._invoke_host_step(
+                    owner_id=owner_id,
+                    host=pc_host,
+                    tool_name="media.play_pause",
+                    arguments={},
+                    risk=RiskTier.R1,
+                    request_id=request_id,
+                    self_host_id=self_host_id,
+                    emit_event=emit_event,
+                )
+                media_paused = pp_status == "ok"
+
+        # 2. Mute Smart TV if tv.control is granted
+        tv_muted = False
+        tv_desc = manifest.find_tool("tv.control")
+        if tv_desc is not None and is_tool_granted(tv_desc, host_grants, now):
+            tv_args: dict[str, object] = {"action": "mute_toggle"}
+            if clean_args.get("tv_device"):
+                tv_args["device"] = str(clean_args["tv_device"]).strip()
+            tv_status, _ = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="tv.control",
+                arguments=tv_args,
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            tv_muted = tv_status == "ok"
+
+        # 3. Mute meeting microphone
+        mc_status, mc_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="meeting.control",
+            arguments={"action": "mute_mic"},
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if mc_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    mc_status,
+                    {
+                        "template": WorkflowTemplate.MEETING_READY.value,
+                        "failedStep": 3,
+                        "failedTool": "meeting.control",
+                        "failedHost": str(pc_host.alias),
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        # 4. Read meeting status if granted
+        meeting_app = str(mc_sc.get("app", "none"))
+        in_meeting = False
+        ms_desc = manifest.find_tool("meeting.status")
+        if ms_desc is not None and is_tool_granted(ms_desc, host_grants, now):
+            ms_status, ms_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="meeting.status",
+                arguments={},
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if ms_status == "ok":
+                in_meeting = bool(ms_sc.get("inMeeting", False))
+                meeting_app = str(ms_sc.get("app", meeting_app))
+
+        summary = (
+            f"Meeting ready on {pc_host.alias} (mic muted, app: {meeting_app})"
+            if locale == Locale.EN
+            else f"Sẵn sàng họp trên {pc_host.alias} (đã tắt nhạc/TV, khóa mic trên {meeting_app})"
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.MEETING_READY.value,
+                    "host": str(pc_host.alias),
+                    "inMeeting": in_meeting,
+                    "app": meeting_app,
+                    "micMuted": True,
+                    "mediaPaused": media_paused,
+                    "tvMuted": tv_muted,
+                    "meetingSummary": summary,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_preview_on_phone(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """UDC-15 S15.3: `preview_on_phone` (`R2` cross-device LAN preview):
+        1. Calls `dev.ports` (`R1`) on the desktop host to discover active localhost ports + LAN IP.
+        2. Requests **one** `R2` plan approval (`"{pc} → {phone} · Mở bản xem thử cổng :{port}"`).
+        3. Returns the LAN preview URL for the phone without ever logging the URL (`UDC-T38`)."""
+        now = self._clock()
+        online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
+
+        desktop_candidates: list[Host] = []
+        phone_candidates: list[Host] = []
+        for h in online:
+            m = manifests[h.host_id]
+            g = grants[h.host_id]
+            if h.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS, HostPlatform.LINUX):
+                dp_desc = m.find_tool("dev.ports")
+                if dp_desc is not None and is_tool_granted(dp_desc, g, now):
+                    desktop_candidates.append(h)
+            if h.platform in (HostPlatform.ANDROID, HostPlatform.IOS):
+                phone_candidates.append(h)
+
+        if not desktop_candidates:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+
+        req_src = str(clean_args.get("source_target", "")).strip()
+        if req_src:
+            matched = [
+                h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()
+            ]
+            if not matched:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "ask_target",
+                        choices=[str(h.alias) for h in desktop_candidates],
+                    ),
+                    tool_call_id=call.id,
+                )
+            pc_host = matched[0]
+        elif len(desktop_candidates) == 1:
+            pc_host = desktop_candidates[0]
+        else:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "ask_target",
+                    choices=[str(h.alias) for h in desktop_candidates],
+                ),
+                tool_call_id=call.id,
+            )
+
+        phone_label = (
+            str(phone_candidates[0].alias)
+            if phone_candidates
+            else str(clean_args.get("destination_target", "Điện thoại") or "Điện thoại")
+        )
+
+        requested_port = clean_args.get("port")
+        dp_args: dict[str, object] = {}
+        if type(requested_port) is int:
+            dp_args["ports"] = [requested_port]
+
+        dp_status, dp_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="dev.ports",
+            arguments=dp_args,
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if dp_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    dp_status,
+                    {
+                        "template": WorkflowTemplate.PREVIEW_ON_PHONE.value,
+                        "failedStep": 1,
+                        "failedTool": "dev.ports",
+                        "failedHost": str(pc_host.alias),
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        active_ports_raw = dp_sc.get("activePorts")
+        active_ports = (
+            [p for p in active_ports_raw if isinstance(p, dict)]
+            if isinstance(active_ports_raw, list)
+            else []
+        )
+        if not active_ports:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "failed",
+                    {
+                        "template": WorkflowTemplate.PREVIEW_ON_PHONE.value,
+                        "reason": "no_active_dev_port",
+                        "host": str(pc_host.alias),
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        chosen = active_ports[0]
+        raw_port_val = chosen.get("port", 3000)
+        port_num = raw_port_val if type(raw_port_val) is int else 3000
+        proc_name = str(chosen.get("process", "dev-server"))
+        preview_url = str(chosen.get("url", f"http://127.0.0.1:{port_num}"))
+
+        plan_args: dict[str, object] = {
+            "template": WorkflowTemplate.PREVIEW_ON_PHONE.value,
+            "source": str(pc_host.alias),
+            "destination": phone_label,
+            "port": port_num,
+            "process": proc_name,
+        }
+        plan_summary = (
+            f"{pc_host.alias} → {phone_label} · Open dev preview :{port_num} ({proc_name})"
+            if locale == Locale.EN
+            else f"{pc_host.alias} → {phone_label} · Mở bản xem thử cổng :{port_num} ({proc_name})"
+        )
+        decision, _ = await self._request_single_plan_approval(
+            owner_id=owner_id,
+            host_id=pc_host.host_id,
+            target_label=f"{pc_host.alias} → {phone_label}",
+            tool_label="workflow.template",
+            summary=plan_summary,
+            approval_args=plan_args,
+            emit_event=emit_event,
+            request_id=request_id,
+        )
+        if decision != ApprovalState.APPROVED:
+            final_state = "rejected" if decision == ApprovalState.REJECTED else "expired"
+            await emit_event(
+                ActionResultEvent(
+                    invocation_id=str(uuid.uuid4()),
+                    target=f"{pc_host.alias} → {phone_label}",
+                    summary=f"✗ {plan_summary}"[:240],
+                    status=final_state,
+                    gesture=gesture_for_action_status(final_state),
+                )
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(final_state),
+                tool_call_id=call.id,
+            )
+
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=f"{pc_host.alias} → {phone_label}",
+                summary=f"✓ {plan_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.PREVIEW_ON_PHONE.value,
+                    "source": str(pc_host.alias),
+                    "destination": phone_label,
+                    "port": port_num,
+                    "process": proc_name,
+                    "previewUrl": preview_url,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_daily_standup(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """UDC-15 S15.5: `daily_standup` (`R1` Morning Briefing / Daily Standup):
+        1. Reads Git branch & uncommitted file counts (`workspace.git_summary`).
+        2. Checks active localhost dev ports (`dev.ports`).
+        3. Reads system battery, memory, and disk vitals (`system.vitals`).
+        4. Synthesizes a concise standup summary without requiring any `R2` approval."""
+        now = self._clock()
+        online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
+
+        desktop_candidates: list[Host] = []
+        for h in online:
+            m = manifests[h.host_id]
+            g = grants[h.host_id]
+            if h.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS, HostPlatform.LINUX):
+                sv_desc = m.find_tool("system.vitals")
+                git_desc = m.find_tool("workspace.git_summary")
+                if (sv_desc is not None and is_tool_granted(sv_desc, g, now)) or (
+                    git_desc is not None and is_tool_granted(git_desc, g, now)
+                ):
+                    desktop_candidates.append(h)
+
+        if not desktop_candidates:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+
+        req_dst = str(
+            clean_args.get("destination_target")
+            or clean_args.get("source_target")
+            or ""
+        ).strip()
+        if req_dst:
+            matched = [
+                h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()
+            ]
+            if not matched:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "ask_target",
+                        choices=[str(h.alias) for h in desktop_candidates],
+                    ),
+                    tool_call_id=call.id,
+                )
+            pc_host = matched[0]
+        elif len(desktop_candidates) == 1:
+            pc_host = desktop_candidates[0]
+        else:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "ask_target",
+                    choices=[str(h.alias) for h in desktop_candidates],
+                ),
+                tool_call_id=call.id,
+            )
+
+        manifest = manifests[pc_host.host_id]
+        host_grants = grants[pc_host.host_id]
+        requested_project = str(clean_args.get("project", "recent") or "recent").strip()
+
+        workspace_name = requested_project
+        branch = "main"
+        dirty_files = 0
+        git_desc = manifest.find_tool("workspace.git_summary")
+        if git_desc is not None and is_tool_granted(git_desc, host_grants, now):
+            git_status, git_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="workspace.git_summary",
+                arguments={"project": requested_project},
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if git_status == "ok":
+                workspace_name = str(git_sc.get("workspace", requested_project))
+                branch = str(git_sc.get("branch", "main"))
+                raw_mod = git_sc.get("modifiedCount", 0)
+                raw_unt = git_sc.get("untrackedCount", 0)
+                mod_cnt = raw_mod if type(raw_mod) is int else 0
+                unt_cnt = raw_unt if type(raw_unt) is int else 0
+                dirty_files = mod_cnt + unt_cnt
+
+        active_port_numbers: list[int] = []
+        dp_desc = manifest.find_tool("dev.ports")
+        if dp_desc is not None and is_tool_granted(dp_desc, host_grants, now):
+            dp_status, dp_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="dev.ports",
+                arguments={},
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if dp_status == "ok":
+                raw_ports = dp_sc.get("activePorts")
+                if isinstance(raw_ports, list):
+                    for item in raw_ports:
+                        if isinstance(item, dict):
+                            p_val = item.get("port")
+                            if type(p_val) is int:
+                                active_port_numbers.append(p_val)
+
+        battery_pct = 100
+        is_charging = True
+        mem_pct = 0
+        disk_free_gb = 0
+        health_status = "healthy"
+        sv_desc = manifest.find_tool("system.vitals")
+        if sv_desc is not None and is_tool_granted(sv_desc, host_grants, now):
+            sv_status, sv_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="system.vitals",
+                arguments={},
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if sv_status == "ok":
+                raw_bat = sv_sc.get("batteryPercent", 100)
+                raw_mem = sv_sc.get("memoryUsedPercent", 0)
+                raw_disk = sv_sc.get("diskFreeGb", 0)
+                battery_pct = raw_bat if type(raw_bat) is int else 100
+                is_charging = bool(sv_sc.get("isCharging", True))
+                mem_pct = raw_mem if type(raw_mem) is int else 0
+                disk_free_gb = raw_disk if type(raw_disk) is int else 0
+                health_status = str(sv_sc.get("healthStatus", "healthy"))
+
+        ports_label = (
+            ", ".join(f":{p}" for p in active_port_numbers)
+            if active_port_numbers
+            else ("none" if locale == Locale.EN else "không có")
+        )
+        standup_summary = (
+            f"Standup on {pc_host.alias}: {workspace_name}@{branch} ({dirty_files} uncommitted), "
+            f"dev ports [{ports_label}], battery {battery_pct}% / RAM {mem_pct}%"
+            if locale == Locale.EN
+            else (
+                f"Điểm danh trên {pc_host.alias}: dự án {workspace_name} nhánh {branch} "
+                f"({dirty_files} tệp đang sửa), cổng dev [{ports_label}], "
+                f"pin {battery_pct}% / RAM {mem_pct}%"
+            )
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {standup_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.DAILY_STANDUP.value,
+                    "host": str(pc_host.alias),
+                    "workspace": workspace_name,
+                    "branch": branch,
+                    "uncommittedFiles": dirty_files,
+                    "activePorts": active_port_numbers,
+                    "batteryPercent": battery_pct,
+                    "isCharging": is_charging,
+                    "memoryUsedPercent": mem_pct,
+                    "diskFreeGb": disk_free_gb,
+                    "healthStatus": health_status,
+                    "standupSummary": standup_summary,
                 },
             ),
             tool_call_id=call.id,
