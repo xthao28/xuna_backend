@@ -6,10 +6,13 @@ Server -> Client: hello.ok, stt.final, gesture, reply.delta, tts.start, binary a
                   tts.end, reply.finished, error.
 """
 
+import math
+import struct
 import time
 import uuid
 from collections.abc import AsyncIterator
 from enum import StrEnum
+from typing import Literal
 
 from xuna_backend.modules.cognition.application.ports import (
     SpeechRecognizer,
@@ -52,6 +55,19 @@ class VoiceSessionError(Exception):
         self.code = code
 
 
+VadEvent = Literal["vad.start", "vad.end"]
+
+
+def compute_pcm16_rms(chunk: bytes) -> float:
+    """Computes RMS amplitude of little-endian 16-bit PCM audio samples (WS-3 VAD)."""
+    sample_count = len(chunk) // 2
+    if sample_count <= 0:
+        return 0.0
+    samples = struct.unpack(f"<{sample_count}h", chunk[: sample_count * 2])
+    sum_sq = sum(s * s for s in samples)
+    return math.sqrt(sum_sq / sample_count)
+
+
 class VoiceSession:
     def __init__(
         self,
@@ -65,6 +81,11 @@ class VoiceSession:
         voice: str | None = None,
         speak: bool = True,
         sample_rate: int = 16000,
+        vad_enabled: bool = False,
+        vad_speech_rms_threshold: float = 500.0,
+        vad_silence_rms_threshold: float = 250.0,
+        vad_speech_frames_required: int = 2,
+        vad_silence_frames_required: int = 6,
     ) -> None:
         self.session_id = session_id
         self.pet_id = pet_id
@@ -76,23 +97,55 @@ class VoiceSession:
         self.voice = voice
         self.speak = speak
         self.sample_rate = sample_rate
+        self.vad_enabled = vad_enabled
+        self.vad_speech_rms_threshold = vad_speech_rms_threshold
+        self.vad_silence_rms_threshold = vad_silence_rms_threshold
+        self.vad_speech_frames_required = vad_speech_frames_required
+        self.vad_silence_frames_required = vad_silence_frames_required
 
         self.state = SessionState.IDLE
         self._audio_buffer = bytearray()
         self._listen_started_at: float = 0.0
+        self._vad_speech_active: bool = False
+        self._vad_speech_frames: int = 0
+        self._vad_silence_frames: int = 0
 
     def start_listening(self) -> None:
         # Can start listening from IDLE, AWAITING_COMMIT, or barge-in during REPLYING
         self._audio_buffer.clear()
         self.state = SessionState.LISTENING
         self._listen_started_at = time.monotonic()
+        self._vad_speech_active = False
+        self._vad_speech_frames = 0
+        self._vad_silence_frames = 0
 
-    def append_audio(self, chunk: bytes) -> None:
+    def append_audio(self, chunk: bytes) -> VadEvent | None:
         if self.state != SessionState.LISTENING:
-            return
+            return None
         if len(self._audio_buffer) + len(chunk) > MAX_AUDIO_BYTES:
             raise VoiceSessionError("audio_too_large")
         self._audio_buffer.extend(chunk)
+        if not self.vad_enabled:
+            return None
+        rms = compute_pcm16_rms(chunk)
+        if not self._vad_speech_active:
+            if rms >= self.vad_speech_rms_threshold:
+                self._vad_speech_frames += 1
+                if self._vad_speech_frames >= self.vad_speech_frames_required:
+                    self._vad_speech_active = True
+                    self._vad_silence_frames = 0
+                    return "vad.start"
+            else:
+                self._vad_speech_frames = 0
+        else:
+            if rms < self.vad_silence_rms_threshold:
+                self._vad_silence_frames += 1
+                if self._vad_silence_frames >= self.vad_silence_frames_required:
+                    self._vad_speech_active = False
+                    return "vad.end"
+            else:
+                self._vad_silence_frames = 0
+        return None
 
     async def stop_listening(self) -> tuple[str, int]:
         if self.state != SessionState.LISTENING:

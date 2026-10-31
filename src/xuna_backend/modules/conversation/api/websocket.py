@@ -360,6 +360,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
         voice=chosen_voice,
         speak=bool(hello.get("speak", True)),
         sample_rate=sample_rate,
+        vad_enabled=(hello.get("mode") == "vad"),
     )
 
     active_turn_task: asyncio.Task[None] | None = None
@@ -372,7 +373,15 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
             if message.get("bytes"):
                 try:
-                    session.append_audio(message["bytes"])
+                    vad_event = session.append_audio(message["bytes"])
+                    if vad_event == "vad.start":
+                        await websocket.send_json({"type": "vad.start"})
+                    elif vad_event == "vad.end":
+                        await websocket.send_json({"type": "vad.end"})
+                        transcript, asr_ms = await session.stop_listening()
+                        await websocket.send_json(
+                            {"type": "stt.final", "text": transcript, "asrMs": asr_ms}
+                        )
                 except VoiceSessionError as err:
                     await websocket.send_json({"type": "error", "code": err.code})
                 continue

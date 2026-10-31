@@ -1,0 +1,143 @@
+"""Pydantic request and response schemas for Symbiotic Evolution API (SYM-LIVE S-LIVE.3)."""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class DreamConsolidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = Field(default=1, ge=1, le=1)
+    project: str = Field(default="xuna_pet", min_length=1, max_length=80)
+    branch: str = Field(default="main", min_length=1, max_length=80)
+    dirtyCount: int = Field(default=0, ge=0, le=10000)
+    nextStepHint: str = Field(default="", max_length=240)
+    confirmedFacts: list[str] = Field(default_factory=list, max_length=10)
+    activePorts: list[int] = Field(default_factory=list, max_length=16)
+    continuousWorkMinutes: int = Field(default=0, ge=0, le=1440)
+    localHour: int = Field(default=10, ge=0, le=23)
+    previousGitDirtyCount: int = Field(default=0, ge=0, le=10000)
+    solvedCaseJustNow: bool = False
+    hoursSinceLastInteraction: float = Field(default=0.0, ge=0.0, le=8760.0)
+
+
+class DreamVignetteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    dreamId: str
+    titleVi: str
+    narrativeVi: str
+    dreamSymbols: list[str]
+    morningCuriosityHookVi: str
+    relatedProject: str
+    relatedBranch: str
+    createdAt: str
+
+
+class CoRegulationStateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    mode: str
+    petMoodHint: str
+    gestureHint: str
+    competenceDopamineBoost: float
+    speechVi: str
+    suggestedWorkflow: str | None = None
+
+
+class DreamConsolidateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = 1
+    dreamVignette: DreamVignetteResponse
+    coRegulationState: CoRegulationStateResponse
+
+
+class UnstuckCoachRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = Field(default=1, ge=1, le=1)
+    goal: str = Field(min_length=1, max_length=240)
+    project: str = Field(default="xuna_pet", min_length=1, max_length=80)
+    toolHistory: list[str] = Field(default_factory=list, max_length=50)
+
+
+class SerendipityNoteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    noteId: str
+    titleVi: str
+    sparkVi: str
+    connectedTopics: list[str]
+    suggestedActionVi: str
+    createdAt: str
+
+
+class HabitMacroProposalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    proposalId: str
+    titleVi: str
+    triggerPhraseVi: str
+    steps: list[str]
+    occurrences: int
+    maxRisk: str
+
+
+class UnstuckCoachResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = 1
+    goal: str
+    project: str
+    firstFiveMinuteStep: str
+    followUpSteps: list[str]
+    encouragementVi: str
+    serendipityNote: SerendipityNoteResponse
+    habitProposals: list[HabitMacroProposalResponse]
+
+
+class RecordSocialEncounterRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = Field(default=1, ge=1, le=1)
+    myShortId: str = Field(min_length=4, max_length=16)
+    peerShortId: str = Field(min_length=4, max_length=16)
+    peerTrait: str = Field(default="playfulness", min_length=1, max_length=32)
+    peerTint: str = Field(default="golden_amber", min_length=1, max_length=32)
+    sharedTrick: str = Field(default="spin_dance", min_length=1, max_length=32)
+
+
+class SocialEncounterNoteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    encounterId: str
+    peerShortId: str
+    peerTrait: str
+    peerTint: str
+    greetingKind: str
+    narrativeVi: str
+    sharedTrick: str
+    occurredAt: str
+
+
+class SocialPostcardResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    postcardId: str
+    fromShortId: str
+    toShortId: str
+    sharedSkillId: str
+    messageVi: str
+    signatureHex: str
+    createdAt: str
+
+
+class RecordSocialEncounterResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = 1
+    encounter: SocialEncounterNoteResponse
+    postcard: SocialPostcardResponse
+

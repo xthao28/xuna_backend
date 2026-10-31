@@ -57,6 +57,7 @@ from xuna_backend.modules.memory.api.routes import router as memory_router
 from xuna_backend.modules.memory.infrastructure.repository import SqlMemoryRepository
 from xuna_backend.modules.suggestions.api.routes import router as suggestions_router
 from xuna_backend.modules.suggestions.infrastructure.repository import SqlSuggestionRepository
+from xuna_backend.modules.symbiotic.api.routes import router as symbiotic_router
 from xuna_backend.modules.transport.api.routes import router as transport_router
 from xuna_backend.modules.transport.domain.device_session import (
     GatewayLimits,
@@ -236,6 +237,7 @@ def create_app(
     app.include_router(knowledge_router)
     app.include_router(backups_router)
     app.include_router(suggestions_router)
+    app.include_router(symbiotic_router)
     app.include_router(transport_router)
     wire_hosts(app)
     wire_actions(app)
