@@ -26,12 +26,15 @@ WORKFLOW_TEMPLATE_TOOL = "workflow.template"
 WORKFLOW_TEMPLATE_FUNCTION_NAME = "workflow_template"
 WORKFLOW_TEMPLATE_DESCRIPTION = (
     "Run a deterministic cross-device workflow template (`link_to_phone`, "
-    "`continue_media`, or `pause_everywhere`) with a single owner approval."
+    "`continue_media`, `pause_everywhere`, `resume_work`, or `wrap_up_work`) "
+    "with a single owner approval."
 )
 WORKFLOW_TEMPLATES: tuple[str, ...] = (
     "link_to_phone",
     "continue_media",
     "pause_everywhere",
+    "resume_work",
+    "wrap_up_work",
 )
 WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -55,6 +58,18 @@ WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
         "player_id": {
             "type": "string",
             "maxLength": 64,
+        },
+        "project": {
+            "type": "string",
+            "maxLength": 64,
+        },
+        "agent": {
+            "type": "string",
+            "enum": ["auto", "claude_code", "antigravity", "cursor", "vscode", "codex"],
+        },
+        "prompt": {
+            "type": "string",
+            "maxLength": 500,
         },
     },
     "required": ["template"],

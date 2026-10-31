@@ -26,6 +26,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
     BoardHidRequestEvent,
+    HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
 from xuna_backend.modules.cognition.application.ports import (
@@ -535,6 +536,15 @@ async def turn(
                     if local_req.approval_id is not None:
                         local_payload["approvalId"] = local_req.approval_id
                     yield _sse("local_action_request", local_payload)
+                case HostWakeRequestEvent() as wake_req:
+                    wake_payload: dict[str, Any] = {
+                        "invocationId": wake_req.invocation_id,
+                        "hostId": wake_req.host_id,
+                        "target": wake_req.target,
+                    }
+                    if wake_req.mac_address is not None:
+                        wake_payload["macAddress"] = wake_req.mac_address
+                    yield _sse("host_wake_request", wake_payload)
                 case ActionResultEvent() as act_res:
                     act_payload: dict[str, Any] = {
                         "invocationId": act_res.invocation_id,

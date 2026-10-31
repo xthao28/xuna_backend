@@ -405,7 +405,7 @@ def test_board_media_key_hid_text_impossibility(bad_args: dict[str, object]) -> 
         },
         {
             "type": "object",
-            "properties": {"flag": {"type": "boolean"}},
+            "properties": {"nested": {"type": "object"}},
             "additionalProperties": False,
         },
         {

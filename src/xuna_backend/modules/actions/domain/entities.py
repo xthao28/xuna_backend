@@ -135,6 +135,17 @@ class LocalActionReport:
 
 
 @dataclass(frozen=True, slots=True)
+class HostWakeRequestEvent:
+    """SSE / WebSocket event asking the mobile app to send a local-only WoL
+    Magic Packet (`UDC-11` S11.1)."""
+
+    invocation_id: str
+    host_id: str
+    target: str
+    mac_address: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ActionResultEvent:
     """SSE / WebSocket event emitted when a tool invocation completes."""
 
@@ -146,7 +157,11 @@ class ActionResultEvent:
 
 
 ActionStreamEvent = (
-    ActionPendingEvent | BoardHidRequestEvent | LocalActionRequestEvent | ActionResultEvent
+    ActionPendingEvent
+    | BoardHidRequestEvent
+    | LocalActionRequestEvent
+    | HostWakeRequestEvent
+    | ActionResultEvent
 )
 
 
@@ -228,6 +243,19 @@ class ActionSummary:
                 return f"Kiểm tra trạng thái {target}"[:240]
             case "host.notify":
                 return f"Hiện thông báo trên {target}"[:240]
+            case "display.wake":
+                return f"Bật sáng màn hình {target}"[:240]
+            case "workspace.open":
+                proj = str(arguments.get("project", "recent"))[:40]
+                ide = str(arguments.get("ide", "auto"))[:24]
+                return f"Mở dự án {proj} ({ide}) trên {target}"[:240]
+            case "workspace.git_summary":
+                proj = str(arguments.get("project", "recent"))[:40]
+                return f"Kiểm tra trạng thái Git dự án {proj} trên {target}"[:240]
+            case "workspace.coding_agent":
+                proj = str(arguments.get("project", "recent"))[:40]
+                agent = str(arguments.get("agent", "auto"))[:24]
+                return f"Mở {agent} tại dự án {proj} và tiếp tục công việc trên {target}"[:240]
             case _:
                 return f"Thực hiện {tool} trên {target}"[:240]
 
@@ -274,6 +302,19 @@ class ActionSummary:
                 return f"Check status of {target}"[:240]
             case "host.notify":
                 return f"Show notification on {target}"[:240]
+            case "display.wake":
+                return f"Wake display on {target}"[:240]
+            case "workspace.open":
+                proj = str(arguments.get("project", "recent"))[:40]
+                ide = str(arguments.get("ide", "auto"))[:24]
+                return f"Open workspace {proj} ({ide}) on {target}"[:240]
+            case "workspace.git_summary":
+                proj = str(arguments.get("project", "recent"))[:40]
+                return f"Read Git summary for {proj} on {target}"[:240]
+            case "workspace.coding_agent":
+                proj = str(arguments.get("project", "recent"))[:40]
+                agent = str(arguments.get("agent", "auto"))[:24]
+                return f"Launch {agent} in {proj} and continue work on {target}"[:240]
             case _:
                 return f"Run {tool} on {target}"[:240]
 

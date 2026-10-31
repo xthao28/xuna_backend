@@ -279,6 +279,8 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
     family_str = name.split(".", 1)[0]
     if family_str == "browser":
         family = ToolFamily.URL
+    elif family_str in ("display", "workspace"):
+        family = ToolFamily.APP
     else:
         try:
             family = ToolFamily(family_str)
@@ -441,6 +443,7 @@ class Host:
     last_seen_at: datetime | None = field(default=None)
     lan_fingerprint: str | None = field(default=None)
     lan_port: int | None = field(default=None)
+    wol_mac: str | None = field(default=None)
 
     def __post_init__(self) -> None:
         if len(self.public_key) != 65 or self.public_key[0] != 0x04:

@@ -25,6 +25,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionResultEvent,
     ActionStreamEvent,
     BoardHidRequestEvent,
+    HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
 from xuna_backend.modules.cognition.application.ports import (
@@ -470,6 +471,7 @@ TurnEvent = (
     | ActionPendingEvent
     | BoardHidRequestEvent
     | LocalActionRequestEvent
+    | HostWakeRequestEvent
     | ActionResultEvent
 )
 

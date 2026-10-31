@@ -41,6 +41,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalDecision,
     ApprovalScope,
     BoardHidRequestEvent,
+    HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
 from xuna_backend.modules.cognition.application.ports import TextGenerator
@@ -610,6 +611,16 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                     if event.approval_id is not None:
                                         local_msg["approvalId"] = event.approval_id
                                     await websocket.send_json(local_msg)
+                                elif isinstance(event, HostWakeRequestEvent):
+                                    wake_msg: dict[str, Any] = {
+                                        "type": "host_wake_request",
+                                        "invocationId": event.invocation_id,
+                                        "hostId": event.host_id,
+                                        "target": event.target,
+                                    }
+                                    if event.mac_address is not None:
+                                        wake_msg["macAddress"] = event.mac_address
+                                    await websocket.send_json(wake_msg)
                                 elif isinstance(event, ActionResultEvent):
                                     act_msg: dict[str, Any] = {
                                         "type": "action_result",

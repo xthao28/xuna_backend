@@ -13,6 +13,7 @@ Implements:
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import uuid
@@ -40,6 +41,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalRequest,
     ApprovalState,
     BoardHidRequestEvent,
+    HostWakeRequestEvent,
     LocalActionRequestEvent,
     gesture_for_action_status,
 )
@@ -65,6 +67,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     HostStatus,
     Manifest,
     RiskTier,
+    ToolFamily,
 )
 
 DEADLINE_MS = 10000
@@ -86,6 +89,8 @@ class WorkflowTemplate(StrEnum):
     LINK_TO_PHONE = "link_to_phone"
     CONTINUE_MEDIA = "continue_media"
     PAUSE_EVERYWHERE = "pause_everywhere"
+    RESUME_WORK = "resume_work"
+    WRAP_UP_WORK = "wrap_up_work"
 
 
 def validate_https_public_url(raw_url: str) -> str:
@@ -288,6 +293,26 @@ class CompositeWorkflowRunner:
             )
         if template == WorkflowTemplate.CONTINUE_MEDIA:
             return await self._run_continue_media(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.RESUME_WORK:
+            return await self._run_resume_work(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.WRAP_UP_WORK:
+            return await self._run_wrap_up_work(
                 call=call,
                 clean_args=clean_args,
                 owner_id=owner_id,
@@ -1282,6 +1307,549 @@ class CompositeWorkflowRunner:
                     "template": WorkflowTemplate.PAUSE_EVERYWHERE.value,
                     "targets": all_aliases,
                     "results": per_host_results,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def wait_for_host_online(
+        self,
+        host_id: str,
+        timeout_s: float = 20.0,
+    ) -> bool:
+        """Waits up to `timeout_s` for an offline/sleeping host to reconnect its XTP
+        session after a Wake-on-LAN / BLE HID wake trigger (`UDC-11` S11.1)."""
+        if self._hub.is_online(host_id):
+            return True
+        wait_fn = getattr(self._hub, "wait_online", None)
+        if callable(wait_fn):
+            res = wait_fn(host_id, timeout_s=timeout_s)
+            if isinstance(res, Awaitable):
+                return bool(await res)
+        step = 0.05
+        elapsed = 0.0
+        while elapsed < timeout_s:
+            await asyncio.sleep(step)
+            elapsed += step
+            if self._hub.is_online(host_id):
+                return True
+        return self._hub.is_online(host_id)
+
+    async def _resolve_desktop_host_for_dev_workflow(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        requested_alias: str,
+        now: datetime,
+    ) -> tuple[Host | None, list[str], Manifest | None, list[Grant]]:
+        hosts = await self._host_repo.list_hosts(owner_id)
+        desktop_hosts = [
+            h
+            for h in hosts
+            if h.status == HostStatus.ACTIVE
+            and h.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS, HostPlatform.LINUX)
+        ]
+        desktop_hosts.sort(key=lambda h: str(h.alias).lower())
+        if not desktop_hosts:
+            return None, [], None, []
+
+        if requested_alias:
+            matched = [
+                h for h in desktop_hosts if str(h.alias).lower() == requested_alias.lower()
+            ]
+            if not matched:
+                return None, [str(h.alias) for h in desktop_hosts], None, []
+            target_host = matched[0]
+        elif len(desktop_hosts) == 1:
+            target_host = desktop_hosts[0]
+        else:
+            return None, [str(h.alias) for h in desktop_hosts], None, []
+
+        manifest = await self._host_repo.get_manifest(target_host.host_id)
+        grants = await self._host_repo.get_grants(target_host.host_id)
+        return target_host, [str(h.alias) for h in desktop_hosts], manifest, grants
+
+    async def _run_resume_work(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """Executes `resume_work` (`UDC-11` S11.1-S11.3):
+        1. If the target PC/Mac is offline, emits `HostWakeRequestEvent` (local WoL UDP
+           magic packet from phone) and waits up to 20s for XTP reconnect.
+        2. Requests a single `R2` approval covering the full resume plan.
+        3. Wakes the display (`display.wake`, `R1`).
+        4. Inspects project Git summary (`workspace.git_summary`, `R1`).
+        5. Synthesizes a standup continuation prompt and invokes `workspace.coding_agent`
+           (`claude --continue "<prompt>"` or IDE launch, `R2`)."""
+        now = self._clock()
+        req_target = str(
+            clean_args.get("source_target")
+            or clean_args.get("destination_target")
+            or ""
+        ).strip()
+        pc_host, choices, manifest, host_grants = await self._resolve_desktop_host_for_dev_workflow(
+            owner_id=owner_id,
+            requested_alias=req_target,
+            now=now,
+        )
+        if pc_host is None:
+            if choices:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload("ask_target", choices=choices),
+                    tool_call_id=call.id,
+                )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+
+        has_app_grant = any(
+            g.family == ToolFamily.APP
+            and g.is_active(now)
+            and g.max_risk.allows(RiskTier.R2)
+            for g in host_grants
+        )
+        if not has_app_grant or manifest is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("denied"),
+                tool_call_id=call.id,
+            )
+
+        was_woken_from_sleep = False
+        if not self._hub.is_online(str(pc_host.host_id)):
+            was_woken_from_sleep = True
+            await emit_event(
+                HostWakeRequestEvent(
+                    invocation_id=str(uuid.uuid4()),
+                    host_id=str(pc_host.host_id),
+                    target=str(pc_host.alias),
+                    mac_address=pc_host.wol_mac,
+                )
+            )
+            reconnected = await self.wait_for_host_online(
+                str(pc_host.host_id),
+                timeout_s=20.0,
+            )
+            if not reconnected:
+                fail_wake_summary = (
+                    f"✗ Could not wake {pc_host.alias} (host_offline)"
+                    if locale == Locale.EN
+                    else f"✗ Không đánh thức được {pc_host.alias} (đang ngoại tuyến)"
+                )
+                await emit_event(
+                    ActionResultEvent(
+                        invocation_id=str(uuid.uuid4()),
+                        target=str(pc_host.alias),
+                        summary=fail_wake_summary[:240],
+                        status="timeout",
+                        gesture=gesture_for_action_status("timeout"),
+                    )
+                )
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "host_offline",
+                        {
+                            "template": WorkflowTemplate.RESUME_WORK.value,
+                            "host": str(pc_host.alias),
+                        },
+                    ),
+                    tool_call_id=call.id,
+                )
+            refreshed = await self._host_repo.get_manifest(pc_host.host_id)
+            if refreshed is not None:
+                manifest = refreshed
+
+        project_arg = str(clean_args.get("project", "")).strip() or "recent"
+        agent_arg = str(clean_args.get("agent", "")).strip() or "auto"
+        user_brief = str(clean_args.get("prompt", "")).strip()
+
+        # Step 1: display.wake (R1, if advertised)
+        display_woken = False
+        if manifest.find_tool("display.wake") is not None:
+            dw_status, dw_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="display.wake",
+                arguments={},
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            display_woken = dw_status == "ok" and bool(dw_sc.get("woken", True))
+
+        # Step 2: workspace.git_summary (R1, if advertised) to resolve project & branch
+        resolved_workspace = project_arg
+        branch = "main"
+        modified_count = 0
+        untracked_count = 0
+        if manifest.find_tool("workspace.git_summary") is not None:
+            git_status, git_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="workspace.git_summary",
+                arguments={"project": project_arg},
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if git_status == "ok":
+                resolved_workspace = str(git_sc.get("workspace", project_arg))
+                branch = str(git_sc.get("branch", "main"))
+                raw_mod = git_sc.get("modifiedCount")
+                if isinstance(raw_mod, int):
+                    modified_count = raw_mod
+                raw_untracked = git_sc.get("untrackedCount")
+                if isinstance(raw_untracked, int):
+                    untracked_count = raw_untracked
+
+        # Step 3: Single R2 approval before launching coding agent / IDE
+        target_label = str(pc_host.alias)[:32]
+        pending_summary = (
+            f"Open {agent_arg} ({resolved_workspace}) on {pc_host.alias} and continue work"
+            if locale == Locale.EN
+            else f"{pc_host.alias} · Mở {agent_arg} ({resolved_workspace}) và tiếp tục công việc"
+        )
+        approval_args: dict[str, object] = {
+            "template": WorkflowTemplate.RESUME_WORK.value,
+            "host": str(pc_host.alias),
+            "project": resolved_workspace,
+            "agent": agent_arg,
+        }
+        decision, approval_req = await self._request_single_plan_approval(
+            owner_id=owner_id,
+            host_id=pc_host.host_id,
+            target_label=target_label,
+            tool_label="workflow.resume_work",
+            summary=pending_summary,
+            approval_args=approval_args,
+            emit_event=emit_event,
+            request_id=request_id,
+        )
+        if decision != ApprovalState.APPROVED:
+            final_status = "rejected" if decision == ApprovalState.REJECTED else "expired"
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(final_status),
+                tool_call_id=call.id,
+            )
+
+        # Step 4: Synthesize continuation prompt (never logged in AuditLog!)
+        if user_brief:
+            synthesized_prompt = (
+                f"{user_brief} (branch: {branch}, "
+                f"modified: {modified_count}, untracked: {untracked_count})"
+            )[:500]
+        elif locale == Locale.EN:
+            synthesized_prompt = (
+                f"Continue working on {resolved_workspace} on branch {branch} "
+                f"({modified_count} modified, {untracked_count} untracked files). "
+                "Review the current changes and proceed with the next task."
+            )[:500]
+        else:
+            synthesized_prompt = (
+                f"Tiếp tục công việc tại dự án {resolved_workspace} trên nhánh {branch} "
+                f"({modified_count} tệp đang sửa, {untracked_count} tệp mới). "
+                "Hãy kiểm tra các thay đổi hiện tại và làm tiếp phần việc đang dở."
+            )[:500]
+
+        # Step 5: workspace.coding_agent (or fallback to workspace.open)
+        launched_agent = agent_arg
+        resumed_flag = True
+        if manifest.find_tool("workspace.coding_agent") is not None:
+            ca_args: dict[str, object] = {
+                "project": resolved_workspace,
+                "agent": agent_arg,
+                "resumeLast": True,
+                "prompt": synthesized_prompt,
+            }
+            ca_status, ca_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="workspace.coding_agent",
+                arguments=ca_args,
+                risk=RiskTier.R2,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+                approval_id=approval_req.approval_id,
+                expires_at=approval_req.expires_at,
+            )
+            if ca_status != "ok":
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        ca_status,
+                        {
+                            "template": WorkflowTemplate.RESUME_WORK.value,
+                            "failedStep": 4,
+                            "failedTool": "workspace.coding_agent",
+                            "failedHost": str(pc_host.alias),
+                        },
+                    ),
+                    tool_call_id=call.id,
+                )
+            resolved_workspace = str(ca_sc.get("workspace", resolved_workspace))
+            launched_agent = str(ca_sc.get("agent", agent_arg))
+            resumed_flag = bool(ca_sc.get("resumed", True))
+        elif manifest.find_tool("workspace.open") is not None:
+            ide_choice = (
+                agent_arg
+                if agent_arg in ("auto", "antigravity", "vscode", "cursor")
+                else "auto"
+            )
+            wo_args: dict[str, object] = {
+                "project": resolved_workspace,
+                "ide": ide_choice,
+            }
+            wo_status, wo_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="workspace.open",
+                arguments=wo_args,
+                risk=RiskTier.R2,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+                approval_id=approval_req.approval_id,
+                expires_at=approval_req.expires_at,
+            )
+            if wo_status != "ok":
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        wo_status,
+                        {
+                            "template": WorkflowTemplate.RESUME_WORK.value,
+                            "failedStep": 4,
+                            "failedTool": "workspace.open",
+                            "failedHost": str(pc_host.alias),
+                        },
+                    ),
+                    tool_call_id=call.id,
+                )
+            resolved_workspace = str(wo_sc.get("workspace", resolved_workspace))
+            launched_agent = str(wo_sc.get("ide", ide_choice))
+            resumed_flag = False
+        else:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("unsupported"),
+                tool_call_id=call.id,
+            )
+
+        standup_summary = (
+            (
+                f"Resumed {resolved_workspace} ({branch}, {modified_count}M/{untracked_count}U) "
+                f"in {launched_agent} on {pc_host.alias}"
+            )
+            if locale == Locale.EN
+            else (
+                f"Đã bật {pc_host.alias}, mở {launched_agent} tại dự án {resolved_workspace} "
+                f"(nhánh {branch}, {modified_count} tệp sửa / {untracked_count} tệp mới) "
+                "và gửi yêu cầu làm tiếp."
+            )
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=target_label,
+                summary=f"✓ {standup_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.RESUME_WORK.value,
+                    "host": str(pc_host.alias),
+                    "workspace": resolved_workspace,
+                    "branch": branch,
+                    "modifiedCount": modified_count,
+                    "untrackedCount": untracked_count,
+                    "agent": launched_agent,
+                    "resumed": resumed_flag,
+                    "wokenFromSleep": was_woken_from_sleep,
+                    "displayWoken": display_woken,
+                    "standupSummary": standup_summary,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_wrap_up_work(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """Executes `wrap_up_work` (`UDC-11` S11.3):
+        1. Captures end-of-session Git summary (`workspace.git_summary`, `R1`) on the target PC/Mac.
+        2. Pauses active media playback if playing (`media.play_pause`, `R1`).
+        3. Shows a wrap-up notification on the host (`host.notify`, `R1`) and returns a
+           structured `wrapUpSummary` for M06 `WorkingBrief` continuity."""
+        now = self._clock()
+        req_target = str(
+            clean_args.get("source_target")
+            or clean_args.get("destination_target")
+            or ""
+        ).strip()
+        pc_host, choices, manifest, host_grants = await self._resolve_desktop_host_for_dev_workflow(
+            owner_id=owner_id,
+            requested_alias=req_target,
+            now=now,
+        )
+        if pc_host is None:
+            if choices:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload("ask_target", choices=choices),
+                    tool_call_id=call.id,
+                )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+
+        if not self._hub.is_online(str(pc_host.host_id)) or manifest is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("host_offline"),
+                tool_call_id=call.id,
+            )
+
+        has_app_grant = any(
+            g.family == ToolFamily.APP
+            and g.is_active(now)
+            and g.max_risk.allows(RiskTier.R1)
+            for g in host_grants
+        )
+        if not has_app_grant or manifest.find_tool("workspace.git_summary") is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("denied"),
+                tool_call_id=call.id,
+            )
+
+        project_arg = str(clean_args.get("project", "")).strip() or "recent"
+        git_status, git_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="workspace.git_summary",
+            arguments={"project": project_arg},
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if git_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    git_status,
+                    {
+                        "template": WorkflowTemplate.WRAP_UP_WORK.value,
+                        "failedStep": 1,
+                        "failedTool": "workspace.git_summary",
+                        "failedHost": str(pc_host.alias),
+                    },
+                ),
+                tool_call_id=call.id,
+            )
+
+        resolved_workspace = str(git_sc.get("workspace", project_arg))
+        branch = str(git_sc.get("branch", "main"))
+        raw_mod = git_sc.get("modifiedCount")
+        modified_count = raw_mod if isinstance(raw_mod, int) else 0
+        raw_untracked = git_sc.get("untrackedCount")
+        untracked_count = raw_untracked if isinstance(raw_untracked, int) else 0
+
+        media_paused = False
+        np_desc = manifest.find_tool("media.now_playing")
+        pp_desc = manifest.find_tool("media.play_pause")
+        if (
+            np_desc is not None
+            and pp_desc is not None
+            and is_tool_granted(np_desc, host_grants, now)
+            and is_tool_granted(pp_desc, host_grants, now)
+        ):
+            np_status, np_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="media.now_playing",
+                arguments={},
+                risk=RiskTier.R0,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if np_status == "ok" and str(np_sc.get("state", "")).lower() == "playing":
+                pp_status, _ = await self._invoke_host_step(
+                    owner_id=owner_id,
+                    host=pc_host,
+                    tool_name="media.play_pause",
+                    arguments={},
+                    risk=RiskTier.R1,
+                    request_id=request_id,
+                    self_host_id=self_host_id,
+                    emit_event=emit_event,
+                )
+                media_paused = pp_status == "ok"
+
+        wrap_up_summary = (
+            (
+                f"Wrapped up {resolved_workspace} on {pc_host.alias} "
+                f"(branch {branch}, {modified_count}M/{untracked_count}U)"
+            )
+            if locale == Locale.EN
+            else (
+                f"Đã lưu trạng thái công việc dự án {resolved_workspace} trên {pc_host.alias} "
+                f"(nhánh {branch}, {modified_count} tệp đang sửa, {untracked_count} tệp mới)"
+            )
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {wrap_up_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.WRAP_UP_WORK.value,
+                    "host": str(pc_host.alias),
+                    "workspace": resolved_workspace,
+                    "branch": branch,
+                    "modifiedCount": modified_count,
+                    "untrackedCount": untracked_count,
+                    "mediaPaused": media_paused,
+                    "wrapUpSummary": wrap_up_summary,
                 },
             ),
             tool_call_id=call.id,

@@ -19,6 +19,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
     BoardHidRequestEvent,
+    HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
 from xuna_backend.modules.cognition.application.ports import (
@@ -88,6 +89,7 @@ SpokenTurnEvent = (
     | ActionPendingEvent
     | BoardHidRequestEvent
     | LocalActionRequestEvent
+    | HostWakeRequestEvent
     | ActionResultEvent
     | SpokenAudio
     | SpeechUnavailable

@@ -15,6 +15,7 @@ import re
 _ALLOWED_TOP_KEYS = frozenset({"type", "properties", "required", "additionalProperties"})
 _ALLOWED_STRING_KEYS = frozenset({"type", "maxLength", "pattern", "enum", "description"})
 _ALLOWED_INT_KEYS = frozenset({"type", "minimum", "maximum", "enum", "description"})
+_ALLOWED_BOOL_KEYS = frozenset({"type", "description"})
 
 
 class SchemaDefinitionError(ValueError):
@@ -104,6 +105,12 @@ class SchemaValidator:
                     or not all(type(v) is int for v in enum_vals)
                 ):
                     raise SchemaDefinitionError(f"enum on {name!r} must be a non-empty int list")
+        elif prop_type == "boolean":
+            unknown = set(prop.keys()) - _ALLOWED_BOOL_KEYS
+            if unknown:
+                raise SchemaDefinitionError(
+                    f"unsupported boolean keywords on {name!r}: {sorted(unknown)}"
+                )
         else:
             raise SchemaDefinitionError(f"unsupported property type {prop_type!r} on {name!r}")
 
@@ -176,3 +183,6 @@ class SchemaValidator:
             enum_vals = prop.get("enum")
             if isinstance(enum_vals, list) and value not in enum_vals:
                 raise ArgumentValidationError(f"argument {name!r} not in allowed enum")
+        elif prop_type == "boolean":
+            if type(value) is not bool:
+                raise ArgumentValidationError(f"argument {name!r} must be a boolean")
