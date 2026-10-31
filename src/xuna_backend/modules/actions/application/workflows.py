@@ -348,6 +348,30 @@ def extract_custom_workflow_candidate(
                     risk=RiskTier.R1,
                 )
             )
+        elif "đọc cửa sổ" in low or "xem cửa sổ" in low:
+            steps.append(
+                CustomWorkflowStep(
+                    tool="window.active_context",
+                    arguments={"maxChars": 600},
+                    risk=RiskTier.R1,
+                )
+            )
+        elif "tóm tắt trang" in low or "đọc trang" in low:
+            steps.append(
+                CustomWorkflowStep(
+                    tool="browser.read_page",
+                    arguments={"browser": "auto", "maxChars": 800},
+                    risk=RiskTier.R1,
+                )
+            )
+        elif "hoàn tác" in low or "undo" in low:
+            steps.append(
+                CustomWorkflowStep(
+                    tool="action.undo",
+                    arguments={},
+                    risk=RiskTier.R1,
+                )
+            )
         elif low.startswith("mở "):
             app_id = clause[3:].strip().split()[0].lower()
             if app_id:
@@ -2141,6 +2165,24 @@ class CompositeWorkflowRunner:
                 tool_call_id=call.id,
             )
 
+        # S13.4: Validate-all-before-run — verify every step is advertised and granted
+        # before requesting approval or executing Step 1.
+        for idx, step in enumerate(definition.steps, start=1):
+            desc = manifest.find_tool(step.tool)
+            if desc is None or not is_tool_granted(desc, host_grants, now):
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "denied",
+                        {
+                            "template": WorkflowTemplate.CUSTOM_WORKFLOW.value,
+                            "failedStep": idx,
+                            "failedTool": step.tool,
+                        },
+                    ),
+                    tool_call_id=call.id,
+                )
+
         effective_risk = definition.effective_risk
         approval_id_val: uuid.UUID | None = None
         expires_at_val: datetime | None = None
@@ -2184,20 +2226,6 @@ class CompositeWorkflowRunner:
 
         completed_steps: list[str] = []
         for idx, step in enumerate(definition.steps, start=1):
-            desc = manifest.find_tool(step.tool)
-            if desc is None or not is_tool_granted(desc, host_grants, now):
-                return Message(
-                    role=Role.TOOL,
-                    content=_encode_workflow_payload(
-                        "denied",
-                        {
-                            "template": WorkflowTemplate.CUSTOM_WORKFLOW.value,
-                            "failedStep": idx,
-                            "failedTool": step.tool,
-                        },
-                    ),
-                    tool_call_id=call.id,
-                )
             st_status, _ = await self._invoke_host_step(
                 owner_id=owner_id,
                 host=pc_host,

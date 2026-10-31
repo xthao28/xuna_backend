@@ -269,6 +269,20 @@ class ActionSummary:
                 srv = str(arguments.get("server", ""))[:32]
                 t_name = str(arguments.get("tool", ""))[:40]
                 return f"Gọi công cụ MCP {srv}.{t_name} trên {target}"[:240]
+            case "window.active_context":
+                return f"Đọc ngữ cảnh cửa sổ đang mở trên {target}"[:240]
+            case "browser.read_page":
+                browser = str(arguments.get("browser", "auto"))[:20]
+                return f"Tóm tắt trang web đang mở ({browser}) trên {target}"[:240]
+            case "beam.transfer":
+                fname = str(arguments.get("fileName", "tệp"))[:40]
+                return f"Truyền tệp {fname} qua XUNA Beam tới {target}"[:240]
+            case "workflow.batch_steps":
+                raw_steps = arguments.get("steps")
+                count = len(raw_steps) if isinstance(raw_steps, list) else 0
+                return f"Chạy chuỗi {count} bước liên hoàn trên {target}"[:240]
+            case "action.undo":
+                return f"Hoàn tác thao tác vừa thực hiện trên {target}"[:240]
             case _:
                 return f"Thực hiện {tool} trên {target}"[:240]
 
@@ -341,6 +355,20 @@ class ActionSummary:
                 srv = str(arguments.get("server", ""))[:32]
                 t_name = str(arguments.get("tool", ""))[:40]
                 return f"Call MCP tool {srv}.{t_name} on {target}"[:240]
+            case "window.active_context":
+                return f"Read active window context on {target}"[:240]
+            case "browser.read_page":
+                browser = str(arguments.get("browser", "auto"))[:20]
+                return f"Summarize active web page ({browser}) on {target}"[:240]
+            case "beam.transfer":
+                fname = str(arguments.get("fileName", "file"))[:40]
+                return f"Beam {fname} to {target}"[:240]
+            case "workflow.batch_steps":
+                raw_steps = arguments.get("steps")
+                count = len(raw_steps) if isinstance(raw_steps, list) else 0
+                return f"Run {count}-step batch workflow on {target}"[:240]
+            case "action.undo":
+                return f"Undo last action on {target}"[:240]
             case _:
                 return f"Run {tool} on {target}"[:240]
 
