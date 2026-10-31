@@ -137,6 +137,7 @@ class ToolFamily(StrEnum):
     URL = "url"
     WORKFLOW = "workflow"
     HOST = "host"
+    CU = "cu"
     SCREEN = "screen"
     UI = "ui"
     INPUT = "input"

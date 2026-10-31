@@ -39,9 +39,11 @@ class ConsentBody(BaseModel):
     experienceEvents: bool
     conversationText: bool
     expectedVersion: int = Field(ge=0)
-    # Optional for clients that predate voice; omitted keeps the current value.
+    # Optional for clients that predate newer classes; omitted keeps the current value.
     conversationVoice: bool | None = None
     ownerDocuments: bool | None = None
+    hostScreen: bool | None = None
+    hostNotifications: bool | None = None
 
 
 def _repo(request: Request, session: object) -> ConsentRepository:
@@ -56,6 +58,8 @@ def _body(consent: ConsentState) -> dict[str, Any]:
         "conversationText": consent.conversation_text,
         "conversationVoice": consent.conversation_voice,
         "ownerDocuments": consent.owner_documents,
+        "hostScreen": consent.host_screen,
+        "hostNotifications": consent.host_notifications,
         "version": consent.version,
         "updatedAt": consent.updated_at.astimezone(UTC).isoformat() if consent.updated_at else None,
     }
@@ -87,6 +91,8 @@ async def put_consents(
         expected_version=body.expectedVersion,
         conversation_voice=body.conversationVoice,
         owner_documents=body.ownerDocuments,
+        host_screen=body.hostScreen,
+        host_notifications=body.hostNotifications,
     )
 
     async def action() -> StoredResponse:

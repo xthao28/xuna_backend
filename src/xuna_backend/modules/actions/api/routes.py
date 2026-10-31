@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -14,6 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.accounts.api.dependencies import CurrentOwner, Session, state
+from xuna_backend.modules.actions.application.computer_use import (
+    InMemoryComputerUseSessionStore,
+)
 from xuna_backend.modules.actions.application.orchestrator import Orchestrator
 from xuna_backend.modules.actions.application.ports import (
     ApprovalBroker,
@@ -339,6 +343,11 @@ async def emergency_stop_actions(
         scope_store=scope_store,
     )
     reason = body.reason if body is not None else "owner_app"
+    cu_store: InMemoryComputerUseSessionStore | None = getattr(
+        request.app.state, "cu_session_store", None
+    )
+    if cu_store is not None:
+        cu_store.stop_all_for_owner(owner.owner_id, reason=reason)
     summary = await orch.emergency_stop(
         owner_id=owner.owner_id,
         reason=reason,
@@ -350,6 +359,31 @@ async def emergency_stop_actions(
         "hostsNotified": summary.hosts_notified,
         "approvalsCancelled": summary.approvals_cancelled,
         "grantsSuspended": summary.grants_suspended,
+    }
+
+
+@router.post("/sessions/{session_id}/heartbeat")
+async def heartbeat_computer_use_session(
+    session_id: str,
+    request: Request,
+    owner: CurrentOwner,
+) -> dict[str, Any]:
+    """UDC-8 S8.3 / S8.4: 5 s phone heartbeat for an active computer-use session.
+    Missing 3 heartbeats (15 s) trips the dead-man switch and terminates the session."""
+    cu_store: InMemoryComputerUseSessionStore | None = getattr(
+        request.app.state, "cu_session_store", None
+    )
+    if cu_store is None:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND)
+    state_obj = cu_store.get(session_id)
+    if state_obj is None or state_obj.owner_id != owner.owner_id or not state_obj.active:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND)
+    state_obj.last_heartbeat_monotonic = time.monotonic()
+    return {
+        "sessionId": session_id,
+        "active": True,
+        "step": state_obj.steps_used,
+        "maxSteps": state_obj.max_steps,
     }
 
 

@@ -25,12 +25,22 @@ from xuna_backend.modules.hosts.domain.entities import (
     HostStatus,
     Manifest,
     ToolDescriptor,
+    ToolFamily,
     ToolPermissionState,
 )
 
 MAX_CATALOG_TOOLS = 8
 CAP_HOST_ACTIONS_V1 = "host_actions_v1"
 CAP_BOARD_HID_V1 = "board_hid_v1"
+
+_U5_REQUIRED_FAMILIES: frozenset[ToolFamily] = frozenset(
+    {
+        ToolFamily.CU,
+        ToolFamily.SCREEN,
+        ToolFamily.UI,
+        ToolFamily.INPUT,
+    }
+)
 
 _PRIORITY_ORDER: tuple[str, ...] = (
     "media.play_pause",
@@ -56,11 +66,18 @@ def is_tool_granted(
     descriptor: ToolDescriptor,
     grants: Sequence[Grant],
     now: datetime | None = None,
+    *,
+    host_screen_consent: bool = True,
 ) -> bool:
-    """Returns True iff the tool is supported on the host and the host has an active
-    (enabled, non-expired, non-suspended) grant for `descriptor.family` whose `max_risk`
-    covers `descriptor.risk`."""
+    """Returns True iff the tool is supported on the host, U5 (`host_screen`) consent is
+    granted when required (`observes == True` or computer-use families), and the host has
+    an active (enabled, non-expired, non-suspended) grant for `descriptor.family` whose
+    `max_risk` covers `descriptor.risk`."""
     if descriptor.permission == ToolPermissionState.UNSUPPORTED:
+        return False
+    if (
+        descriptor.observes or descriptor.family in _U5_REQUIRED_FAMILIES
+    ) and not host_screen_consent:
         return False
     check_now = now or datetime.now(UTC)
     for grant in grants:
@@ -77,6 +94,7 @@ def build_tool_catalog(
     online_host_ids: Collection[str],
     client_caps: Collection[str],
     board_available: bool = False,
+    host_screen_consent: bool = False,
     now: datetime | None = None,
 ) -> tuple[ToolSpec, ...]:
     """Builds up to `MAX_CATALOG_TOOLS` (`8`) `ToolSpec` entries for `ChatRequest.tools`.
@@ -109,7 +127,12 @@ def build_tool_catalog(
             for descriptor in manifest.tools:
                 if is_forbidden_tool_name(descriptor.name):
                     continue
-                if not is_tool_granted(descriptor, grants, check_now):
+                if not is_tool_granted(
+                    descriptor,
+                    grants,
+                    check_now,
+                    host_screen_consent=host_screen_consent,
+                ):
                     continue
                 try:
                     SchemaValidator.validate_schema_definition(descriptor.input_schema)
@@ -172,6 +195,7 @@ async def load_tool_catalog_for_owner(
     host_repo: HostRepository,
     hub: HostSessionHub,
     self_host_id: str | None = None,
+    host_screen_consent: bool = False,
     now: datetime | None = None,
 ) -> tuple[ToolSpec, ...]:
     """Loads the owner's hosts, manifests, and grants and builds the active tool catalog."""
@@ -204,5 +228,6 @@ async def load_tool_catalog_for_owner(
         online_host_ids=online_host_ids,
         client_caps=client_caps,
         board_available=board_available,
+        host_screen_consent=host_screen_consent,
         now=now,
     )

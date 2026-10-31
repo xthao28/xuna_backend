@@ -20,5 +20,7 @@ class ConsentRow(Base):
     conversation_text: Mapped[bool] = mapped_column(Boolean)
     conversation_voice: Mapped[bool] = mapped_column(Boolean, server_default="false")
     owner_documents: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    host_screen: Mapped[bool] = mapped_column(Boolean, server_default="false")
+    host_notifications: Mapped[bool] = mapped_column(Boolean, server_default="false")
     recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     policy: Mapped[str] = mapped_column(String(32))

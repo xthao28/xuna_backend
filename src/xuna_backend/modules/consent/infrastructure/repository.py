@@ -29,6 +29,8 @@ class SqlConsentRepository:
             conversation_text=row.conversation_text,
             conversation_voice=row.conversation_voice,
             owner_documents=row.owner_documents,
+            host_screen=row.host_screen,
+            host_notifications=row.host_notifications,
             version=row.version,
             updated_at=row.recorded_at,
         )
@@ -44,6 +46,8 @@ class SqlConsentRepository:
                 conversation_text=state.conversation_text,
                 conversation_voice=state.conversation_voice,
                 owner_documents=state.owner_documents,
+                host_screen=state.host_screen,
+                host_notifications=state.host_notifications,
                 recorded_at=state.updated_at,
                 policy=POLICY_VERSION,
             )

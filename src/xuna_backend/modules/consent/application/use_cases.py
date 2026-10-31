@@ -22,9 +22,11 @@ class UpdateConsent:
     experience_events: bool
     conversation_text: bool
     expected_version: int
-    # None keeps the current value: clients that predate voice never revoke it.
+    # None keeps the current value: clients that predate optional classes never revoke them.
     conversation_voice: bool | None = None
     owner_documents: bool | None = None
+    host_screen: bool | None = None
+    host_notifications: bool | None = None
 
 
 async def require_consent(
@@ -58,6 +60,14 @@ async def update_consent(
         ),
         owner_documents=(
             current.owner_documents if command.owner_documents is None else command.owner_documents
+        ),
+        host_screen=(
+            current.host_screen if command.host_screen is None else command.host_screen
+        ),
+        host_notifications=(
+            current.host_notifications
+            if command.host_notifications is None
+            else command.host_notifications
         ),
         version=current.version + 1,
         updated_at=now,
