@@ -316,6 +316,22 @@ class ActionSummary:
                 return f"Quét cổng dev localhost trên {target}"[:240]
             case "system.vitals":
                 return f"Kiểm tra pin, RAM và ổ cứng trên {target}"[:240]
+            case "workspace.capture_capsule":
+                proj = str(arguments.get("project", "recent"))[:40]
+                return f"Đóng băng ngữ cảnh dự án {proj} trên {target}"[:240]
+            case "workspace.restore_capsule":
+                cap = str(arguments.get("capsuleId", arguments.get("project", "recent")))[:40]
+                return f"Khôi phục ngữ cảnh dự án {cap} trên {target}"[:240]
+            case "workspace.list_capsules":
+                return f"Xem danh sách gói ngữ cảnh dự án trên {target}"[:240]
+            case "pocket.push_item":
+                kind = str(arguments.get("kind", "snippet"))[:24]
+                return f"Cất mục ({kind}) vào túi thông minh trên {target}"[:240]
+            case "pocket.list_items":
+                return f"Xem các mục trong túi thông minh trên {target}"[:240]
+            case "pocket.transform_item":
+                mode = str(arguments.get("mode", "summarize"))[:24]
+                return f"Chuyển đổi mục trong túi thông minh ({mode}) trên {target}"[:240]
             case _:
                 return f"Thực hiện {tool} trên {target}"[:240]
 
@@ -435,6 +451,22 @@ class ActionSummary:
                 return f"Scan active localhost dev ports on {target}"[:240]
             case "system.vitals":
                 return f"Check battery, memory, and disk vitals on {target}"[:240]
+            case "workspace.capture_capsule":
+                proj = str(arguments.get("project", "recent"))[:40]
+                return f"Capture workspace capsule for {proj} on {target}"[:240]
+            case "workspace.restore_capsule":
+                cap = str(arguments.get("capsuleId", arguments.get("project", "recent")))[:40]
+                return f"Restore workspace capsule {cap} on {target}"[:240]
+            case "workspace.list_capsules":
+                return f"List workspace capsules on {target}"[:240]
+            case "pocket.push_item":
+                kind = str(arguments.get("kind", "snippet"))[:24]
+                return f"Push item ({kind}) into universal pocket on {target}"[:240]
+            case "pocket.list_items":
+                return f"List universal pocket items on {target}"[:240]
+            case "pocket.transform_item":
+                mode = str(arguments.get("mode", "summarize"))[:24]
+                return f"Transform pocket item ({mode}) on {target}"[:240]
             case _:
                 return f"Run {tool} on {target}"[:240]
 

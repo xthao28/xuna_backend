@@ -71,6 +71,9 @@ from xuna_backend.modules.hosts.domain.entities import (
     ToolFamily,
     validate_tool_name,
 )
+from xuna_backend.modules.symbiotic.application.services import (
+    DreamConsolidatorService,
+)
 
 DEADLINE_MS = 10000
 DEADLINE_SECONDS = 10.0
@@ -102,6 +105,8 @@ class WorkflowTemplate(StrEnum):
     MEETING_READY = "meeting_ready"
     PREVIEW_ON_PHONE = "preview_on_phone"
     DAILY_STANDUP = "daily_standup"
+    FREEZE_FOR_TONIGHT = "freeze_for_tonight"
+    REHYDRATE_PROJECT = "rehydrate_project"
 
 
 HARD_DENIED_SMARTHOME_DOMAINS: frozenset[str] = frozenset(
@@ -691,6 +696,26 @@ class CompositeWorkflowRunner:
             )
         if template == WorkflowTemplate.DAILY_STANDUP:
             return await self._run_daily_standup(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.FREEZE_FOR_TONIGHT:
+            return await self._run_freeze_for_tonight(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.REHYDRATE_PROJECT:
+            return await self._run_rehydrate_project(
                 call=call,
                 clean_args=clean_args,
                 owner_id=owner_id,
@@ -4065,6 +4090,340 @@ class CompositeWorkflowRunner:
                     "diskFreeGb": disk_free_gb,
                     "healthStatus": health_status,
                     "standupSummary": standup_summary,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_freeze_for_tonight(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """SYM-1 (`H1` + `L1`): `freeze_for_tonight` (`R1`):
+        1. Captures the active project's Workspace Time-Capsule (`workspace.capture_capsule`).
+        2. Optionally saves the next-step summary into the Universal Pocket (`pocket.push_item`).
+        3. Synthesizes an overnight NREM/REM `DreamVignette` via `DreamConsolidatorService`."""
+        now = self._clock()
+        online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
+
+        desktop_candidates: list[Host] = []
+        for h in online:
+            m = manifests[h.host_id]
+            g = grants[h.host_id]
+            if h.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS, HostPlatform.LINUX):
+                cap_desc = m.find_tool("workspace.capture_capsule")
+                if cap_desc is not None and is_tool_granted(cap_desc, g, now):
+                    desktop_candidates.append(h)
+
+        if not desktop_candidates:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+
+        req_dst = str(
+            clean_args.get("destination_target")
+            or clean_args.get("source_target")
+            or ""
+        ).strip()
+        if req_dst:
+            matched = [
+                h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()
+            ]
+            if not matched:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "ask_target",
+                        choices=[str(h.alias) for h in desktop_candidates],
+                    ),
+                    tool_call_id=call.id,
+                )
+            pc_host = matched[0]
+        elif len(desktop_candidates) == 1:
+            pc_host = desktop_candidates[0]
+        else:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "ask_target",
+                    choices=[str(h.alias) for h in desktop_candidates],
+                ),
+                tool_call_id=call.id,
+            )
+
+        manifest = manifests[pc_host.host_id]
+        host_grants = grants[pc_host.host_id]
+        requested_project = str(clean_args.get("project", "recent") or "recent").strip()
+        next_step_hint = str(
+            clean_args.get("next_step_hint") or clean_args.get("prompt") or ""
+        ).strip()
+
+        cap_args: dict[str, object] = {"project": requested_project}
+        if next_step_hint:
+            cap_args["nextStepHint"] = next_step_hint
+
+        cap_status, cap_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="workspace.capture_capsule",
+            arguments=cap_args,
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if cap_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(cap_status),
+                tool_call_id=call.id,
+            )
+
+        capsule_id = str(cap_sc.get("capsuleId", "cap-latest"))
+        workspace_name = str(cap_sc.get("workspace", requested_project))
+        branch = str(cap_sc.get("branch", "main"))
+        raw_uncommitted = cap_sc.get("uncommittedCount", 0)
+        uncommitted_count = raw_uncommitted if type(raw_uncommitted) is int else 0
+        resolved_hint = str(
+            cap_sc.get("nextStepHint")
+            or next_step_hint
+            or f"Resume {workspace_name}@{branch}"
+        )
+
+        pocket_item_id: str | None = None
+        pocket_desc = manifest.find_tool("pocket.push_item")
+        if pocket_desc is not None and is_tool_granted(pocket_desc, host_grants, now):
+            p_status, p_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="pocket.push_item",
+                arguments={
+                    "content": f"[{workspace_name}@{branch}] {resolved_hint}",
+                    "kind": "todo",
+                    "sourceApp": str(pc_host.alias),
+                },
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            if p_status == "ok":
+                pocket_item_id = str(p_sc.get("itemId", "")) or None
+
+        dream = DreamConsolidatorService().consolidate_nightly_dream(
+            project=workspace_name,
+            branch=branch,
+            dirty_count=uncommitted_count,
+            next_step_hint=resolved_hint,
+            now=now,
+        )
+
+        freeze_summary = (
+            f"Frozen {workspace_name}@{branch} ({capsule_id}) on {pc_host.alias}"
+            if locale == Locale.EN
+            else f"Đã đóng băng {workspace_name}@{branch} ({capsule_id}) trên {pc_host.alias}"
+        )
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {freeze_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.FREEZE_FOR_TONIGHT.value,
+                    "host": str(pc_host.alias),
+                    "capsuleId": capsule_id,
+                    "workspace": workspace_name,
+                    "branch": branch,
+                    "uncommittedCount": uncommitted_count,
+                    "nextStepHint": resolved_hint,
+                    "pocketItemId": pocket_item_id,
+                    "dream": dream.to_wire(),
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_rehydrate_project(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """SYM-1 (`H1`): `rehydrate_project` (`R2`):
+        1. Requests a single owner approval to restore a Workspace Time-Capsule.
+        2. Invokes `workspace.restore_capsule` on the target desktop host.
+        3. Returns a 15-second morning/rehydration briefing."""
+        now = self._clock()
+        online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
+
+        desktop_candidates: list[Host] = []
+        for h in online:
+            m = manifests[h.host_id]
+            g = grants[h.host_id]
+            if h.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS, HostPlatform.LINUX):
+                res_desc = m.find_tool("workspace.restore_capsule")
+                if res_desc is not None and is_tool_granted(res_desc, g, now):
+                    desktop_candidates.append(h)
+
+        if not desktop_candidates:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("no_host"),
+                tool_call_id=call.id,
+            )
+
+        req_dst = str(
+            clean_args.get("destination_target")
+            or clean_args.get("source_target")
+            or ""
+        ).strip()
+        if req_dst:
+            matched = [
+                h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()
+            ]
+            if not matched:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_workflow_payload(
+                        "ask_target",
+                        choices=[str(h.alias) for h in desktop_candidates],
+                    ),
+                    tool_call_id=call.id,
+                )
+            pc_host = matched[0]
+        elif len(desktop_candidates) == 1:
+            pc_host = desktop_candidates[0]
+        else:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(
+                    "ask_target",
+                    choices=[str(h.alias) for h in desktop_candidates],
+                ),
+                tool_call_id=call.id,
+            )
+
+        requested_project = str(clean_args.get("project", "recent") or "recent").strip()
+        capsule_id_arg = str(clean_args.get("capsule_id", "") or "").strip()
+
+        restore_args: dict[str, object] = {"project": requested_project}
+        if capsule_id_arg:
+            restore_args["capsuleId"] = capsule_id_arg
+
+        plan_args: dict[str, object] = {
+            "template": WorkflowTemplate.REHYDRATE_PROJECT.value,
+            "host": str(pc_host.alias),
+            "project": requested_project,
+            "capsuleId": capsule_id_arg or "latest",
+        }
+        plan_summary = (
+            f"Restore workspace capsule ({capsule_id_arg or requested_project}) on {pc_host.alias}"
+            if locale == Locale.EN
+            else (
+                f"Khôi phục gói ngữ cảnh dự án ({capsule_id_arg or requested_project}) "
+                f"trên {pc_host.alias}"
+            )
+        )
+        decision, approval_req = await self._request_single_plan_approval(
+            owner_id=owner_id,
+            host_id=pc_host.host_id,
+            target_label=str(pc_host.alias),
+            tool_label="workflow.template",
+            summary=plan_summary,
+            approval_args=plan_args,
+            emit_event=emit_event,
+            request_id=request_id,
+        )
+        if decision != ApprovalState.APPROVED:
+            final_state = "rejected" if decision == ApprovalState.REJECTED else "expired"
+            await emit_event(
+                ActionResultEvent(
+                    invocation_id=str(uuid.uuid4()),
+                    target=str(pc_host.alias),
+                    summary=f"✗ {plan_summary}"[:240],
+                    status=final_state,
+                    gesture=gesture_for_action_status(final_state),
+                )
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(final_state),
+                tool_call_id=call.id,
+            )
+
+        res_status, res_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="workspace.restore_capsule",
+            arguments=restore_args,
+            risk=RiskTier.R2,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+            approval_id=approval_req.approval_id,
+            expires_at=approval_req.expires_at,
+        )
+        if res_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(res_status),
+                tool_call_id=call.id,
+            )
+
+        restored_capsule_id = str(res_sc.get("capsuleId", capsule_id_arg or "cap-latest"))
+        workspace_name = str(res_sc.get("workspace", requested_project))
+        branch = str(res_sc.get("branch", "main"))
+        briefing = str(
+            res_sc.get(
+                "briefing",
+                f"Restored {workspace_name}@{branch} ({restored_capsule_id})",
+            )
+        )
+        next_step_hint = str(res_sc.get("nextStepHint", ""))
+
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {plan_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.REHYDRATE_PROJECT.value,
+                    "host": str(pc_host.alias),
+                    "capsuleId": restored_capsule_id,
+                    "workspace": workspace_name,
+                    "branch": branch,
+                    "briefing": briefing,
+                    "nextStepHint": next_step_hint,
                 },
             ),
             tool_call_id=call.id,

@@ -44,6 +44,8 @@ WORKFLOW_TEMPLATES: tuple[str, ...] = (
     "meeting_ready",
     "preview_on_phone",
     "daily_standup",
+    "freeze_for_tonight",
+    "rehydrate_project",
 )
 WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -118,6 +120,14 @@ WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
             "type": "integer",
             "minimum": 1024,
             "maximum": 65535,
+        },
+        "capsule_id": {
+            "type": "string",
+            "maxLength": 64,
+        },
+        "next_step_hint": {
+            "type": "string",
+            "maxLength": 240,
         },
     },
     "required": ["template"],
