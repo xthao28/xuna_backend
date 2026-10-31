@@ -334,6 +334,106 @@ _CONVENTION_CONTEXT_PATTERNS = (
 )
 
 
+_HOST_DEFAULT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "media",
+        re.compile(
+            r"\b(?:(?:nhạc|music|media|bài hát)\s+(?:thì|cứ|luôn|mặc định)?\s*"
+            r"(?:mở|phát|bật|chơi)\s+(?:trên|ở)|"
+            r"(?:mặc định|luôn)\s+(?:mở|phát|bật)\s+(?:nhạc|music|media)\s+(?:trên|ở)|"
+            r"(?:always|default)\s+(?:play|open)\s+(?:music|media)\s+on)\s+"
+            r"([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9 _\-]{0,30})\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "url",
+        re.compile(
+            r"\b(?:(?:liên kết(?:\s+web)?|trang web|link|url)\s+(?:thì|cứ|luôn|mặc định)?\s*"
+            r"mở\s+(?:trên|ở)|"
+            r"(?:mặc định|luôn)\s+mở\s+(?:liên kết(?:\s+web)?|trang web|link|url)\s+(?:trên|ở)|"
+            r"(?:always|default)\s+open\s+(?:links?|urls?)\s+on)\s+"
+            r"([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9 _\-]{0,30})\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "app",
+        re.compile(
+            r"\b(?:(?:ứng dụng|app|phần mềm)\s+(?:thì|cứ|luôn|mặc định)?\s*"
+            r"(?:mở|chạy)\s+(?:trên|ở)|"
+            r"(?:mặc định|luôn)\s+(?:mở|chạy)\s+(?:ứng dụng|app|phần mềm)\s+(?:trên|ở)|"
+            r"(?:always|default)\s+(?:open|launch)\s+apps?\s+on)\s+"
+            r"([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9 _\-]{0,30})\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "workflow",
+        re.compile(
+            r"\b(?:(?:quy trình|workflow|shortcut)\s+(?:thì|cứ|luôn|mặc định)?\s*"
+            r"chạy\s+(?:trên|ở)|"
+            r"(?:mặc định|luôn)\s+chạy\s+(?:quy trình|workflow|shortcut)\s+(?:trên|ở)|"
+            r"(?:always|default)\s+run\s+workflows?\s+on)\s+"
+            r"([A-Za-zÀ-ỹ0-9][A-Za-zÀ-ỹ0-9 _\-]{0,30})\b",
+            re.IGNORECASE,
+        ),
+    ),
+)
+
+_FAMILY_LABELS_VI: dict[str, str] = {
+    "media": "nhạc / đa phương tiện",
+    "url": "liên kết web",
+    "app": "ứng dụng",
+    "workflow": "quy trình tự động",
+}
+
+
+def extract_host_default_candidate(text: str) -> ExtractedCandidate | None:
+    """Extracts a prospective `host_default` convention candidate (UDC-10 §4.1).
+
+    Created ONLY as an unconfirmed candidate (`awaiting_owner_confirmation`);
+    never takes effect until the owner confirms it.
+    """
+    cleaned = unicodedata.normalize("NFC", text).strip()
+    if len(cleaned) < 8 or len(cleaned) > 200:
+        return None
+    if _has_guard_violation(cleaned):
+        return None
+    if _CREDENTIAL_PATTERN.search(cleaned):
+        return None
+    if _QUESTION_PATTERN.search(cleaned):
+        return None
+
+    for family, pattern in _HOST_DEFAULT_PATTERNS:
+        match = pattern.search(cleaned)
+        if match is not None:
+            raw_alias = match.group(1).strip().rstrip(".,;! ")
+            changed = True
+            while changed:
+                changed = False
+                for suffix in (" luôn", " nhé", " nha", " đi"):
+                    if raw_alias.lower().endswith(suffix):
+                        raw_alias = raw_alias[: -len(suffix)].strip()
+                        changed = True
+            if not raw_alias or len(raw_alias) > 32:
+                continue
+            family_label = _FAMILY_LABELS_VI.get(family, family)
+            summary = f"Mặc định mở {family_label} trên {raw_alias}"
+            return ExtractedCandidate(
+                candidate_type=CandidateType.KNOWLEDGE,
+                content={
+                    "text": summary,
+                    "summary": summary,
+                    "kind": "host_default",
+                    "family": family,
+                    "hostAlias": raw_alias,
+                },
+                source="conversation",
+            )
+    return None
+
+
 def extract_convention_candidate(text: str) -> ExtractedCandidate | None:
     """Extracts a prospective working convention candidate from owner text (KX-4 §6.9).
 
@@ -341,9 +441,14 @@ def extract_convention_candidate(text: str) -> ExtractedCandidate | None:
     - Filters passwords, door codes, credentials.
     - Filters questions, casual chit-chat, greetings.
     - Filters stated preferences and personal facts (handled by extract_candidate).
+    - Checks `host_default` statements first (UDC-10 §4.1).
     - Requires 10 <= len <= 280 and at least 3 words.
     - Requires an explicit owner work-context marker.
     """
+    host_default = extract_host_default_candidate(text)
+    if host_default is not None:
+        return host_default
+
     cleaned = unicodedata.normalize("NFC", text).strip()
     if len(cleaned) < 10 or len(cleaned) > 280:
         return None

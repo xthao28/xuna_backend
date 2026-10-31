@@ -53,6 +53,10 @@ from xuna_backend.modules.actions.domain.entities import (
     LocalActionRequestEvent,
     gesture_for_action_status,
 )
+from xuna_backend.modules.actions.domain.personalization import (
+    HostDefaultConvention,
+    InMemoryHostDefaultStore,
+)
 from xuna_backend.modules.actions.domain.schema_validator import (
     ArgumentValidationError,
     SchemaDefinitionError,
@@ -135,6 +139,7 @@ class ActionContext:
     emit_event: EventSink
     request_id: str = ""
     self_host_id: str | None = None
+    host_defaults: dict[str, str] | None = None
 
 
 def _truncate_value(val: object, *, max_str: int = 120) -> object:
@@ -185,6 +190,7 @@ class Orchestrator:
         scope_store: ApprovalScopeStore | None = None,
         verifier: SignatureVerifier | None = None,
         workflow_slot_store: InMemoryBoardWorkflowSlotStore | None = None,
+        host_default_store: InMemoryHostDefaultStore | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._host_repo = host_repo
@@ -198,6 +204,7 @@ class Orchestrator:
         self._verifier = verifier
         self._clock = clock or (lambda: datetime.now(UTC))
         self._workflow_slot_store = workflow_slot_store or InMemoryBoardWorkflowSlotStore()
+        self._host_default_store = host_default_store or InMemoryHostDefaultStore()
         self._workflow_runner = CompositeWorkflowRunner(
             host_repo=host_repo,
             hub=hub,
@@ -469,6 +476,33 @@ class Orchestrator:
     ) -> WorkflowSlotAssignment:
         return self._workflow_slot_store.set_slot(assignment)
 
+    def set_host_default(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        pet_id: str,
+        family: str,
+        host_alias: str,
+        candidate_id: uuid.UUID | None = None,
+    ) -> HostDefaultConvention:
+        """Registers an owner-confirmed `host_default` convention (UDC-10 S10.1)."""
+        return self._host_default_store.add_confirmed(
+            owner_id=owner_id,
+            pet_id=pet_id,
+            family=family,
+            host_alias=host_alias,
+            candidate_id=candidate_id,
+        )
+
+    def delete_host_default(
+        self,
+        candidate_id: uuid.UUID,
+        *,
+        owner_id: uuid.UUID | None = None,
+    ) -> bool:
+        """Deletes a `host_default` convention, taking effect immediately (UDC-10 S10.1)."""
+        return self._host_default_store.delete(candidate_id, owner_id=owner_id)
+
     async def trigger_board_workflow(
         self,
         *,
@@ -706,6 +740,16 @@ class Orchestrator:
         last_target = self._last_target_store.get_last_target(ctx.owner_id, ctx.pet_id, now)
         last_alias = last_target[0] if last_target is not None else None
         last_at = last_target[1] if last_target is not None else None
+        family_key = reference_descriptor.family.value
+        default_alias = (
+            ctx.host_defaults.get(family_key)
+            if ctx.host_defaults is not None and family_key in ctx.host_defaults
+            else self._host_default_store.get_default_alias(
+                owner_id=ctx.owner_id,
+                pet_id=ctx.pet_id,
+                family=reference_descriptor.family,
+            )
+        )
 
         resolution = TargetResolver.resolve(
             requested_target=requested_target,
@@ -718,6 +762,7 @@ class Orchestrator:
             last_target_alias=last_alias,
             last_target_at=last_at,
             now=now,
+            host_default_alias=default_alias,
         )
         if resolution.status == TargetResolutionStatus.NO_HOST:
             return Message(

@@ -137,6 +137,7 @@ class TargetResolver:
         last_target_at: datetime | None = None,
         now: datetime | None = None,
         capability_filter: Callable[[Host], bool] | None = None,
+        host_default_alias: str | None = None,
     ) -> TargetResolution:
         filtered_eligible = (
             [h for h in eligible_hosts if capability_filter(h)]
@@ -295,6 +296,21 @@ class TargetResolver:
                 choices=eligible_aliases,
                 reason="last_target_5m",
             )
+
+        if host_default_alias is not None and host_default_alias.strip():
+            default_raw = host_default_alias.strip().lower()
+            default_folded = _fold_text(host_default_alias)
+            for h in filtered_eligible:
+                if (
+                    h.alias.value.lower() == default_raw
+                    or _fold_text(h.alias.value) == default_folded
+                ):
+                    return TargetResolution(
+                        status=TargetResolutionStatus.RESOLVED,
+                        host=h,
+                        choices=eligible_aliases,
+                        reason="host_default",
+                    )
 
         return TargetResolution(
             status=TargetResolutionStatus.ASK_TARGET,

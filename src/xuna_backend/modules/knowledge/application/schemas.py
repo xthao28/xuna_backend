@@ -81,6 +81,9 @@ class TeachKnowledgeRequest(BaseModel):
 
     text: str = Field(min_length=1, max_length=280)
     domain_id: uuid.UUID | None = Field(default=None, alias="domainId", strict=False)
+    kind: Literal["convention", "host_default"] = Field(default="convention")
+    family: Literal["media", "app", "url", "workflow"] | None = Field(default=None)
+    host_alias: str | None = Field(default=None, alias="hostAlias", min_length=1, max_length=32)
 
 
 class ProposeKnowledgeCaseRequest(BaseModel):

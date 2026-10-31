@@ -378,13 +378,24 @@ class TeachKnowledgeUseCase:
                         related_id = f.candidate_id
                         break
 
+        candidate_content: dict[str, object] = {
+            "text": text,
+            "summary": text,
+            "kind": request.kind,
+        }
+        if request.kind == "host_default":
+            if request.family is None or not request.host_alias:
+                raise ValueError("family and hostAlias are required for host_default convention")
+            candidate_content["family"] = request.family
+            candidate_content["hostAlias"] = request.host_alias.strip()
+
         candidate = MemoryCandidate(
             candidate_id=uuid.uuid4(),
             owner_id=owner_id,
             pet_id=pet_id,
             source="owner",
             candidate_type=CandidateType.KNOWLEDGE,
-            content={"text": text, "summary": text, "kind": "convention"},
+            content=candidate_content,
             status=CandidateStatus.AWAITING_OWNER_CONFIRMATION,
             created_at=current_now,
             updated_at=current_now,
@@ -399,7 +410,7 @@ class TeachKnowledgeUseCase:
             candidate_id=candidate.candidate_id,
             fact_key=fact_key,
             text=text,
-            kind="convention",
+            kind=request.kind,
             status=candidate.status.value,
             proposed_domain_id=proposed_domain_id,
             relation=relation,
