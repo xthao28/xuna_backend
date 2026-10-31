@@ -22,6 +22,45 @@ BOARD_MEDIA_KEY_DESCRIPTION = (
     "to the currently paired host (requires owner confirmation)."
 )
 
+WORKFLOW_TEMPLATE_TOOL = "workflow.template"
+WORKFLOW_TEMPLATE_FUNCTION_NAME = "workflow_template"
+WORKFLOW_TEMPLATE_DESCRIPTION = (
+    "Run a deterministic cross-device workflow template (`link_to_phone`, "
+    "`continue_media`, or `pause_everywhere`) with a single owner approval."
+)
+WORKFLOW_TEMPLATES: tuple[str, ...] = (
+    "link_to_phone",
+    "continue_media",
+    "pause_everywhere",
+)
+WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "template": {
+            "type": "string",
+            "enum": list(WORKFLOW_TEMPLATES),
+        },
+        "source_target": {
+            "type": "string",
+            "maxLength": 24,
+        },
+        "destination_target": {
+            "type": "string",
+            "maxLength": 24,
+        },
+        "browser": {
+            "type": "string",
+            "enum": ["auto", "edge", "chrome", "safari"],
+        },
+        "player_id": {
+            "type": "string",
+            "maxLength": 64,
+        },
+    },
+    "required": ["template"],
+    "additionalProperties": False,
+}
+
 # Normative Consumer Control usage index mapping (BLE Opcode 12 arg 1..7, UDC-2 §5.1).
 BOARD_MEDIA_KEY_TO_USAGE_INDEX: dict[str, int] = {
     "play_pause": 1,
@@ -57,6 +96,8 @@ def is_forbidden_tool_name(dotted_name: str) -> bool:
 def to_function_name(tool_name: str) -> str:
     """Converts a validated dotted tool name (`media.play_pause` or `board.media_key`)
     into an OpenAI-compatible function name (`media__play_pause`)."""
+    if tool_name == WORKFLOW_TEMPLATE_TOOL:
+        return WORKFLOW_TEMPLATE_FUNCTION_NAME
     if tool_name != BOARD_TOOL:
         validate_tool_name(tool_name)
     func_name = tool_name.replace(".", "__")
@@ -70,6 +111,12 @@ def from_function_name(func_name: str) -> str | None:
     its canonical dotted tool name. Returns `None` if unknown, malformed, or forbidden."""
     if not func_name or len(func_name) > 64:
         return None
+    if func_name in (
+        WORKFLOW_TEMPLATE_FUNCTION_NAME,
+        "workflow__template",
+        WORKFLOW_TEMPLATE_TOOL,
+    ):
+        return WORKFLOW_TEMPLATE_TOOL
     if "__" in func_name:
         parts = func_name.split("__")
         if len(parts) != 2 or not parts[0] or not parts[1]:

@@ -216,6 +216,9 @@ class ActionSummary:
                 raw_url = str(arguments.get("url", ""))
                 host = urlparse(raw_url).hostname or raw_url[:40]
                 return f"Mở trang {host} trên {target}"[:240]
+            case "browser.current_url":
+                browser = str(arguments.get("browser", "auto"))[:20]
+                return f"Đọc trang đang mở ({browser}) trên {target}"[:240]
             case "workflow.run":
                 wf_id = str(arguments.get("id", ""))[:40]
                 return f"Chạy quy trình {wf_id} trên {target}"[:240]
@@ -259,6 +262,9 @@ class ActionSummary:
                 raw_url = str(arguments.get("url", ""))
                 host = urlparse(raw_url).hostname or raw_url[:40]
                 return f"Open {host} on {target}"[:240]
+            case "browser.current_url":
+                browser = str(arguments.get("browser", "auto"))[:20]
+                return f"Read active browser tab ({browser}) on {target}"[:240]
             case "workflow.run":
                 wf_id = str(arguments.get("id", ""))[:40]
                 return f"Run workflow {wf_id} on {target}"[:240]

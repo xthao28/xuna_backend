@@ -31,6 +31,12 @@ from xuna_backend.modules.actions.application.ports import (
     LastTargetStore,
     LocalResultBroker,
 )
+from xuna_backend.modules.actions.application.workflows import (
+    BoardWorkflowTriggerResult,
+    CompositeWorkflowRunner,
+    InMemoryBoardWorkflowSlotStore,
+    WorkflowSlotAssignment,
+)
 from xuna_backend.modules.actions.domain.entities import (
     APPROVAL_TTL_SECONDS,
     MAX_TOOL_OUTPUT_BYTES,
@@ -60,6 +66,7 @@ from xuna_backend.modules.actions.domain.tool_names import (
     BOARD_MEDIA_KEY_SCHEMA,
     BOARD_MEDIA_KEY_TO_USAGE_INDEX,
     BOARD_TOOL,
+    WORKFLOW_TEMPLATE_TOOL,
     from_function_name,
     is_forbidden_tool_name,
 )
@@ -177,6 +184,7 @@ class Orchestrator:
         audit: AuditLog,
         scope_store: ApprovalScopeStore | None = None,
         verifier: SignatureVerifier | None = None,
+        workflow_slot_store: InMemoryBoardWorkflowSlotStore | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._host_repo = host_repo
@@ -189,6 +197,17 @@ class Orchestrator:
         self._scope_store = scope_store
         self._verifier = verifier
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._workflow_slot_store = workflow_slot_store or InMemoryBoardWorkflowSlotStore()
+        self._workflow_runner = CompositeWorkflowRunner(
+            host_repo=host_repo,
+            hub=hub,
+            approval_repo=approval_repo,
+            approval_broker=approval_broker,
+            local_result_broker=local_result_broker,
+            audit=audit,
+            slot_store=self._workflow_slot_store,
+            clock=self._clock,
+        )
 
     async def emergency_stop(
         self,
@@ -430,7 +449,52 @@ class Orchestrator:
                 tool_call_id=call.id,
             )
 
+        if tool_name == WORKFLOW_TEMPLATE_TOOL:
+            return await self._workflow_runner.handle_template_call(
+                call,
+                owner_id=ctx.owner_id,
+                locale=ctx.locale,
+                client_caps=ctx.client_caps,
+                board_available=ctx.board_available,
+                emit_event=ctx.emit_event,
+                request_id=ctx.request_id,
+                self_host_id=ctx.self_host_id,
+            )
+
         return await self._handle_host_call(tool_name, call, ctx)
+
+    def assign_board_workflow_slot(
+        self,
+        assignment: WorkflowSlotAssignment,
+    ) -> WorkflowSlotAssignment:
+        return self._workflow_slot_store.set_slot(assignment)
+
+    async def trigger_board_workflow(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        slot: int,
+        host_alias: str | None = None,
+        workflow_id: str | None = None,
+        workflow_name: str | None = None,
+        risk: RiskTier | None = None,
+        approval_id: uuid.UUID | None = None,
+        wait_for_approval: bool = False,
+        request_id: str = "",
+        self_host_id: str | None = None,
+    ) -> BoardWorkflowTriggerResult:
+        return await self._workflow_runner.trigger_board_workflow(
+            owner_id=owner_id,
+            slot=slot,
+            host_alias=host_alias,
+            workflow_id=workflow_id,
+            workflow_name=workflow_name,
+            risk=risk,
+            approval_id=approval_id,
+            wait_for_approval=wait_for_approval,
+            request_id=request_id,
+            self_host_id=self_host_id,
+        )
 
     async def _handle_board_call(self, call: ToolCall, ctx: ActionContext) -> Message:
         if CAP_BOARD_HID_V1 not in ctx.client_caps or not ctx.board_available:

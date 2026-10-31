@@ -277,10 +277,13 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
     if not _TOOL_NAME_RE.match(name):
         raise ValueError(f"invalid tool name format: {name}")
     family_str = name.split(".", 1)[0]
-    try:
-        family = ToolFamily(family_str)
-    except ValueError as error:
-        raise ValueError(f"unknown tool family in {name}") from error
+    if family_str == "browser":
+        family = ToolFamily.URL
+    else:
+        try:
+            family = ToolFamily(family_str)
+        except ValueError as error:
+            raise ValueError(f"unknown tool family in {name}") from error
     if expected_family is not None and family != expected_family:
         raise ValueError(
             f"tool {name} family prefix {family.value} does not match {expected_family.value}"

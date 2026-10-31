@@ -26,6 +26,10 @@ from xuna_backend.modules.actions.application.ports import (
     LastTargetStore,
     LocalResultBroker,
 )
+from xuna_backend.modules.actions.application.workflows import (
+    InMemoryBoardWorkflowSlotStore,
+    WorkflowSlotAssignment,
+)
 from xuna_backend.modules.actions.domain.entities import (
     ApprovalDecision,
     ApprovalRequest,
@@ -34,7 +38,13 @@ from xuna_backend.modules.actions.domain.entities import (
 from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.audit.domain.event import AuditEvent
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
-from xuna_backend.modules.hosts.domain.entities import Grant, Host, HostId, Manifest
+from xuna_backend.modules.hosts.domain.entities import (
+    Grant,
+    Host,
+    HostId,
+    Manifest,
+    RiskTier,
+)
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
 
 router = APIRouter(prefix="/v1/actions", tags=["actions"])
@@ -73,6 +83,27 @@ class ReportActionResultBody(BaseModel):
     ]
     output: dict[str, Any] | None = None
     errorCode: str | None = Field(default=None, max_length=64)
+
+
+class AssignWorkflowSlotBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    hostAlias: str = Field(min_length=1, max_length=24)
+    workflowId: str = Field(min_length=1, max_length=64)
+    workflowName: str = Field(min_length=1, max_length=80)
+    risk: RiskTier = RiskTier.R1
+
+
+class TriggerWorkflowBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    slot: Literal[1, 2]
+    hostAlias: str | None = Field(default=None, min_length=1, max_length=24)
+    workflowId: str | None = Field(default=None, min_length=1, max_length=64)
+    workflowName: str | None = Field(default=None, min_length=1, max_length=80)
+    risk: RiskTier | None = None
+    approvalId: uuid.UUID | None = None
+    waitForApproval: bool = False
 
 
 def _decode_b64_flex(raw: str, expected_len: int) -> bytes:
@@ -234,6 +265,15 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
 def _request_id(request: Request) -> str:
     rid = getattr(request.state, "request_id", "")
     return str(rid) if isinstance(rid, str) else ""
+
+
+def _get_workflow_slot_store(request: Request) -> InMemoryBoardWorkflowSlotStore:
+    store = getattr(request.app.state, "workflow_slot_store", None)
+    if isinstance(store, InMemoryBoardWorkflowSlotStore):
+        return store
+    new_store = InMemoryBoardWorkflowSlotStore()
+    request.app.state.workflow_slot_store = new_store
+    return new_store
 
 
 @router.post("/approvals/{approval_id}")
@@ -409,4 +449,120 @@ async def report_action_result(
     return {
         "invocationId": invocation_id,
         "status": body.status,
+    }
+
+
+@router.put("/workflow-slots/{slot}")
+async def assign_board_workflow_slot(
+    slot: int,
+    body: AssignWorkflowSlotBody,
+    request: Request,
+    owner: CurrentOwner,
+) -> dict[str, Any]:
+    """UDC-9 S9.3: Assigns an owner workflow to board button slot 1 or 2.
+    Enforces `UDC-T15` (`R3` workflows cannot be assigned to board buttons)."""
+    slot_store = _get_workflow_slot_store(request)
+    try:
+        assignment = WorkflowSlotAssignment(
+            owner_id=owner.owner_id,
+            slot=slot,
+            host_alias=body.hostAlias,
+            workflow_id=body.workflowId,
+            workflow_name=body.workflowName,
+            risk=body.risk,
+        )
+        slot_store.set_slot(assignment)
+    except ValueError as error:
+        code = str(error)
+        if code == "workflow_risk_forbidden":
+            raise AppError(
+                "workflow_risk_forbidden",
+                HTTPStatus.FORBIDDEN,
+                "R3 workflows cannot be assigned to board buttons (UDC-T15)",
+            ) from error
+        raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, code) from error
+
+    return {
+        "slot": assignment.slot,
+        "hostAlias": assignment.host_alias,
+        "workflowId": assignment.workflow_id,
+        "workflowName": assignment.workflow_name,
+        "risk": assignment.risk.value,
+    }
+
+
+@router.post("/workflow-trigger")
+async def trigger_board_workflow_route(
+    body: TriggerWorkflowBody,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+) -> dict[str, Any]:
+    """UDC-9 S9.3: Runs the owner-configured `{hostAlias, workflowId}` for a board
+    Remote button slot (`1` = GPIO0 short, `2` = GPIO14 short).
+    - `R1` runs immediately (owner is physically present on the board).
+    - `R2` asks approval on the phone.
+    - `R3` is forbidden (`UDC-T15`, 403 `workflow_risk_forbidden`)."""
+    host_factory: Callable[[object], HostRepository] = state(request, "host_repository")
+    approval_factory: Callable[[object], ApprovalRepository] = state(
+        request, "approval_repository"
+    )
+    audit_factory: Callable[[object], AuditLog] = state(request, "audit_log")
+    hub: HostSessionHub = state(request, "host_session_hub")
+    approval_broker: ApprovalBroker = state(request, "approval_broker")
+    local_result_broker: LocalResultBroker = state(request, "local_result_broker")
+    last_target_store: LastTargetStore = state(request, "last_target_store")
+    slot_store = _get_workflow_slot_store(request)
+
+    orch = Orchestrator(
+        host_repo=host_factory(session),
+        hub=hub,
+        approval_repo=approval_factory(session),
+        approval_broker=approval_broker,
+        local_result_broker=local_result_broker,
+        last_target_store=last_target_store,
+        audit=audit_factory(session),
+        workflow_slot_store=slot_store,
+    )
+    try:
+        res = await orch.trigger_board_workflow(
+            owner_id=owner.owner_id,
+            slot=body.slot,
+            host_alias=body.hostAlias,
+            workflow_id=body.workflowId,
+            workflow_name=body.workflowName,
+            risk=body.risk,
+            approval_id=body.approvalId,
+            wait_for_approval=body.waitForApproval,
+            request_id=_request_id(request),
+        )
+    except ValueError as error:
+        await session.commit()
+        code = str(error)
+        if code == "workflow_risk_forbidden":
+            raise AppError(
+                "workflow_risk_forbidden",
+                HTTPStatus.FORBIDDEN,
+                "R3 workflows cannot be triggered from board buttons (UDC-T15)",
+            ) from error
+        if code in ("slot_not_configured", "host_offline"):
+            raise AppError(code, HTTPStatus.NOT_FOUND, code) from error
+        if code in ("grant_denied", "approval_invalid"):
+            raise AppError(code, HTTPStatus.FORBIDDEN, code) from error
+        raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, code) from error
+
+    await session.commit()
+    return {
+        "status": res.status,
+        "slot": res.slot,
+        "host": res.host,
+        "workflowId": res.workflow_id,
+        "workflowName": res.workflow_name,
+        "risk": res.risk,
+        "bubble": res.bubble,
+        "gesture": res.gesture,
+        "approvalId": res.approval_id,
+        "summary": res.summary,
+        "expiresAt": res.expires_at,
+        "argsSha256": res.args_sha256,
     }

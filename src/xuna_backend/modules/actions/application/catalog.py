@@ -13,6 +13,9 @@ from xuna_backend.modules.actions.domain.tool_names import (
     BOARD_FUNCTION_NAME,
     BOARD_MEDIA_KEY_DESCRIPTION,
     BOARD_MEDIA_KEY_SCHEMA,
+    WORKFLOW_TEMPLATE_DESCRIPTION,
+    WORKFLOW_TEMPLATE_FUNCTION_NAME,
+    WORKFLOW_TEMPLATE_SCHEMA,
     is_forbidden_tool_name,
     to_function_name,
 )
@@ -32,6 +35,7 @@ from xuna_backend.modules.hosts.domain.entities import (
 MAX_CATALOG_TOOLS = 8
 CAP_HOST_ACTIONS_V1 = "host_actions_v1"
 CAP_BOARD_HID_V1 = "board_hid_v1"
+CAP_WORKFLOW_TEMPLATES_V1 = "workflow_templates_v1"
 
 _U5_REQUIRED_FAMILIES: frozenset[ToolFamily] = frozenset(
     {
@@ -50,6 +54,7 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "media.now_playing",
     "app.launch",
     "url.open",
+    "browser.current_url",
     "workflow.run",
     "host.notify",
     "host.status",
@@ -95,6 +100,7 @@ def build_tool_catalog(
     client_caps: Collection[str],
     board_available: bool = False,
     host_screen_consent: bool = False,
+    include_workflow_template: bool = False,
     now: datetime | None = None,
 ) -> tuple[ToolSpec, ...]:
     """Builds up to `MAX_CATALOG_TOOLS` (`8`) `ToolSpec` entries for `ChatRequest.tools`.
@@ -105,11 +111,15 @@ def build_tool_catalog(
     """
     include_host_tools = CAP_HOST_ACTIONS_V1 in client_caps
     include_board_tool = CAP_BOARD_HID_V1 in client_caps and board_available
+    include_wf_template = include_host_tools and (
+        include_workflow_template or CAP_WORKFLOW_TEMPLATES_V1 in client_caps
+    )
     if not include_host_tools and not include_board_tool:
         return ()
 
     check_now = now or datetime.now(UTC)
-    host_limit = MAX_CATALOG_TOOLS - (1 if include_board_tool else 0)
+    reserved = (1 if include_board_tool else 0) + (1 if include_wf_template else 0)
+    host_limit = max(MAX_CATALOG_TOOLS - reserved, 0)
     specs: list[ToolSpec] = []
 
     if include_host_tools and host_limit > 0:
@@ -174,6 +184,15 @@ def build_tool_catalog(
                     parameters=schema_copy,
                 )
             )
+
+    if include_wf_template:
+        specs.append(
+            ToolSpec(
+                name=WORKFLOW_TEMPLATE_FUNCTION_NAME,
+                description=WORKFLOW_TEMPLATE_DESCRIPTION,
+                parameters=copy.deepcopy(WORKFLOW_TEMPLATE_SCHEMA),
+            )
+        )
 
     if include_board_tool:
         specs.append(
