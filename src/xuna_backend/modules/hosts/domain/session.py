@@ -40,7 +40,7 @@ class HostGatewayLimits:
     default_call_deadline_ms: int = 10_000
     max_frame_bytes: int = 65_536
     max_structured_content_bytes: int = 16_384
-    claims_per_owner_per_min: int = 5
+    claims_per_owner_per_min: int = 30
     connects_per_peer_per_min: int = 30
 
     @property

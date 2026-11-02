@@ -371,6 +371,7 @@ async def claim_host_endpoint(
                 "sas": pending.sas,
                 "platform": pending.platform.value,
                 "hostname": pending.hostname,
+                "expiresAt": pending.expires_at.astimezone(UTC).isoformat(),
             },
         )
 

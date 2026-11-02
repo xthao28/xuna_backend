@@ -56,6 +56,7 @@ class GrantItemInput(BaseModel):
         "url",
         "workflow",
         "host",
+        "cu",
         "ui",
         "input",
         "timer",
@@ -70,6 +71,14 @@ class GrantItemInput(BaseModel):
     suspended: bool | None = None
 
     def parsed_family(self) -> ToolFamily:
+        alias_map = {
+            "window": ToolFamily.WORKFLOW,
+            "timer": ToolFamily.WORKFLOW,
+            "clipboard": ToolFamily.APP,
+            "browser": ToolFamily.URL,
+        }
+        if self.family in alias_map:
+            return alias_map[self.family]
         return ToolFamily(self.family)
 
     def parsed_max_risk(self) -> RiskTier:
