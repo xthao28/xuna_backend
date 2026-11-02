@@ -225,3 +225,50 @@ class SocialPostcard:
             "createdAt": self.created_at.isoformat(),
         }
 
+
+@dataclass(frozen=True, slots=True)
+class ForgedSkillBlueprint:
+    """Universal Citizen-Developer Skill Blueprint synthesized by XUNA OmniForge
+    (`FORGE-2`). Combines 1-call LLM/deterministic recipe generation with a 1-item
+    dry-run preview and zero-token local loop steps."""
+
+    skill_id: str
+    title_vi: str
+    category: str
+    goal: str
+    target_folder: str
+    file_extensions: tuple[str, ...]
+    detected_items_count: int
+    dry_run_sample: str
+    self_debug_iterations: int
+    parameter_fields: tuple[dict[str, str], ...]
+    script_steps: tuple[str, ...]
+    summary_vi: str
+    created_at: datetime
+
+    def __post_init__(self) -> None:
+        if not self.skill_id.strip():
+            raise ValueError("skill_id must not be empty")
+        if not 1 <= len(self.title_vi.strip()) <= 120:
+            raise ValueError("title_vi must be 1..120 characters")
+        if not 1 <= len(self.summary_vi.strip()) <= 240:
+            raise ValueError("summary_vi must be 1..240 characters")
+        if self.created_at.tzinfo is None:
+            raise ValueError("created_at must be timezone-aware")
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "skillId": self.skill_id,
+            "titleVi": self.title_vi,
+            "category": self.category,
+            "goal": self.goal,
+            "targetFolder": self.target_folder,
+            "fileExtensions": list(self.file_extensions),
+            "detectedItemsCount": self.detected_items_count,
+            "dryRunSample": self.dry_run_sample,
+            "selfDebugIterations": self.self_debug_iterations,
+            "parameterFields": [dict(f) for f in self.parameter_fields],
+            "scriptSteps": list(self.script_steps),
+            "summaryVi": self.summary_vi,
+            "createdAt": self.created_at.isoformat(),
+        }

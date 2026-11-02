@@ -13,6 +13,10 @@ from xuna_backend.modules.symbiotic.application.schemas import (
     DreamConsolidateRequest,
     DreamConsolidateResponse,
     DreamVignetteResponse,
+    ForgedSkillBlueprintResponse,
+    ForgeParameterFieldResponse,
+    ForgeSkillRequest,
+    ForgeSkillResponse,
     HabitMacroProposalResponse,
     RecordSocialEncounterRequest,
     RecordSocialEncounterResponse,
@@ -26,6 +30,7 @@ from xuna_backend.modules.symbiotic.application.services import (
     CoRegulationEvaluator,
     DreamConsolidatorService,
     HabitWorkflowMiner,
+    OmniForgeSynthesizerService,
     SerendipityEngine,
     SocialEcologyService,
 )
@@ -37,6 +42,7 @@ _coreg_evaluator = CoRegulationEvaluator()
 _serendipity_engine = SerendipityEngine()
 _habit_miner = HabitWorkflowMiner()
 _social_ecology = SocialEcologyService()
+_omniforge = OmniForgeSynthesizerService()
 
 
 @router.post("/dream-consolidate", response_model=DreamConsolidateResponse)
@@ -99,9 +105,7 @@ async def decompose_overwhelm_and_spark(
         f"Kiểm tra nhanh kết quả bước đầu tiên trên {clean_proj}.",
         "Đánh dấu hoàn thành mảnh đầu tiên và quyết định bước tiếp theo cùng XUNA.",
     ]
-    encouragement_vi = (
-        "Chỉ cần 5 phút khởi động thôi bạn ơi, mình ngồi canh giờ ngay cạnh bạn đây!"
-    )
+    encouragement_vi = "Chỉ cần 5 phút khởi động thôi bạn ơi, mình ngồi canh giờ ngay cạnh bạn đây!"
     note = _serendipity_engine.generate_note(
         primary_topic=clean_goal,
         secondary_topic=clean_proj,
@@ -174,3 +178,43 @@ async def record_social_encounter(
         ),
     )
 
+
+@router.post("/forge-skill", response_model=ForgeSkillResponse)
+async def forge_citizen_skill(
+    body: ForgeSkillRequest,
+) -> ForgeSkillResponse:
+    try:
+        blueprint = _omniforge.synthesize_skill(
+            goal=body.goal,
+            category=body.category,
+            target_folder=body.targetFolder,
+            file_extensions=tuple(body.fileExtensions),
+            demonstrated_action=body.demonstratedAction,
+        )
+    except ValueError as err:
+        raise AppError("invalid_argument", HTTPStatus.UNPROCESSABLE_ENTITY) from err
+
+    return ForgeSkillResponse(
+        skill=ForgedSkillBlueprintResponse(
+            skillId=blueprint.skill_id,
+            titleVi=blueprint.title_vi,
+            category=blueprint.category,
+            goal=blueprint.goal,
+            targetFolder=blueprint.target_folder,
+            fileExtensions=list(blueprint.file_extensions),
+            detectedItemsCount=blueprint.detected_items_count,
+            dryRunSample=blueprint.dry_run_sample,
+            selfDebugIterations=blueprint.self_debug_iterations,
+            parameterFields=[
+                ForgeParameterFieldResponse(
+                    key=f["key"],
+                    labelVi=f["labelVi"],
+                    defaultValue=f["defaultValue"],
+                )
+                for f in blueprint.parameter_fields
+            ],
+            scriptSteps=list(blueprint.script_steps),
+            summaryVi=blueprint.summary_vi,
+            createdAt=blueprint.created_at.astimezone(UTC).isoformat(),
+        )
+    )

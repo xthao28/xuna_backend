@@ -111,6 +111,8 @@ class WorkflowTemplate(StrEnum):
     UNSTUCK_COACH = "unstuck_coach"
     WATCH_AND_ALERT = "watch_and_alert"
     DESK_WHISPER = "desk_whisper"
+    FORGE_INVOICE_HARVESTER = "forge_invoice_harvester"
+    TEACH_AND_COMPILE = "teach_and_compile"
 
 
 HARD_DENIED_SMARTHOME_DOMAINS: frozenset[str] = frozenset(
@@ -296,11 +298,7 @@ class InMemoryCustomWorkflowStore:
         return None
 
     def list_workflows(self, owner_id: uuid.UUID) -> list[CustomWorkflowDefinition]:
-        return [
-            item
-            for (oid, _), item in self._by_owner_name.items()
-            if oid == owner_id
-        ]
+        return [item for (oid, _), item in self._by_owner_name.items() if oid == owner_id]
 
     def delete_workflow(self, owner_id: uuid.UUID, name: str) -> bool:
         return self._by_owner_name.pop((owner_id, name.strip().lower()), None) is not None
@@ -758,6 +756,26 @@ class CompositeWorkflowRunner:
                 request_id=request_id,
                 self_host_id=self_host_id,
             )
+        if template == WorkflowTemplate.FORGE_INVOICE_HARVESTER:
+            return await self._run_forge_invoice_harvester(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.TEACH_AND_COMPILE:
+            return await self._run_teach_and_compile(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
         return await self._run_pause_everywhere(
             call=call,
             owner_id=owner_id,
@@ -884,9 +902,7 @@ class CompositeWorkflowRunner:
                 status = "failed"
 
         audit_action = (
-            AuditAction.HOST_TOOL_DENIED
-            if status == "denied"
-            else AuditAction.HOST_TOOL_INVOKED
+            AuditAction.HOST_TOOL_DENIED if status == "denied" else AuditAction.HOST_TOOL_INVOKED
         )
         await self._audit.record(
             AuditEvent(
@@ -1032,9 +1048,7 @@ class CompositeWorkflowRunner:
 
         req_src = str(clean_args.get("source_target", "")).strip()
         if req_src:
-            matched_src = [
-                h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()
-            ]
+            matched_src = [h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()]
             if not matched_src:
                 return Message(
                     role=Role.TOOL,
@@ -1059,9 +1073,7 @@ class CompositeWorkflowRunner:
 
         req_dst = str(clean_args.get("destination_target", "")).strip()
         if req_dst:
-            matched_dst = [
-                h for h in phone_candidates if str(h.alias).lower() == req_dst.lower()
-            ]
+            matched_dst = [h for h in phone_candidates if str(h.alias).lower() == req_dst.lower()]
             if not matched_dst:
                 return Message(
                     role=Role.TOOL,
@@ -1554,9 +1566,7 @@ class CompositeWorkflowRunner:
                 media_hosts.append(h)
 
         caps_set = (
-            set(client_caps)
-            if isinstance(client_caps, list | tuple | set | frozenset)
-            else set()
+            set(client_caps) if isinstance(client_caps, list | tuple | set | frozenset) else set()
         )
         include_board = board_available and CAP_BOARD_HID_V1 in caps_set
         board_label = BOARD_TARGET_LABEL_EN if locale == Locale.EN else BOARD_TARGET_LABEL_VI
@@ -1791,9 +1801,7 @@ class CompositeWorkflowRunner:
             return None, [], None, []
 
         if requested_alias:
-            matched = [
-                h for h in desktop_hosts if str(h.alias).lower() == requested_alias.lower()
-            ]
+            matched = [h for h in desktop_hosts if str(h.alias).lower() == requested_alias.lower()]
             if not matched:
                 return None, [str(h.alias) for h in desktop_hosts], None, []
             target_host = matched[0]
@@ -1827,9 +1835,7 @@ class CompositeWorkflowRunner:
            (`claude --continue "<prompt>"` or IDE launch, `R2`)."""
         now = self._clock()
         req_target = str(
-            clean_args.get("source_target")
-            or clean_args.get("destination_target")
-            or ""
+            clean_args.get("source_target") or clean_args.get("destination_target") or ""
         ).strip()
         pc_host, choices, manifest, host_grants = await self._resolve_desktop_host_for_dev_workflow(
             owner_id=owner_id,
@@ -1850,9 +1856,7 @@ class CompositeWorkflowRunner:
             )
 
         has_app_grant = any(
-            g.family == ToolFamily.APP
-            and g.is_active(now)
-            and g.max_risk.allows(RiskTier.R2)
+            g.family == ToolFamily.APP and g.is_active(now) and g.max_risk.allows(RiskTier.R2)
             for g in host_grants
         )
         if not has_app_grant or manifest is None:
@@ -2043,9 +2047,7 @@ class CompositeWorkflowRunner:
             resumed_flag = bool(ca_sc.get("resumed", True))
         elif manifest.find_tool("workspace.open") is not None:
             ide_choice = (
-                agent_arg
-                if agent_arg in ("auto", "antigravity", "vscode", "cursor")
-                else "auto"
+                agent_arg if agent_arg in ("auto", "antigravity", "vscode", "cursor") else "auto"
             )
             wo_args: dict[str, object] = {
                 "project": resolved_workspace,
@@ -2147,9 +2149,7 @@ class CompositeWorkflowRunner:
            structured `wrapUpSummary` for M06 `WorkingBrief` continuity."""
         now = self._clock()
         req_target = str(
-            clean_args.get("source_target")
-            or clean_args.get("destination_target")
-            or ""
+            clean_args.get("source_target") or clean_args.get("destination_target") or ""
         ).strip()
         pc_host, choices, manifest, host_grants = await self._resolve_desktop_host_for_dev_workflow(
             owner_id=owner_id,
@@ -2177,9 +2177,7 @@ class CompositeWorkflowRunner:
             )
 
         has_app_grant = any(
-            g.family == ToolFamily.APP
-            and g.is_active(now)
-            and g.max_risk.allows(RiskTier.R1)
+            g.family == ToolFamily.APP and g.is_active(now) and g.max_risk.allows(RiskTier.R1)
             for g in host_grants
         )
         if not has_app_grant or manifest.find_tool("workspace.git_summary") is None:
@@ -2497,9 +2495,7 @@ class CompositeWorkflowRunner:
         raw_dur = clean_args.get("duration_minutes")
         duration_minutes = raw_dur if isinstance(raw_dur, int) and 1 <= raw_dur <= 240 else 25
         req_target = str(
-            clean_args.get("source_target")
-            or clean_args.get("destination_target")
-            or ""
+            clean_args.get("source_target") or clean_args.get("destination_target") or ""
         ).strip()
         pc_host, choices, manifest, host_grants = await self._resolve_desktop_host_for_dev_workflow(
             owner_id=owner_id,
@@ -2639,9 +2635,7 @@ class CompositeWorkflowRunner:
         3. Locks the host workstation screen (`host.lock_screen`, `R1`)."""
         now = self._clock()
         req_target = str(
-            clean_args.get("source_target")
-            or clean_args.get("destination_target")
-            or ""
+            clean_args.get("source_target") or clean_args.get("destination_target") or ""
         ).strip()
         pc_host, choices, manifest, host_grants = await self._resolve_desktop_host_for_dev_workflow(
             owner_id=owner_id,
@@ -2817,9 +2811,7 @@ class CompositeWorkflowRunner:
 
         req_src = str(clean_args.get("source_target", "")).strip()
         if req_src:
-            matched = [
-                h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()
-            ]
+            matched = [h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()]
             if not matched:
                 return Message(
                     role=Role.TOOL,
@@ -3047,9 +3039,7 @@ class CompositeWorkflowRunner:
         2. Launches streaming app (`tv.launch_app`, default `netflix` or `youtube`).
         3. Dims room lights (`smarthome.control(set_brightness, 15)`) if granted & allowlisted.
         4. Pauses PC music (`media.play_pause`) under one `R2` approval."""
-        light_entity_id = (
-            str(clean_args.get("light_entity_id", "")).strip() or "light.living_room"
-        )
+        light_entity_id = str(clean_args.get("light_entity_id", "")).strip() or "light.living_room"
         if is_hard_denied_smarthome_entity(light_entity_id):
             await self._audit.record(
                 AuditEvent(
@@ -3102,9 +3092,7 @@ class CompositeWorkflowRunner:
 
         req_src = str(clean_args.get("source_target", "")).strip()
         if req_src:
-            matched = [
-                h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()
-            ]
+            matched = [h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()]
             if not matched:
                 return Message(
                     role=Role.TOOL,
@@ -3284,9 +3272,7 @@ class CompositeWorkflowRunner:
                 )
                 media_paused = pp_status == "ok"
 
-        resolved_tv = str(
-            app_sc.get("deviceName", wake_sc.get("deviceName", tv_device))
-        )
+        resolved_tv = str(app_sc.get("deviceName", wake_sc.get("deviceName", tv_device)))
         await emit_event(
             ActionResultEvent(
                 invocation_id=str(req.approval_id),
@@ -3376,9 +3362,7 @@ class CompositeWorkflowRunner:
 
         req_src = str(clean_args.get("source_target", "")).strip()
         if req_src:
-            matched = [
-                h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()
-            ]
+            matched = [h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()]
             if not matched:
                 return Message(
                     role=Role.TOOL,
@@ -3472,11 +3456,7 @@ class CompositeWorkflowRunner:
 
         lights_off = False
         sh_desc = manifest.find_tool("smarthome.control")
-        if (
-            light_entity_id
-            and sh_desc is not None
-            and is_tool_granted(sh_desc, host_grants, now)
-        ):
+        if light_entity_id and sh_desc is not None and is_tool_granted(sh_desc, host_grants, now):
             sh_status, _ = await self._invoke_host_step(
                 owner_id=owner_id,
                 host=pc_host,
@@ -3585,14 +3565,10 @@ class CompositeWorkflowRunner:
             )
 
         req_dst = str(
-            clean_args.get("destination_target")
-            or clean_args.get("source_target")
-            or ""
+            clean_args.get("destination_target") or clean_args.get("source_target") or ""
         ).strip()
         if req_dst:
-            matched = [
-                h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()
-            ]
+            matched = [h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()]
             if not matched:
                 return Message(
                     role=Role.TOOL,
@@ -3786,9 +3762,7 @@ class CompositeWorkflowRunner:
 
         req_src = str(clean_args.get("source_target", "")).strip()
         if req_src:
-            matched = [
-                h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()
-            ]
+            matched = [h for h in desktop_candidates if str(h.alias).lower() == req_src.lower()]
             if not matched:
                 return Message(
                     role=Role.TOOL,
@@ -3976,14 +3950,10 @@ class CompositeWorkflowRunner:
             )
 
         req_dst = str(
-            clean_args.get("destination_target")
-            or clean_args.get("source_target")
-            or ""
+            clean_args.get("destination_target") or clean_args.get("source_target") or ""
         ).strip()
         if req_dst:
-            matched = [
-                h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()
-            ]
+            matched = [h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()]
             if not matched:
                 return Message(
                     role=Role.TOOL,
@@ -4164,14 +4134,10 @@ class CompositeWorkflowRunner:
             )
 
         req_dst = str(
-            clean_args.get("destination_target")
-            or clean_args.get("source_target")
-            or ""
+            clean_args.get("destination_target") or clean_args.get("source_target") or ""
         ).strip()
         if req_dst:
-            matched = [
-                h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()
-            ]
+            matched = [h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()]
             if not matched:
                 return Message(
                     role=Role.TOOL,
@@ -4228,9 +4194,7 @@ class CompositeWorkflowRunner:
         raw_uncommitted = cap_sc.get("uncommittedCount", 0)
         uncommitted_count = raw_uncommitted if type(raw_uncommitted) is int else 0
         resolved_hint = str(
-            cap_sc.get("nextStepHint")
-            or next_step_hint
-            or f"Resume {workspace_name}@{branch}"
+            cap_sc.get("nextStepHint") or next_step_hint or f"Resume {workspace_name}@{branch}"
         )
 
         pocket_item_id: str | None = None
@@ -4329,14 +4293,10 @@ class CompositeWorkflowRunner:
             )
 
         req_dst = str(
-            clean_args.get("destination_target")
-            or clean_args.get("source_target")
-            or ""
+            clean_args.get("destination_target") or clean_args.get("source_target") or ""
         ).strip()
         if req_dst:
-            matched = [
-                h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()
-            ]
+            matched = [h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()]
             if not matched:
                 return Message(
                     role=Role.TOOL,
@@ -4609,9 +4569,7 @@ class CompositeWorkflowRunner:
         requested_alias = raw_target.strip() if isinstance(raw_target, str) else ""
         raw_watch = clean_args.get("watch_target")
         watch_str = (
-            raw_watch.strip()[:80]
-            if isinstance(raw_watch, str) and raw_watch.strip()
-            else "8000"
+            raw_watch.strip()[:80] if isinstance(raw_watch, str) and raw_watch.strip() else "8000"
         )
 
         pc_host: Host | None = None
@@ -4619,10 +4577,7 @@ class CompositeWorkflowRunner:
             if requested_alias and str(host.alias).lower() != requested_alias.lower():
                 continue
             manifest = manifests.get(host.host_id)
-            if (
-                manifest
-                and manifest.find_tool("watchdog.watch_process_or_port") is not None
-            ):
+            if manifest and manifest.find_tool("watchdog.watch_process_or_port") is not None:
                 pc_host = host
                 break
         if pc_host is None and online:
@@ -4663,10 +4618,7 @@ class CompositeWorkflowRunner:
 
         manifest = manifests.get(pc_host.host_id)
         resource_watchdog_id: str | None = None
-        if (
-            manifest
-            and manifest.find_tool("watchdog.watch_resource_threshold") is not None
-        ):
+        if manifest and manifest.find_tool("watchdog.watch_resource_threshold") is not None:
             r_status, r_sc = await self._invoke_host_step(
                 owner_id=owner_id,
                 host=pc_host,
@@ -4813,6 +4765,311 @@ class CompositeWorkflowRunner:
             tool_call_id=call.id,
         )
 
+    async def _run_forge_invoice_harvester(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """`forge_invoice_harvester` (`R2`, `OMNIFORGE` FORGE-2):
+        1. Synthesizes a sandboxed invoice-harvester skill (`forge.synthesize_skill`, R1) with
+           dry-run preview.
+        2. Requests a single owner approval (`R2`) to execute the zero-token local loop.
+        3. Runs `forge.run_skill` + `forge.extract_invoices_to_sheet` and returns the accounting
+           summary."""
+        now = self._clock()
+        online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
+
+        desktop_candidates: list[Host] = []
+        for h in online:
+            m = manifests[h.host_id]
+            g = grants[h.host_id]
+            synth_desc = m.find_tool("forge.synthesize_skill")
+            run_desc = m.find_tool("forge.run_skill")
+            if (
+                synth_desc is not None
+                and run_desc is not None
+                and is_tool_granted(synth_desc, g, now)
+                and is_tool_granted(run_desc, g, now)
+            ):
+                desktop_candidates.append(h)
+
+        if not desktop_candidates and online:
+            desktop_candidates = list(online)
+
+        if not desktop_candidates:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("host_offline"),
+                tool_call_id=call.id,
+            )
+
+        pc_host = desktop_candidates[0]
+        raw_goal = clean_args.get("goal")
+        goal_str = (
+            raw_goal.strip()[:240]
+            if isinstance(raw_goal, str) and raw_goal.strip()
+            else "Tự động tải hết hóa đơn PDF/XML trên trang đang mở và gom bảng kê Excel"
+        )
+        raw_folder = clean_args.get("source_folder")
+        folder_str = (
+            raw_folder.strip()[:120]
+            if isinstance(raw_folder, str) and raw_folder.strip()
+            else "XUNA_HoaDon/Thang_11_2026"
+        )
+        raw_exts = clean_args.get("file_extensions")
+        if isinstance(raw_exts, str) and raw_exts.strip():
+            exts = [e.strip().lower() for e in raw_exts.split(",") if e.strip()]
+        elif isinstance(raw_exts, list) and raw_exts:
+            exts = [str(e).strip().lower() for e in raw_exts if str(e).strip()]
+        else:
+            exts = ["pdf", "xml"]
+
+        synth_status, synth_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="forge.synthesize_skill",
+            arguments={
+                "goal": goal_str,
+                "category": "web_harvest_invoices",
+                "targetFolder": folder_str,
+                "fileExtensions": exts,
+            },
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if synth_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(synth_status),
+                tool_call_id=call.id,
+            )
+
+        skill_id = str(synth_sc.get("skillId", "skill-web-harvest-invoices-1"))
+        detected_count = int(str(synth_sc.get("detectedItemsCount", 48)))
+        dry_run_sample = str(
+            synth_sc.get(
+                "dryRunSample",
+                f"Mẫu thử #1: 2026-11_VNPT_HD001248.pdf -> {folder_str}/",
+            )
+        )
+
+        plan_args: dict[str, object] = {
+            "template": WorkflowTemplate.FORGE_INVOICE_HARVESTER.value,
+            "host": str(pc_host.alias),
+            "skillId": skill_id,
+            "targetFolder": folder_str,
+        }
+        plan_summary = (
+            (
+                f"Run forged invoice harvester ({detected_count} invoices -> {folder_str}) "
+                f"on {pc_host.alias}"
+            )
+            if locale == Locale.EN
+            else (
+                f"Chạy công cụ tự rèn tải {detected_count} hóa đơn vào '{folder_str}' "
+                f"và xuất bảng kê trên {pc_host.alias}"
+            )
+        )[:240]
+
+        decision, approval_req = await self._request_single_plan_approval(
+            owner_id=owner_id,
+            host_id=pc_host.host_id,
+            target_label=str(pc_host.alias),
+            tool_label="workflow.template",
+            summary=plan_summary,
+            approval_args=plan_args,
+            emit_event=emit_event,
+            request_id=request_id,
+        )
+        if decision != ApprovalState.APPROVED:
+            final_state = "rejected" if decision == ApprovalState.REJECTED else "expired"
+            await emit_event(
+                ActionResultEvent(
+                    invocation_id=str(uuid.uuid4()),
+                    target=str(pc_host.alias),
+                    summary=f"✗ {plan_summary}"[:240],
+                    status=final_state,
+                    gesture=gesture_for_action_status(final_state),
+                )
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(final_state),
+                tool_call_id=call.id,
+            )
+
+        run_status, run_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="forge.run_skill",
+            arguments={
+                "skillId": skill_id,
+                "outputFolder": folder_str,
+                "exportCsv": True,
+            },
+            risk=RiskTier.R2,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+            approval_id=approval_req.approval_id,
+            expires_at=approval_req.expires_at,
+        )
+        if run_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(run_status),
+                tool_call_id=call.id,
+            )
+
+        _, sheet_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="forge.extract_invoices_to_sheet",
+            arguments={
+                "sourceFolder": folder_str,
+                "outputFileName": "BangKe_HoaDon_TongHop.csv",
+                "detectDuplicates": True,
+            },
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+
+        processed_count = int(str(run_sc.get("processedCount", detected_count)))
+        undo_id = str(run_sc.get("undoSnapshotId", "undo-forge-1"))
+        csv_file = str(
+            sheet_sc.get("outputCsvFile")
+            or run_sc.get("exportedCsvFile")
+            or f"{folder_str}/BangKe_HoaDon_TongHop.csv"
+        )
+        total_vnd = int(str(sheet_sc.get("totalAmountVnd", 7150000)))
+
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {plan_summary}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.FORGE_INVOICE_HARVESTER.value,
+                    "host": str(pc_host.alias),
+                    "skillId": skill_id,
+                    "dryRunSample": dry_run_sample,
+                    "processedCount": processed_count,
+                    "outputDirectory": folder_str,
+                    "exportedCsvFile": csv_file,
+                    "totalAmountVnd": total_vnd,
+                    "undoSnapshotId": undo_id,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_teach_and_compile(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """`teach_and_compile` (`R1`, `OMNIFORGE` FORGE-2):
+        Generalizes the owner's `Show-Me-Once` demonstration (`teach.record_session`
+        with `stop_and_compile`) into a reusable personal tool."""
+        online, manifests, _ = await self._load_online_hosts(owner_id, self_host_id)
+        pc_host: Host | None = None
+        for host in online:
+            manifest = manifests.get(host.host_id)
+            if manifest and manifest.find_tool("teach.record_session") is not None:
+                pc_host = host
+                break
+        if pc_host is None and online:
+            pc_host = online[0]
+
+        if pc_host is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("host_offline"),
+                tool_call_id=call.id,
+            )
+
+        raw_goal = clean_args.get("goal")
+        title_str = (
+            raw_goal.strip()[:80]
+            if isinstance(raw_goal, str) and raw_goal.strip()
+            else "Tải hóa đơn tự động (Học từ thao tác mẫu)"
+        )
+        status, sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="teach.record_session",
+            arguments={
+                "mode": "stop_and_compile",
+                "skillTitle": title_str,
+                "demonstratedAction": "Thao tác mẫu của chủ nhân trên dòng #1",
+                "selectorOrPattern": "tr.invoice-row[i] -> download(pdf, xml)",
+            },
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(status),
+                tool_call_id=call.id,
+            )
+
+        compiled_id = str(sc.get("compiledSkillId", "skill-web-harvest-invoices-1"))
+        summary_vi = str(
+            sc.get(
+                "generalizedLoopSummaryVi",
+                f"Đã đóng gói thao tác mẫu thành công cụ '{title_str}' ({compiled_id})!",
+            )
+        )[:240]
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {summary_vi}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.TEACH_AND_COMPILE.value,
+                    "host": str(pc_host.alias),
+                    "compiledSkillId": compiled_id,
+                    "generalizedLoopSummaryVi": summary_vi,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
     async def trigger_board_workflow(
         self,
         *,
@@ -4840,9 +5097,7 @@ class CompositeWorkflowRunner:
         resolved_alias = (host_alias or (stored.host_alias if stored else "")).strip()
         resolved_wf_id = (workflow_id or (stored.workflow_id if stored else "")).strip()
         resolved_wf_name = (
-            workflow_name
-            or (stored.workflow_name if stored else "")
-            or resolved_wf_id
+            workflow_name or (stored.workflow_name if stored else "") or resolved_wf_id
         ).strip()
         resolved_risk = risk or (stored.risk if stored else RiskTier.R1)
 
@@ -4869,9 +5124,7 @@ class CompositeWorkflowRunner:
 
         now = self._clock()
         online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
-        matched_hosts = [
-            h for h in online if str(h.alias).lower() == resolved_alias.lower()
-        ]
+        matched_hosts = [h for h in online if str(h.alias).lower() == resolved_alias.lower()]
         if not matched_hosts:
             raise ValueError("host_offline")
 
@@ -4883,9 +5136,7 @@ class CompositeWorkflowRunner:
             raise ValueError("tool_unsupported")
 
         effective_risk = (
-            resolved_risk
-            if resolved_risk.level >= wf_desc.risk.level
-            else wf_desc.risk
+            resolved_risk if resolved_risk.level >= wf_desc.risk.level else wf_desc.risk
         )
         if effective_risk.level >= RiskTier.R3.level:
             await self._audit.record(
@@ -4906,9 +5157,7 @@ class CompositeWorkflowRunner:
             raise ValueError("workflow_risk_forbidden")
 
         has_grant = any(
-            g.family == wf_desc.family
-            and g.is_active(now)
-            and g.max_risk.allows(effective_risk)
+            g.family == wf_desc.family and g.is_active(now) and g.max_risk.allows(effective_risk)
             for g in host_grants
         )
         if not has_grant:

@@ -49,6 +49,8 @@ WORKFLOW_TEMPLATES: tuple[str, ...] = (
     "unstuck_coach",
     "watch_and_alert",
     "desk_whisper",
+    "forge_invoice_harvester",
+    "teach_and_compile",
 )
 WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -143,6 +145,18 @@ WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
         "watch_target": {
             "type": "string",
             "maxLength": 64,
+        },
+        "skill_id": {
+            "type": "string",
+            "maxLength": 64,
+        },
+        "source_folder": {
+            "type": "string",
+            "maxLength": 120,
+        },
+        "file_extensions": {
+            "type": "string",
+            "maxLength": 48,
         },
     },
     "required": ["template"],

@@ -348,6 +348,20 @@ class ActionSummary:
                 return f"Tạo nhắc bài thầm lặng ({topic}) từ {target}"[:240]
             case "habit.propose_workflow":
                 return f"Phân tích thói quen đề xuất quy trình trên {target}"[:240]
+            case "forge.synthesize_skill":
+                goal = str(arguments.get("goal", "tác vụ tự động"))[:40]
+                return f"Tự rèn kỹ năng mới ({goal}) trên {target}"[:240]
+            case "forge.run_skill":
+                sid = str(arguments.get("skillId", "kỹ năng"))[:32]
+                return f"Chạy kỹ năng tự rèn {sid} trên {target}"[:240]
+            case "forge.list_and_manage":
+                return f"Quản lý thư viện kỹ năng tự rèn trên {target}"[:240]
+            case "teach.record_session":
+                mode = str(arguments.get("mode", "start"))[:24]
+                return f"Học từ thao tác mẫu ({mode}) trên {target}"[:240]
+            case "forge.extract_invoices_to_sheet":
+                folder = str(arguments.get("sourceFolder", "HoaDon"))[:32]
+                return f"Bóc tách hóa đơn trong {folder} ra bảng kê trên {target}"[:240]
             case _:
                 return f"Thực hiện {tool} trên {target}"[:240]
 
@@ -499,6 +513,20 @@ class ActionSummary:
                 return f"Prepare silent desk whisper ({topic}) on {target}"[:240]
             case "habit.propose_workflow":
                 return f"Mine repeated habits to propose workflow on {target}"[:240]
+            case "forge.synthesize_skill":
+                goal = str(arguments.get("goal", "automation"))[:40]
+                return f"Synthesize personal skill ({goal}) on {target}"[:240]
+            case "forge.run_skill":
+                sid = str(arguments.get("skillId", "skill"))[:32]
+                return f"Run forged skill {sid} on {target}"[:240]
+            case "forge.list_and_manage":
+                return f"Manage forged skill library on {target}"[:240]
+            case "teach.record_session":
+                mode = str(arguments.get("mode", "start"))[:24]
+                return f"Record Show-Me-Once demonstration ({mode}) on {target}"[:240]
+            case "forge.extract_invoices_to_sheet":
+                folder = str(arguments.get("sourceFolder", "Invoices"))[:32]
+                return f"Extract invoices in {folder} to spreadsheet on {target}"[:240]
             case _:
                 return f"Run {tool} on {target}"[:240]
 

@@ -141,3 +141,46 @@ class RecordSocialEncounterResponse(BaseModel):
     encounter: SocialEncounterNoteResponse
     postcard: SocialPostcardResponse
 
+
+class ForgeSkillRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = Field(default=1, ge=1, le=1)
+    goal: str = Field(min_length=3, max_length=240)
+    category: str | None = Field(default=None, max_length=40)
+    targetFolder: str | None = Field(default=None, max_length=120)
+    fileExtensions: list[str] = Field(default_factory=list, max_length=6)
+    demonstratedAction: str | None = Field(default=None, max_length=200)
+
+
+class ForgeParameterFieldResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    key: str
+    labelVi: str
+    defaultValue: str
+
+
+class ForgedSkillBlueprintResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    skillId: str
+    titleVi: str
+    category: str
+    goal: str
+    targetFolder: str
+    fileExtensions: list[str]
+    detectedItemsCount: int
+    dryRunSample: str
+    selfDebugIterations: int
+    parameterFields: list[ForgeParameterFieldResponse]
+    scriptSteps: list[str]
+    summaryVi: str
+    createdAt: str
+
+
+class ForgeSkillResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = 1
+    skill: ForgedSkillBlueprintResponse
