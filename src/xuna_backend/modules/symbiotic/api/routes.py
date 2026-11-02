@@ -9,6 +9,8 @@ from fastapi import APIRouter
 
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.symbiotic.application.schemas import (
+    ClawMindRequest,
+    ClawMindResponse,
     ClawPulseRequest,
     ClawPulseResponse,
     CoRegulationStateResponse,
@@ -27,6 +29,8 @@ from xuna_backend.modules.symbiotic.application.schemas import (
     SocialPostcardResponse,
     UnstuckCoachRequest,
     UnstuckCoachResponse,
+    WorkshopChainRequest,
+    WorkshopChainResponse,
 )
 from xuna_backend.modules.symbiotic.application.services import (
     ClawPulseService,
@@ -257,4 +261,71 @@ async def evaluate_claw_pulse(
         canvasColumns=list(snap.canvas_columns),
         canvasRows=[dict(r) for r in snap.canvas_rows],
         summaryVi=snap.summary_vi,
+    )
+
+
+@router.post("/workshop-chain", response_model=WorkshopChainResponse)
+async def execute_workshop_chain(
+    body: WorkshopChainRequest,
+) -> WorkshopChainResponse:
+    try:
+        receipt = _claw_pulse.run_skill_chain_and_test(
+            chain_skill_ids=tuple(body.chainSkillIds),
+            runtime_params=dict(body.runtimeParams),
+            auto_trigger_on_delta=body.autoTriggerOnDelta,
+        )
+    except ValueError as err:
+        raise AppError("invalid_argument", HTTPStatus.UNPROCESSABLE_ENTITY) from err
+
+    return WorkshopChainResponse(
+        chainId=receipt.chain_id,
+        executedSkills=list(receipt.executed_skills),
+        interpolatedGoals=list(receipt.interpolated_goals),
+        passedAssertions=receipt.passed_assertions,
+        totalAssertions=receipt.total_assertions,
+        selfTestPassed=receipt.self_test_passed,
+        autoTriggerOnDelta=receipt.auto_trigger_on_delta,
+        compactIndex=[dict(item) for item in receipt.compact_index],
+        undoSnapshotId=receipt.undo_snapshot_id,
+        summaryVi=receipt.summary_vi,
+    )
+
+
+@router.post("/claw-mind", response_model=ClawMindResponse)
+async def evaluate_claw_mind(
+    body: ClawMindRequest,
+) -> ClawMindResponse:
+    try:
+        receipt = _claw_pulse.evaluate_claw_mind(
+            session_transcript=body.sessionTranscript,
+            raw_html=body.rawHtml,
+            subagent_goal=body.subagentGoal,
+            token_budget=body.tokenBudget,
+            lifecycle_event=body.lifecycleEvent,
+            target_skill_id=body.targetSkillId,
+        )
+    except ValueError as err:
+        raise AppError("invalid_argument", HTTPStatus.UNPROCESSABLE_ENTITY) from err
+
+    return ClawMindResponse(
+        vaultFolder=receipt.vault_folder,
+        flushedFactsCount=receipt.flushed_facts_count,
+        redactedSecretsCount=receipt.redacted_secrets_count,
+        soulMarkdown=receipt.soul_markdown,
+        ownerProfileMarkdown=receipt.owner_profile_markdown,
+        memoryJournalMarkdown=receipt.memory_journal_markdown,
+        ariaSnapshotId=receipt.aria_snapshot_id,
+        ariaElementCount=receipt.aria_element_count,
+        tokenReductionPercent=receipt.token_reduction_percent,
+        compactAriaTree=receipt.compact_aria_tree,
+        subagentWorkerId=receipt.subagent_worker_id,
+        subagentTokensUsed=receipt.subagent_tokens_used,
+        subagentLlmTokensUsed=receipt.subagent_llm_tokens_used,
+        contextSavedPercent=receipt.context_saved_percent,
+        criticPassed=receipt.critic_passed,
+        criticConfidenceScore=receipt.critic_confidence_score,
+        specialistWorkers=[dict(item) for item in receipt.specialist_workers],
+        subagentDistilledVi=receipt.subagent_distilled_vi,
+        activeHooks=[dict(item) for item in receipt.active_hooks],
+        summaryVi=receipt.summary_vi,
     )

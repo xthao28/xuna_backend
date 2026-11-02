@@ -320,3 +320,91 @@ class ClawPulseSnapshot:
             "canvasRows": [dict(r) for r in self.canvas_rows],
             "summaryVi": self.summary_vi,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class SkillChainReceipt:
+    """Multi-Skill DAG Chain & Automated 4-Point Self-Test Bench receipt (`WORKSHOP-3`)."""
+
+    chain_id: str
+    executed_skills: tuple[str, ...]
+    interpolated_goals: tuple[str, ...]
+    passed_assertions: int
+    total_assertions: int
+    self_test_passed: bool
+    auto_trigger_on_delta: bool
+    compact_index: tuple[dict[str, object], ...]
+    undo_snapshot_id: str
+    summary_vi: str
+
+    def __post_init__(self) -> None:
+        if not self.chain_id.strip():
+            raise ValueError("chain_id must not be empty")
+        if not 1 <= len(self.executed_skills) <= 5:
+            raise ValueError("executed_skills must have 1..5 items")
+        if self.passed_assertions < 0 or self.total_assertions <= 0:
+            raise ValueError("invalid assertion counts")
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "chainId": self.chain_id,
+            "executedSkills": list(self.executed_skills),
+            "interpolatedGoals": list(self.interpolated_goals),
+            "passedAssertions": self.passed_assertions,
+            "totalAssertions": self.total_assertions,
+            "selfTestPassed": self.self_test_passed,
+            "autoTriggerOnDelta": self.auto_trigger_on_delta,
+            "compactIndex": [dict(item) for item in self.compact_index],
+            "undoSnapshotId": self.undo_snapshot_id,
+            "summaryVi": self.summary_vi,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ClawMindReceipt:
+    """Receipt returned by `ClawPulseService.evaluate_claw_mind` (`MIND-3`, `SWARM-3`)."""
+
+    vault_folder: str
+    flushed_facts_count: int
+    redacted_secrets_count: int
+    soul_markdown: str
+    owner_profile_markdown: str
+    memory_journal_markdown: str
+    aria_snapshot_id: str
+    aria_element_count: int
+    token_reduction_percent: int
+    compact_aria_tree: str
+    subagent_worker_id: str
+    subagent_tokens_used: int
+    subagent_llm_tokens_used: int
+    context_saved_percent: int
+    critic_passed: bool
+    critic_confidence_score: int
+    specialist_workers: tuple[dict[str, object], ...]
+    subagent_distilled_vi: str
+    active_hooks: tuple[dict[str, object], ...]
+    summary_vi: str
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "vaultFolder": self.vault_folder,
+            "flushedFactsCount": self.flushed_facts_count,
+            "redactedSecretsCount": self.redacted_secrets_count,
+            "soulMarkdown": self.soul_markdown,
+            "ownerProfileMarkdown": self.owner_profile_markdown,
+            "memoryJournalMarkdown": self.memory_journal_markdown,
+            "ariaSnapshotId": self.aria_snapshot_id,
+            "ariaElementCount": self.aria_element_count,
+            "tokenReductionPercent": self.token_reduction_percent,
+            "compactAriaTree": self.compact_aria_tree,
+            "subagentWorkerId": self.subagent_worker_id,
+            "subagentTokensUsed": self.subagent_tokens_used,
+            "subagentLlmTokensUsed": self.subagent_llm_tokens_used,
+            "contextSavedPercent": self.context_saved_percent,
+            "criticPassed": self.critic_passed,
+            "criticConfidenceScore": self.critic_confidence_score,
+            "specialistWorkers": [dict(item) for item in self.specialist_workers],
+            "subagentDistilledVi": self.subagent_distilled_vi,
+            "activeHooks": [dict(item) for item in self.active_hooks],
+            "summaryVi": self.summary_vi,
+        }

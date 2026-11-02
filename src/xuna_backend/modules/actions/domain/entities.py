@@ -368,6 +368,27 @@ class ActionSummary:
             case "skill.record_correction":
                 sid = str(arguments.get("skillId", "kỹ năng"))[:32]
                 return f"Ghi nhớ quy tắc tự sửa lỗi cho {sid} trên {target}"[:240]
+            case "skill.workshop_sync":
+                act = str(arguments.get("action", "sync_to_disk"))[:24]
+                return f"Đồng bộ Skill Workshop ({act}) trên {target}"[:240]
+            case "skill.chain_and_test":
+                chain_ids = arguments.get("chainSkillIds")
+                step_count = len(chain_ids) if isinstance(chain_ids, list) else 2
+                return (
+                    f"Chạy chuỗi liên hoàn {step_count} kỹ năng kèm kiểm thử tự động trên {target}"
+                )[:240]
+            case "memory.markdown_vault":
+                act = str(arguments.get("action", "pre_compaction_flush"))[:28]
+                return f"Đồng bộ kho ký ức Markdown ({act}) trên {target}"[:240]
+            case "browser.semantic_snapshot":
+                title = str(arguments.get("pageTitle", "trang web"))[:36]
+                return f"Chụp cây ngữ nghĩa ARIA ({title}) tiết kiệm 85% token trên {target}"[:240]
+            case "subagent.spawn_and_poll":
+                act = str(arguments.get("action", "spawn"))[:20]
+                return f"Điều phối Sub-Agent chạy nền ({act}) trên {target}"[:240]
+            case "schedule.cron_and_hooks":
+                evt = str(arguments.get("eventOrCron", "on_morning_wake"))[:28]
+                return f"Quản lý Hook tự trị theo sự kiện ({evt}) trên {target}"[:240]
             case "heartbeat.configure_and_tick":
                 chk = str(arguments.get("checkName", "tuần tra"))[:32]
                 return f"Chạy nhịp tuần tra 0-token ({chk}) trên {target}"[:240]
@@ -548,6 +569,25 @@ class ActionSummary:
             case "skill.record_correction":
                 sid = str(arguments.get("skillId", "skill"))[:32]
                 return f"Record self-healing correction for {sid} on {target}"[:240]
+            case "skill.workshop_sync":
+                act = str(arguments.get("action", "sync_to_disk"))[:24]
+                return f"Sync Skill Workshop ({act}) on {target}"[:240]
+            case "skill.chain_and_test":
+                chain_ids = arguments.get("chainSkillIds")
+                step_count = len(chain_ids) if isinstance(chain_ids, list) else 2
+                return f"Run {step_count}-step skill chain with self-test on {target}"[:240]
+            case "memory.markdown_vault":
+                act = str(arguments.get("action", "pre_compaction_flush"))[:28]
+                return f"Sync transparent Markdown memory vault ({act}) on {target}"[:240]
+            case "browser.semantic_snapshot":
+                title = str(arguments.get("pageTitle", "web page"))[:36]
+                return f"Capture ARIA semantic snapshot ({title}) on {target}"[:240]
+            case "subagent.spawn_and_poll":
+                act = str(arguments.get("action", "spawn"))[:20]
+                return f"Orchestrate background sub-agent ({act}) on {target}"[:240]
+            case "schedule.cron_and_hooks":
+                evt = str(arguments.get("eventOrCron", "on_morning_wake"))[:28]
+                return f"Manage autonomous cron/lifecycle hook ({evt}) on {target}"[:240]
             case "heartbeat.configure_and_tick":
                 chk = str(arguments.get("checkName", "patrol"))[:32]
                 return f"Run zero-token heartbeat ({chk}) on {target}"[:240]

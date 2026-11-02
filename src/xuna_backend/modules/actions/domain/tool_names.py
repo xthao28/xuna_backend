@@ -51,6 +51,7 @@ WORKFLOW_TEMPLATES: tuple[str, ...] = (
     "desk_whisper",
     "forge_invoice_harvester",
     "teach_and_compile",
+    "claw_heartbeat_patrol",
 )
 WORKFLOW_TEMPLATE_SCHEMA: dict[str, object] = {
     "type": "object",
