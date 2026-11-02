@@ -53,6 +53,7 @@ router = APIRouter(prefix="/v1/actions", tags=["actions"])
 class DecideApprovalBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schemaVersion: Literal[1] = 1
     decision: ApprovalDecision
     scope: ApprovalScope = ApprovalScope.ONCE
     signature: str | None = Field(default=None, min_length=80, max_length=120)
@@ -62,12 +63,14 @@ class DecideApprovalBody(BaseModel):
 class EmergencyStopBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schemaVersion: Literal[1] = 1
     reason: Literal["owner_app", "owner_host", "owner_board", "revoked"] = "owner_app"
 
 
 class ReportActionResultBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schemaVersion: Literal[1] = 1
     status: Literal[
         "ok",
         "not_ready",
@@ -88,6 +91,7 @@ class ReportActionResultBody(BaseModel):
 class AssignWorkflowSlotBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schemaVersion: Literal[1] = 1
     hostAlias: str = Field(min_length=1, max_length=24)
     workflowId: str = Field(min_length=1, max_length=64)
     workflowName: str = Field(min_length=1, max_length=80)
@@ -97,10 +101,11 @@ class AssignWorkflowSlotBody(BaseModel):
 class TriggerWorkflowBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schemaVersion: Literal[1] = 1
     slot: Literal[1, 2]
     hostAlias: str | None = Field(default=None, min_length=1, max_length=24)
     workflowId: str | None = Field(default=None, min_length=1, max_length=64)
-    workflowName: str | None = Field(default=None, min_length=1, max_length=80)
+    workflowName: str | None = Field(default=None, max_length=80)
     risk: RiskTier | None = None
     approvalId: uuid.UUID | None = None
     waitForApproval: bool = False

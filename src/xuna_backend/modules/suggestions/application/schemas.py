@@ -33,4 +33,5 @@ class ConsolidateSuggestionsResponse(_Strict):
 
 
 class PatchSuggestionRequest(_Strict):
+    schemaVersion: int = Field(default=1, ge=1, le=1)
     action: str = Field(pattern="^(apply|reject|revert)$")
