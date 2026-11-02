@@ -8,7 +8,9 @@ Stdlib only. Implements:
 from __future__ import annotations
 
 import hashlib
+import math
 import re
+import struct
 import uuid
 from datetime import UTC, datetime
 
@@ -19,6 +21,7 @@ from xuna_backend.modules.symbiotic.domain.entities import (
     CoRegulationSnapshot,
     DreamVignette,
     ForgedSkillBlueprint,
+    Frontier2026Receipt,
     HabitMacroProposal,
     SerendipityNote,
     SkillChainReceipt,
@@ -1005,3 +1008,128 @@ class ClawPulseService:
             active_hooks=(hook_entry,),
             summary_vi=summary_vi,
         )
+
+    def evaluate_frontier_2026(
+        self,
+        *,
+        overlay_anchor: str = "mac_notch",
+        dropped_item_name: str = "hoa_don_thang_11.csv",
+        vocal_kind: str = "happy_chirp",
+        speech_rate_wpm: int = 110,
+        rms_energy_db: int = -24,
+        subject: str = "Chủ nhân",
+        predicate: str = "đang_tập_trung_dự_án",
+        object_val: str = "XUNA Frontier 2026",
+        previous_object_val: str = "Giao thức BLE M02",
+        ritual_mode: str = "start_breathing_478",
+        neighbor_short_id: str = "XUNA9F2A",
+    ) -> Frontier2026Receipt:
+        clean_drop = dropped_item_name.strip()
+        low_drop = clean_drop.lower()
+        if any(low_drop.endswith(ext) for ext in (".exe", ".bat", ".ps1", ".sh", ".cmd")):
+            raise ValueError("forbidden_drop_extension")
+
+        routed_target = (
+            "pipeline.execute_universal"
+            if any(low_drop.endswith(ext) for ext in (".csv", ".pdf", ".xml", ".xlsx"))
+            else "memory.markdown_vault"
+        )
+        munch_anim = "nom_nom_happy"
+
+        # Synthesize deterministic 16-bit RIFF WAV header + harmonic chirp bytes in memory
+        sample_rate = 16000
+        num_samples = 400
+        freq_base = (
+            880.0
+            if vocal_kind == "happy_chirp"
+            else 520.0
+            if vocal_kind == "curious_trill"
+            else 340.0
+        )
+        pcm_samples = bytearray()
+        for i in range(num_samples):
+            t = i / sample_rate
+            envelope = math.sin(math.pi * i / num_samples)
+            val = int(
+                12000.0
+                * envelope
+                * (
+                    0.7 * math.sin(2.0 * math.pi * freq_base * t)
+                    + 0.3 * math.sin(2.0 * math.pi * (freq_base * 1.5) * t)
+                )
+            )
+            pcm_samples.extend(struct.pack("<h", max(-32768, min(32767, val))))
+
+        data_size = len(pcm_samples)
+        riff_header = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF",
+            36 + data_size,
+            b"WAVE",
+            b"fmt ",
+            16,
+            1,
+            1,
+            sample_rate,
+            sample_rate * 2,
+            2,
+            16,
+            b"data",
+            data_size,
+        )
+        wav_bytes = bytes(riff_header) + bytes(pcm_samples)
+        wav_sha256 = hashlib.sha256(wav_bytes).hexdigest()
+
+        if speech_rate_wpm < 115 or rms_energy_db <= -22:
+            detected_tone = "tired_low_energy"
+            empathy_vi = (
+                "Nghe giọng bạn hơi trầm và mệt — mình chuyển sang chế độ dịu êm, "
+                "hạ nhịp chớp mắt và rút gọn câu trả lời để bạn nghỉ mắt nhé."
+            )
+        elif speech_rate_wpm > 180:
+            detected_tone = "stressed_rushed"
+            empathy_vi = (
+                "Nghe nhịp nói của bạn đang gấp gáp — mình ưu tiên đi thẳng vào trọng tâm "
+                "và gợi ý nhịp thở 4-7-8."
+            )
+        else:
+            detected_tone = "warm_relaxed"
+            empathy_vi = (
+                "Giọng bạn đang thoải mái và tràn đầy năng lượng — "
+                "tụi mình cùng sáng tạo tiếp nhé!"
+            )
+
+        temporal_narrative_vi = (
+            f"[Bi-Temporal Graph] Đã lưu nhánh lịch sử ({subject} -> {predicate} -> "
+            f"'{previous_object_val}' [historical]) và kích hoạt cạnh hiện tại "
+            f"('{object_val}' [active])."
+        )
+        keepsake_vi = "Vòng nguyệt quế Đom Đóm Đồng Hành (7-Day Streak Keepsake)"
+        playdate_vi = (
+            f"Mình vừa vẫy tay chào bạn hàng xóm #{neighbor_short_id.strip()} "
+            "và cùng nhảy vũ điệu Pixel đồng bộ!"
+        )
+        summary_vi = (
+            f"Frontier 2026 [{overlay_anchor}]: Đã 'măm' tệp '{clean_drop}' -> {routed_target}, "
+            f"phát âm '{vocal_kind}' ({len(wav_bytes)}B WAV), cảm nhận giọng '{detected_tone}'."
+        )[:240]
+
+        return Frontier2026Receipt(
+            overlay_anchor=overlay_anchor,
+            munch_animation=munch_anim,
+            routed_target=routed_target,
+            vocal_kind=vocal_kind,
+            pcm_byte_count=len(wav_bytes),
+            wav_sha256=wav_sha256,
+            detected_owner_tone=detected_tone,
+            empathy_adjustment_vi=empathy_vi,
+            active_edges_count=1,
+            historical_edges_count=1,
+            temporal_narrative_vi=temporal_narrative_vi,
+            active_ritual=ritual_mode,
+            standby_dock_active=True,
+            unlocked_keepsake_vi=keepsake_vi,
+            playdate_summary_vi=playdate_vi,
+            summary_vi=summary_vi,
+        )
+

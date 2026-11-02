@@ -57,10 +57,12 @@ from xuna_backend.modules.hosts.domain.entities import (
 )
 from xuna_backend.modules.symbiotic.api.routes import (
     evaluate_claw_mind,
+    evaluate_frontier_2026,
     execute_workshop_chain,
 )
 from xuna_backend.modules.symbiotic.application.schemas import (
     ClawMindRequest,
+    Frontier2026Request,
     WorkshopChainRequest,
 )
 from xuna_backend.modules.symbiotic.application.services import (
@@ -680,3 +682,49 @@ def test_claw_mind_memory_aria_subagent_and_hooks() -> None:
     assert api_resp.specialistWorkers[0]["role"] == "scout_harvester"
     assert api_resp.specialistWorkers[0]["readOnly"] is True
     assert len(api_resp.activeHooks) == 1
+
+
+def test_frontier_2026_evaluation_and_drop_extension_guard() -> None:
+    svc = ClawPulseService()
+    receipt = svc.evaluate_frontier_2026(
+        overlay_anchor="mac_notch",
+        dropped_item_name="hoa_don_thang_11.csv",
+        vocal_kind="happy_chirp",
+        speech_rate_wpm=110,
+        rms_energy_db=-24,
+        subject="Chủ nhân",
+        predicate="đang_tập_trung_dự_án",
+        object_val="XUNA Frontier 2026",
+        previous_object_val="Giao thức BLE M02",
+        ritual_mode="start_breathing_478",
+        neighbor_short_id="XUNA9F2A",
+    )
+    assert receipt.overlay_anchor == "mac_notch"
+    assert receipt.routed_target == "pipeline.execute_universal"
+    assert receipt.pcm_byte_count == 844
+    assert len(receipt.wav_sha256) == 64
+    assert receipt.detected_owner_tone == "tired_low_energy"
+    assert receipt.active_edges_count == 1
+    assert receipt.historical_edges_count == 1
+    assert "Giao thức BLE M02" in receipt.temporal_narrative_vi
+    assert "XUNA Frontier 2026" in receipt.temporal_narrative_vi
+    assert receipt.standby_dock_active is True
+
+    with pytest.raises(ValueError, match="forbidden_drop_extension"):
+        svc.evaluate_frontier_2026(dropped_item_name="malware_payload.exe")
+
+    api_resp = asyncio.run(
+        evaluate_frontier_2026(
+            Frontier2026Request(
+                overlayAnchor="mac_notch",
+                droppedItemName="hoa_don_thang_11.csv",
+                vocalKind="happy_chirp",
+                speechRateWpm=190,
+                rmsEnergyDb=-14,
+            )
+        )
+    )
+    assert api_resp.detectedOwnerTone == "stressed_rushed"
+    assert api_resp.pcmByteCount == 844
+    assert len(api_resp.wavSha256) == 64
+

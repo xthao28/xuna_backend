@@ -21,6 +21,8 @@ from xuna_backend.modules.symbiotic.application.schemas import (
     ForgeParameterFieldResponse,
     ForgeSkillRequest,
     ForgeSkillResponse,
+    Frontier2026Request,
+    Frontier2026Response,
     HabitMacroProposalResponse,
     RecordSocialEncounterRequest,
     RecordSocialEncounterResponse,
@@ -329,3 +331,45 @@ async def evaluate_claw_mind(
         activeHooks=[dict(item) for item in receipt.active_hooks],
         summaryVi=receipt.summary_vi,
     )
+
+
+@router.post("/frontier-2026", response_model=Frontier2026Response)
+async def evaluate_frontier_2026(
+    body: Frontier2026Request,
+) -> Frontier2026Response:
+    try:
+        receipt = _claw_pulse.evaluate_frontier_2026(
+            overlay_anchor=body.overlayAnchor,
+            dropped_item_name=body.droppedItemName,
+            vocal_kind=body.vocalKind,
+            speech_rate_wpm=body.speechRateWpm,
+            rms_energy_db=body.rmsEnergyDb,
+            subject=body.subject,
+            predicate=body.predicate,
+            object_val=body.objectVal,
+            previous_object_val=body.previousObjectVal,
+            ritual_mode=body.ritualMode,
+            neighbor_short_id=body.neighborShortId,
+        )
+    except ValueError as err:
+        raise AppError("invalid_argument", HTTPStatus.UNPROCESSABLE_ENTITY) from err
+
+    return Frontier2026Response(
+        overlayAnchor=receipt.overlay_anchor,
+        munchAnimation=receipt.munch_animation,
+        routedTarget=receipt.routed_target,
+        vocalKind=receipt.vocal_kind,
+        pcmByteCount=receipt.pcm_byte_count,
+        wavSha256=receipt.wav_sha256,
+        detectedOwnerTone=receipt.detected_owner_tone,
+        empathyAdjustmentVi=receipt.empathy_adjustment_vi,
+        activeEdgesCount=receipt.active_edges_count,
+        historicalEdgesCount=receipt.historical_edges_count,
+        temporalNarrativeVi=receipt.temporal_narrative_vi,
+        activeRitual=receipt.active_ritual,
+        standbyDockActive=receipt.standby_dock_active,
+        unlockedKeepsakeVi=receipt.unlocked_keepsake_vi,
+        playdateSummaryVi=receipt.playdate_summary_vi,
+        summaryVi=receipt.summary_vi,
+    )
+
