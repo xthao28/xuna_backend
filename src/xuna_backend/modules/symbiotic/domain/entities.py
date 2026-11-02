@@ -245,6 +245,8 @@ class ForgedSkillBlueprint:
     script_steps: tuple[str, ...]
     summary_vi: str
     created_at: datetime
+    primitives: tuple[str, ...] = ()
+    canvas_surface_kind: str = "data_table"
 
     def __post_init__(self) -> None:
         if not self.skill_id.strip():
@@ -271,4 +273,50 @@ class ForgedSkillBlueprint:
             "scriptSteps": list(self.script_steps),
             "summaryVi": self.summary_vi,
             "createdAt": self.created_at.isoformat(),
+            "primitives": list(self.primitives),
+            "canvasSurfaceKind": self.canvas_surface_kind,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ClawPulseSnapshot:
+    """Snapshot produced by `ClawPulseService` (`CLAW-1`-`CLAW-4`):
+    combines OpenClaw-compatible `SKILL.md` bridge output, Zero-Token 2-Tier
+    Heartbeat status (`HEARTBEAT_OK` / `HEARTBEAT_ALERT`), and A2UI Live Canvas."""
+
+    heartbeat_status: str
+    delta_detected: bool
+    llm_tokens_used: int
+    suppressed_notification: bool
+    interval_minutes: int
+    skill_markdown: str
+    security_verified: bool
+    self_heal_generation: int
+    correction_rules: tuple[str, ...]
+    canvas_title_vi: str
+    canvas_columns: tuple[str, ...]
+    canvas_rows: tuple[dict[str, object], ...]
+    summary_vi: str
+
+    def __post_init__(self) -> None:
+        if self.heartbeat_status not in ("HEARTBEAT_OK", "HEARTBEAT_ALERT"):
+            raise ValueError("heartbeat_status must be HEARTBEAT_OK or HEARTBEAT_ALERT")
+        if self.llm_tokens_used < 0:
+            raise ValueError("llm_tokens_used must be >= 0")
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "heartbeatStatus": self.heartbeat_status,
+            "deltaDetected": self.delta_detected,
+            "llmTokensUsed": self.llm_tokens_used,
+            "suppressedNotification": self.suppressed_notification,
+            "intervalMinutes": self.interval_minutes,
+            "skillMarkdown": self.skill_markdown,
+            "securityVerified": self.security_verified,
+            "selfHealGeneration": self.self_heal_generation,
+            "correctionRules": list(self.correction_rules),
+            "canvasTitleVi": self.canvas_title_vi,
+            "canvasColumns": list(self.canvas_columns),
+            "canvasRows": [dict(r) for r in self.canvas_rows],
+            "summaryVi": self.summary_vi,
         }

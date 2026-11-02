@@ -301,6 +301,10 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
         "coach",
         "forge",
         "teach",
+        "skill",
+        "heartbeat",
+        "canvas",
+        "pipeline",
     ):
         family = ToolFamily.APP
     else:

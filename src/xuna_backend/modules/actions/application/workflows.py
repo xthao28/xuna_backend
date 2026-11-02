@@ -113,6 +113,7 @@ class WorkflowTemplate(StrEnum):
     DESK_WHISPER = "desk_whisper"
     FORGE_INVOICE_HARVESTER = "forge_invoice_harvester"
     TEACH_AND_COMPILE = "teach_and_compile"
+    CLAW_HEARTBEAT_PATROL = "claw_heartbeat_patrol"
 
 
 HARD_DENIED_SMARTHOME_DOMAINS: frozenset[str] = frozenset(
@@ -768,6 +769,16 @@ class CompositeWorkflowRunner:
             )
         if template == WorkflowTemplate.TEACH_AND_COMPILE:
             return await self._run_teach_and_compile(
+                call=call,
+                clean_args=clean_args,
+                owner_id=owner_id,
+                locale=locale,
+                emit_event=emit_event,
+                request_id=request_id,
+                self_host_id=self_host_id,
+            )
+        if template == WorkflowTemplate.CLAW_HEARTBEAT_PATROL:
+            return await self._run_claw_heartbeat_patrol(
                 call=call,
                 clean_args=clean_args,
                 owner_id=owner_id,
@@ -5065,6 +5076,110 @@ class CompositeWorkflowRunner:
                     "host": str(pc_host.alias),
                     "compiledSkillId": compiled_id,
                     "generalizedLoopSummaryVi": summary_vi,
+                },
+            ),
+            tool_call_id=call.id,
+        )
+
+    async def _run_claw_heartbeat_patrol(
+        self,
+        *,
+        call: ToolCall,
+        clean_args: dict[str, object],
+        owner_id: uuid.UUID,
+        locale: Locale,
+        emit_event: WorkflowEventSink,
+        request_id: str,
+        self_host_id: str | None,
+    ) -> Message:
+        """`claw_heartbeat_patrol` (`R1`, `XUNA ClawPulse` CLAW-2 & CLAW-3):
+        Runs a Zero-Token 2-Tier Heartbeat tick (`heartbeat.configure_and_tick`) and
+        refreshes the A2UI Live Canvas surface (`canvas.present`) on the online desktop."""
+        online, manifests, _ = await self._load_online_hosts(owner_id, self_host_id)
+        pc_host: Host | None = None
+        for host in online:
+            manifest = manifests.get(host.host_id)
+            if manifest and manifest.find_tool("heartbeat.configure_and_tick") is not None:
+                pc_host = host
+                break
+        if pc_host is None and online:
+            pc_host = online[0]
+
+        if pc_host is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload("host_offline"),
+                tool_call_id=call.id,
+            )
+
+        hb_status, hb_sc = await self._invoke_host_step(
+            owner_id=owner_id,
+            host=pc_host,
+            tool_name="heartbeat.configure_and_tick",
+            arguments={
+                "action": "tick",
+                "checkName": "Canh hóa đơn mới & cổng dev",
+                "intervalMinutes": 30,
+                "simulateDelta": False,
+            },
+            risk=RiskTier.R1,
+            request_id=request_id,
+            self_host_id=self_host_id,
+            emit_event=emit_event,
+        )
+        if hb_status != "ok":
+            return Message(
+                role=Role.TOOL,
+                content=_encode_workflow_payload(hb_status),
+                tool_call_id=call.id,
+            )
+
+        manifest = manifests.get(pc_host.host_id)
+        canvas_title = "Bảng Kê Hóa Đơn Tương Tác (Live Canvas A2UI)"
+        if manifest and manifest.find_tool("canvas.present") is not None:
+            _, canvas_sc = await self._invoke_host_step(
+                owner_id=owner_id,
+                host=pc_host,
+                tool_name="canvas.present",
+                arguments={
+                    "action": "present_invoice_table",
+                    "title": canvas_title,
+                },
+                risk=RiskTier.R1,
+                request_id=request_id,
+                self_host_id=self_host_id,
+                emit_event=emit_event,
+            )
+            canvas_title = str(canvas_sc.get("titleVi", canvas_title))
+
+        hb_code = str(hb_sc.get("status", "HEARTBEAT_OK"))
+        tokens_used = int(str(hb_sc.get("llmTokensUsed", 0)))
+        summary_vi = str(
+            hb_sc.get(
+                "summaryVi",
+                f"{hb_code}: Tuần tra ngầm hoàn tất với {tokens_used} LLM token.",
+            )
+        )[:240]
+        await emit_event(
+            ActionResultEvent(
+                invocation_id=str(uuid.uuid4()),
+                target=str(pc_host.alias),
+                summary=f"✓ {summary_vi}"[:240],
+                status="ok",
+                gesture=gesture_for_action_status("ok"),
+            )
+        )
+        return Message(
+            role=Role.TOOL,
+            content=_encode_workflow_payload(
+                "ok",
+                {
+                    "template": WorkflowTemplate.CLAW_HEARTBEAT_PATROL.value,
+                    "host": str(pc_host.alias),
+                    "heartbeatStatus": hb_code,
+                    "llmTokensUsed": tokens_used,
+                    "liveCanvasTitle": canvas_title,
+                    "summaryVi": summary_vi,
                 },
             ),
             tool_call_id=call.id,

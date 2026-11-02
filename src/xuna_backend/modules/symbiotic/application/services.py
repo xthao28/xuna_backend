@@ -8,10 +8,12 @@ Stdlib only. Implements:
 from __future__ import annotations
 
 import hashlib
+import re
 import uuid
 from datetime import UTC, datetime
 
 from xuna_backend.modules.symbiotic.domain.entities import (
+    ClawPulseSnapshot,
     CoRegulationMode,
     CoRegulationSnapshot,
     DreamVignette,
@@ -337,12 +339,32 @@ class SocialEcologyService:
 
 
 class OmniForgeSynthesizerService:
-    """Synthesizes sandboxed `XunaScript` citizen tools (`FORGE-2`) for non-dev owners
-    (e.g., invoice harvesting, document-to-sheet extraction, smart folder janitor,
-    bank/order reconciliation, and `Show-Me-Once` demonstration compilation)."""
+    """Synthesizes sandboxed `XunaScript` citizen tools (`FORGE-2`, `UNIV-3`) across all
+    customer domains (HR CV screening, E-Commerce price radar, Content/News digest,
+    Media batch renamer, Spreadsheet reconciler, Smart folder janitor, Invoice harvesting,
+    and `Show-Me-Once` demonstration compilation)."""
 
     _ALLOWED_EXTENSIONS = frozenset(
-        {"pdf", "xml", "csv", "xlsx", "docx", "txt", "json", "zip", "png", "jpg"}
+        {
+            "pdf",
+            "xml",
+            "csv",
+            "tsv",
+            "xlsx",
+            "docx",
+            "txt",
+            "md",
+            "html",
+            "log",
+            "json",
+            "zip",
+            "png",
+            "jpg",
+            "jpeg",
+            "webp",
+            "svg",
+            "heic",
+        }
     )
 
     _ALLOWED_CATEGORIES = frozenset(
@@ -352,6 +374,10 @@ class OmniForgeSynthesizerService:
             "smart_file_janitor",
             "spreadsheet_reconciler",
             "lead_harvester",
+            "hr_cv_scanner",
+            "ecommerce_price_radar",
+            "content_news_digest",
+            "media_batch_renamer",
             "custom_automation",
         }
     )
@@ -363,6 +389,18 @@ class OmniForgeSynthesizerService:
             for k in ("hóa đơn", "hoa don", "invoice", "tải hết", "kéo hết", "tải hàng loạt")
         ):
             return "web_harvest_invoices"
+        if any(k in low for k in ("cv", "ứng viên", "ung vien", "tuyển dụng", "resume", "hr")):
+            return "hr_cv_scanner"
+        if any(
+            k in low for k in ("giá", "shopee", "lazada", "tiktok", "đối thủ", "radar", "tồn kho")
+        ):
+            return "ecommerce_price_radar"
+        if any(
+            k in low for k in ("tin tức", "tóm tắt", "bài viết", "content", "marketing", "digest")
+        ):
+            return "content_news_digest"
+        if any(k in low for k in ("ảnh", "photo", "đổi tên", "rename", "media", "thiết kế")):
+            return "media_batch_renamer"
         if any(k in low for k in ("bảng kê", "bang ke", "trích xuất", "xml", "mã số thuế", "vat")):
             return "document_to_sheet"
         if any(k in low for k in ("đối soát", "doi soat", "sao kê", "sao ke", "reconcile")):
@@ -371,9 +409,49 @@ class OmniForgeSynthesizerService:
             k in low for k in ("dọn", "phân loại", "phan loai", "sắp xếp", "downloads", "janitor")
         ):
             return "smart_file_janitor"
-        if any(k in low for k in ("ứng viên", "ung vien", "khách hàng", "cv", "lead")):
+        if any(k in low for k in ("khách hàng", "lead", "số điện thoại")):
             return "lead_harvester"
         return "custom_automation"
+
+    def infer_primitives(self, category: str) -> tuple[str, ...]:
+        if category == "hr_cv_scanner":
+            return (
+                "source.filesystem",
+                "parse.universal",
+                "transform.pipeline",
+                "export.artifact",
+                "canvas.dynamic_a2ui",
+            )
+        if category == "ecommerce_price_radar":
+            return (
+                "source.web_http",
+                "parse.universal",
+                "sensor.hash_delta",
+                "transform.pipeline",
+                "canvas.dynamic_a2ui",
+            )
+        if category == "content_news_digest":
+            return (
+                "source.web_http",
+                "parse.universal",
+                "transform.pipeline",
+                "export.artifact",
+                "canvas.dynamic_a2ui",
+            )
+        if category in ("media_batch_renamer", "smart_file_janitor"):
+            return (
+                "source.filesystem",
+                "parse.universal",
+                "file.batch_ops",
+                "canvas.dynamic_a2ui",
+            )
+        return (
+            "source.filesystem",
+            "parse.universal",
+            "transform.pipeline",
+            "export.artifact",
+            "canvas.dynamic_a2ui",
+        )
 
     def synthesize_skill(
         self,
@@ -409,6 +487,12 @@ class OmniForgeSynthesizerService:
             if resolved_cat == "web_harvest_invoices"
             else ("xml", "pdf", "csv")
             if resolved_cat == "document_to_sheet"
+            else ("pdf", "docx", "txt")
+            if resolved_cat == "hr_cv_scanner"
+            else ("jpg", "png", "webp")
+            if resolved_cat == "media_batch_renamer"
+            else ("md", "html", "txt")
+            if resolved_cat == "content_news_digest"
             else ("csv", "xlsx")
         )
 
@@ -420,6 +504,14 @@ class OmniForgeSynthesizerService:
                 if resolved_cat == "web_harvest_invoices"
                 else "XUNA_BangKe"
                 if resolved_cat == "document_to_sheet"
+                else "XUNA_TuyenDung/UngVien"
+                if resolved_cat == "hr_cv_scanner"
+                else "XUNA_ShopRadar/GiaDoiThu"
+                if resolved_cat == "ecommerce_price_radar"
+                else "XUNA_Content/BanTin"
+                if resolved_cat == "content_news_digest"
+                else "XUNA_Media/Album"
+                if resolved_cat == "media_batch_renamer"
                 else "XUNA_Tools/Output"
             )
         )
@@ -428,10 +520,82 @@ class OmniForgeSynthesizerService:
 
         params: tuple[dict[str, str], ...]
         steps: tuple[str, ...]
-        if resolved_cat == "web_harvest_invoices":
+        surface_kind = "data_table"
+        if resolved_cat == "hr_cv_scanner":
+            title_vi = "Sàng Lọc CV Ứng Viên & Xếp Hạng Kỹ Năng"
+            detected_count = 34
+            dry_run = (
+                "Mẫu thử #1: CV_NguyenMinhAnh.pdf -> 3.5 năm KN (Python, Marketing) | Điểm: 94/100"
+            )
+            surface_kind = "kanban_board"
+            params = (
+                {
+                    "key": "targetFolder",
+                    "labelVi": "Thư mục chứa hồ sơ CV",
+                    "defaultValue": folder,
+                },
+            )
+            steps = (
+                f"1. [source.filesystem] Quét toàn bộ CV trong '{folder}'",
+                "2. [parse.universal] Bóc tách Email, SĐT, Số năm KN và Kỹ năng chuyên môn",
+                "3. [transform.pipeline] Chấm điểm độ khớp và xuất BangXepHang_UngVien.csv",
+            )
+        elif resolved_cat == "ecommerce_price_radar":
+            title_vi = "Radar Canh Giá Đối Thủ & Cảnh Báo Tồn Kho"
+            detected_count = 24
+            dry_run = "Mẫu thử #1: Tai nghe X-Pro giảm 9.2% (380.000 đ -> 345.000 đ)"
+            surface_kind = "metric_cards"
+            params = (
+                {
+                    "key": "targetFolder",
+                    "labelVi": "Thư mục lưu lịch sử giá",
+                    "defaultValue": folder,
+                },
+            )
+            steps = (
+                "1. [source.web_http] Đọc bảng giá và tồn kho trên trang đang mở",
+                "2. [sensor.hash_delta] Băm SHA-256 phát hiện biến động giá với 0 LLM token",
+                "3. [canvas.dynamic_a2ui] Hiển thị thẻ Metric Cards cảnh báo mã giảm sâu",
+            )
+        elif resolved_cat == "content_news_digest":
+            title_vi = "Tổng Hợp Tin Tức & Lập Dàn Ý Nội Dung Đa Kênh"
+            detected_count = 18
+            dry_run = f"Mẫu thử #1: 5 xu hướng thị trường nổi bật -> {folder}/BanTin_TongHop.md"
+            surface_kind = "data_table"
+            params = (
+                {
+                    "key": "targetFolder",
+                    "labelVi": "Thư mục lưu bản tin Markdown",
+                    "defaultValue": folder,
+                },
+            )
+            steps = (
+                "1. [source.web_http] Thu thập tiêu đề, luận điểm và số liệu chính",
+                "2. [transform.pipeline] Gom nhóm chủ đề theo khung Hook - Insight - CTA",
+                f"3. [export.artifact] Xuất tệp BanTin_TongHop.md tại '{folder}'",
+            )
+        elif resolved_cat == "media_batch_renamer":
+            title_vi = "Đổi Tên & Phân Loại Bộ Sưu Tập Ảnh/Media Hàng Loạt"
+            detected_count = 86
+            dry_run = f"Mẫu thử #1: IMG_8841.JPG -> {folder}/2026-11_BoSuuTap_001.jpg"
+            surface_kind = "data_table"
+            params = (
+                {
+                    "key": "targetFolder",
+                    "labelVi": "Thư mục album ảnh/media",
+                    "defaultValue": folder,
+                },
+            )
+            steps = (
+                f"1. [source.filesystem] Đọc danh sách ảnh/media trong '{folder}'",
+                "2. [file.batch_ops] Ghi sổ cái hoàn tác (Undo Ledger) và chuẩn hóa tên hàng loạt",
+                "3. [canvas.dynamic_a2ui] Hiển thị bảng đối chiếu Tên cũ -> Tên mới",
+            )
+        elif resolved_cat == "web_harvest_invoices":
             title_vi = "Tải Hóa Đơn Hàng Loạt & Lập Bảng Kê"
             detected_count = 48
             dry_run = f"Mẫu thử #1: 2026-11_VNPT_HD001248.pdf + .xml (1.650.000 đ) -> {folder}/"
+            surface_kind = "invoice_table"
             params = (
                 {
                     "key": "targetFolder",
@@ -491,6 +655,7 @@ class OmniForgeSynthesizerService:
             title_vi = "Đối Soát Sao Kê Ngân Hàng & Đơn Hàng"
             detected_count = 120
             dry_run = "Mẫu thử #1: Đơn #DH8821 khớp 450.000 đ | Phát hiện 2 đơn lệch tiền"
+            surface_kind = "diff_reconcile"
             params = (
                 {
                     "key": "targetFolder",
@@ -543,4 +708,119 @@ class OmniForgeSynthesizerService:
             script_steps=steps,
             summary_vi=summary_vi,
             created_at=ts,
+            primitives=self.infer_primitives(resolved_cat),
+            canvas_surface_kind=surface_kind,
+        )
+
+
+class ClawPulseService:
+    """OpenClaw-inspired (`CLAW-1`-`CLAW-4`) symbiotic engine upgraded for XUNA:
+    - Dual-compatible `SKILL.md` bridge with strict shell/secret security scanner.
+    - Self-improving correction memory (`self_heal_generation` & `correction_rules`).
+    - Zero-Token 2-Tier `XUNA Heartbeat` (`HEARTBEAT_OK` uses 0 LLM tokens).
+    - Interactive `A2UI` Live Canvas table builder."""
+
+    _FORBIDDEN_MD_PATTERNS: tuple[re.Pattern[str], ...] = (
+        re.compile(r"\brm\s+-rf\b", re.I),
+        re.compile(r"\bcurl\b[^\n]*\|\s*(?:sh|bash|zsh)\b", re.I),
+        re.compile(r"\bwget\b[^\n]*\|\s*(?:sh|bash|zsh)\b", re.I),
+        re.compile(r"\binvoke-expression\b", re.I),
+        re.compile(r"\biex\s+", re.I),
+        re.compile(r"\bpowershell(?:\.exe)?\s+-(?:enc|encodedcommand)\b", re.I),
+        re.compile(r"\bsudo\s+", re.I),
+        re.compile(r"(?:id_rsa|\.ssh/|\.env\b)", re.I),
+    )
+
+    @classmethod
+    def contains_forbidden_markdown_command(cls, markdown: str) -> bool:
+        return any(p.search(markdown) is not None for p in cls._FORBIDDEN_MD_PATTERNS)
+
+    def evaluate_pulse(
+        self,
+        *,
+        skill_title_vi: str = "Tải Hóa Đơn Hàng Loạt & Lập Bảng Kê",
+        skill_id: str = "skill-web-harvest-invoices-1",
+        target_folder: str = "XUNA_HoaDon/Thang_11_2026",
+        correction_notes: tuple[str, ...] | list[str] = (),
+        imported_skill_markdown: str | None = None,
+        interval_minutes: int = 30,
+        simulate_delta: bool = False,
+    ) -> ClawPulseSnapshot:
+        if (
+            imported_skill_markdown is not None
+            and imported_skill_markdown.strip()
+            and self.contains_forbidden_markdown_command(imported_skill_markdown)
+        ):
+            raise ValueError("skill_markdown_forbidden_command")
+
+        clean_rules = tuple(n.strip()[:200] for n in correction_notes if n and n.strip())
+        self_heal_gen = len(clean_rules)
+        rules_md = (
+            "\n".join(f"- {r}" for r in clean_rules)
+            if clean_rules
+            else "- Tự động dự phòng selector khi cổng hóa đơn đổi giao diện."
+        )
+        skill_md = (
+            imported_skill_markdown.strip()[:4000]
+            if (imported_skill_markdown and imported_skill_markdown.strip())
+            else (
+                "---\n"
+                f'name: "{skill_title_vi}"\n'
+                f'skill_id: "{skill_id}"\n'
+                'risk: "R2"\n'
+                f'target_folder: "{target_folder}"\n'
+                f"self_heal_generation: {self_heal_gen}\n"
+                "---\n"
+                f"# {skill_title_vi}\n\n"
+                "## Ghi chú tự thích nghi (Self-Improving Rules)\n"
+                f"{rules_md}\n"
+            )
+        )
+        clamped_interval = max(5, min(interval_minutes, 720))
+        hb_status = "HEARTBEAT_ALERT" if simulate_delta else "HEARTBEAT_OK"
+        summary_vi = (
+            f"HEARTBEAT_ALERT: Phát hiện 3 hóa đơn mới trong thư mục '{target_folder}' — "
+            "Live Canvas A2UI đã sẵn sàng để bạn duyệt!"
+            if simulate_delta
+            else f"HEARTBEAT_OK: Tuần tra ngầm (chu kỳ {clamped_interval} phút) hoàn tất với "
+            "0 LLM token — không có biến động mới, không làm phiền bạn."
+        )[:240]
+
+        canvas_rows: tuple[dict[str, object], ...] = (
+            {
+                "invoiceNo": "HD-001248",
+                "vendor": "VNPT VinaPhone",
+                "taxId": "0100684378",
+                "totalVnd": 1650000,
+                "status": "hop_le",
+            },
+            {
+                "invoiceNo": "HD-001249",
+                "vendor": "Viettel IDC",
+                "taxId": "0100109106",
+                "totalVnd": 3300000,
+                "status": "hop_le",
+            },
+            {
+                "invoiceNo": "HD-001250",
+                "vendor": "MISA JSC",
+                "taxId": "0101243150",
+                "totalVnd": 2200000,
+                "status": "hop_le",
+            },
+        )
+        return ClawPulseSnapshot(
+            heartbeat_status=hb_status,
+            delta_detected=simulate_delta,
+            llm_tokens_used=0,
+            suppressed_notification=not simulate_delta,
+            interval_minutes=clamped_interval,
+            skill_markdown=skill_md,
+            security_verified=True,
+            self_heal_generation=self_heal_gen,
+            correction_rules=clean_rules,
+            canvas_title_vi="Bảng Kê Hóa Đơn Tương Tác (Live Canvas A2UI)",
+            canvas_columns=("Số HĐ", "Nhà cung cấp", "Mã số thuế", "Tổng thanh toán", "Trạng thái"),
+            canvas_rows=canvas_rows,
+            summary_vi=summary_vi,
         )

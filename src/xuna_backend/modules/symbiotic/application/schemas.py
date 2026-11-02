@@ -177,6 +177,8 @@ class ForgedSkillBlueprintResponse(BaseModel):
     scriptSteps: list[str]
     summaryVi: str
     createdAt: str
+    primitives: list[str] = Field(default_factory=list)
+    canvasSurfaceKind: str = "data_table"
 
 
 class ForgeSkillResponse(BaseModel):
@@ -184,3 +186,37 @@ class ForgeSkillResponse(BaseModel):
 
     schemaVersion: int = 1
     skill: ForgedSkillBlueprintResponse
+
+
+class ClawPulseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = Field(default=1, ge=1, le=1)
+    skillTitleVi: str = Field(
+        default="Tải Hóa Đơn Hàng Loạt & Lập Bảng Kê", min_length=1, max_length=120
+    )
+    skillId: str = Field(default="skill-web-harvest-invoices-1", min_length=1, max_length=64)
+    targetFolder: str = Field(default="XUNA_HoaDon/Thang_11_2026", min_length=1, max_length=120)
+    correctionNotes: list[str] = Field(default_factory=list, max_length=10)
+    importedSkillMarkdown: str | None = Field(default=None, max_length=4000)
+    intervalMinutes: int = Field(default=30, ge=5, le=720)
+    simulateDelta: bool = False
+
+
+class ClawPulseResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = 1
+    heartbeatStatus: str
+    deltaDetected: bool
+    llmTokensUsed: int
+    suppressedNotification: bool
+    intervalMinutes: int
+    skillMarkdown: str
+    securityVerified: bool
+    selfHealGeneration: int
+    correctionRules: list[str]
+    canvasTitleVi: str
+    canvasColumns: list[str]
+    canvasRows: list[dict[str, object]]
+    summaryVi: str

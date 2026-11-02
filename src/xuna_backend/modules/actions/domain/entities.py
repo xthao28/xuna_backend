@@ -362,6 +362,21 @@ class ActionSummary:
             case "forge.extract_invoices_to_sheet":
                 folder = str(arguments.get("sourceFolder", "HoaDon"))[:32]
                 return f"Bóc tách hóa đơn trong {folder} ra bảng kê trên {target}"[:240]
+            case "skill.markdown_bridge":
+                act = str(arguments.get("action", "export_skill_md"))[:24]
+                return f"Đồng bộ SKILL.md ({act}) trên {target}"[:240]
+            case "skill.record_correction":
+                sid = str(arguments.get("skillId", "kỹ năng"))[:32]
+                return f"Ghi nhớ quy tắc tự sửa lỗi cho {sid} trên {target}"[:240]
+            case "heartbeat.configure_and_tick":
+                chk = str(arguments.get("checkName", "tuần tra"))[:32]
+                return f"Chạy nhịp tuần tra 0-token ({chk}) trên {target}"[:240]
+            case "canvas.present":
+                act = str(arguments.get("action", "present_invoice_table"))[:32]
+                return f"Mở bảng tương tác Live Canvas ({act}) trên {target}"[:240]
+            case "pipeline.execute_universal":
+                goal = str(arguments.get("goal", "pipeline đa năng"))[:40]
+                return f"Chạy pipeline nguyên tử vạn năng ({goal}) trên {target}"[:240]
             case _:
                 return f"Thực hiện {tool} trên {target}"[:240]
 
@@ -527,6 +542,21 @@ class ActionSummary:
             case "forge.extract_invoices_to_sheet":
                 folder = str(arguments.get("sourceFolder", "Invoices"))[:32]
                 return f"Extract invoices in {folder} to spreadsheet on {target}"[:240]
+            case "skill.markdown_bridge":
+                act = str(arguments.get("action", "export_skill_md"))[:24]
+                return f"Bridge SKILL.md ({act}) on {target}"[:240]
+            case "skill.record_correction":
+                sid = str(arguments.get("skillId", "skill"))[:32]
+                return f"Record self-healing correction for {sid} on {target}"[:240]
+            case "heartbeat.configure_and_tick":
+                chk = str(arguments.get("checkName", "patrol"))[:32]
+                return f"Run zero-token heartbeat ({chk}) on {target}"[:240]
+            case "canvas.present":
+                act = str(arguments.get("action", "present_invoice_table"))[:32]
+                return f"Present Live Canvas A2UI ({act}) on {target}"[:240]
+            case "pipeline.execute_universal":
+                goal = str(arguments.get("goal", "universal pipeline"))[:40]
+                return f"Execute universal composable pipeline ({goal}) on {target}"[:240]
             case _:
                 return f"Run {tool} on {target}"[:240]
 

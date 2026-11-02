@@ -9,6 +9,8 @@ from fastapi import APIRouter
 
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.symbiotic.application.schemas import (
+    ClawPulseRequest,
+    ClawPulseResponse,
     CoRegulationStateResponse,
     DreamConsolidateRequest,
     DreamConsolidateResponse,
@@ -27,6 +29,7 @@ from xuna_backend.modules.symbiotic.application.schemas import (
     UnstuckCoachResponse,
 )
 from xuna_backend.modules.symbiotic.application.services import (
+    ClawPulseService,
     CoRegulationEvaluator,
     DreamConsolidatorService,
     HabitWorkflowMiner,
@@ -43,6 +46,7 @@ _serendipity_engine = SerendipityEngine()
 _habit_miner = HabitWorkflowMiner()
 _social_ecology = SocialEcologyService()
 _omniforge = OmniForgeSynthesizerService()
+_claw_pulse = ClawPulseService()
 
 
 @router.post("/dream-consolidate", response_model=DreamConsolidateResponse)
@@ -216,5 +220,41 @@ async def forge_citizen_skill(
             scriptSteps=list(blueprint.script_steps),
             summaryVi=blueprint.summary_vi,
             createdAt=blueprint.created_at.astimezone(UTC).isoformat(),
+            primitives=list(blueprint.primitives),
+            canvasSurfaceKind=blueprint.canvas_surface_kind,
         )
+    )
+
+
+@router.post("/claw-pulse", response_model=ClawPulseResponse)
+async def evaluate_claw_pulse(
+    body: ClawPulseRequest,
+) -> ClawPulseResponse:
+    try:
+        snap = _claw_pulse.evaluate_pulse(
+            skill_title_vi=body.skillTitleVi,
+            skill_id=body.skillId,
+            target_folder=body.targetFolder,
+            correction_notes=tuple(body.correctionNotes),
+            imported_skill_markdown=body.importedSkillMarkdown,
+            interval_minutes=body.intervalMinutes,
+            simulate_delta=body.simulateDelta,
+        )
+    except ValueError as err:
+        raise AppError("invalid_argument", HTTPStatus.UNPROCESSABLE_ENTITY) from err
+
+    return ClawPulseResponse(
+        heartbeatStatus=snap.heartbeat_status,
+        deltaDetected=snap.delta_detected,
+        llmTokensUsed=snap.llm_tokens_used,
+        suppressedNotification=snap.suppressed_notification,
+        intervalMinutes=snap.interval_minutes,
+        skillMarkdown=snap.skill_markdown,
+        securityVerified=snap.security_verified,
+        selfHealGeneration=snap.self_heal_generation,
+        correctionRules=list(snap.correction_rules),
+        canvasTitleVi=snap.canvas_title_vi,
+        canvasColumns=list(snap.canvas_columns),
+        canvasRows=[dict(r) for r in snap.canvas_rows],
+        summaryVi=snap.summary_vi,
     )
