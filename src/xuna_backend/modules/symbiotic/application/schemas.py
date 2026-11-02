@@ -332,3 +332,35 @@ class Frontier2026Response(BaseModel):
     playdateSummaryVi: str
     summaryVi: str
 
+
+class UiAccessibilityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    action: str = Field(default="inspect_window", min_length=1, max_length=64)
+    windowTitle: str = Field(
+        default="Excel - Bảng Kê Hóa Đơn",
+        min_length=1,
+        max_length=240,
+    )
+    refId: str = Field(default="ui_3", min_length=1, max_length=64)
+    valueText: str = Field(default="", max_length=400)
+    maxNodes: int = Field(default=30, ge=1, le=80)
+
+
+class UiAccessibilityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schemaVersion: int = 1
+    action: str
+    windowTitle: str
+    backendDriver: str
+    nodeCount: int
+    tokenSavingsPercent: int
+    screenshotBytesUsed: int = 0
+    compactUiTree: str
+    invokedRefId: str
+    redactedControlsCount: int
+    nodes: list[dict[str, object]]
+    summaryVi: str
+
+

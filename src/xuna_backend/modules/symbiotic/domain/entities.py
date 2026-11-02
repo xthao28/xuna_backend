@@ -451,3 +451,36 @@ class Frontier2026Receipt:
             "summaryVi": self.summary_vi,
         }
 
+
+@dataclass(frozen=True, slots=True)
+class UiAccessibilityTreeReceipt:
+    """Receipt returned by `ClawPulseService.evaluate_ui_accessibility_tree` (`UIA-3`)."""
+
+    action: str
+    window_title: str
+    backend_driver: str
+    node_count: int
+    token_savings_percent: int
+    screenshot_bytes_used: int
+    compact_ui_tree: str
+    invoked_ref_id: str
+    redacted_controls_count: int
+    nodes: tuple[dict[str, object], ...]
+    summary_vi: str
+
+    def to_wire(self) -> dict[str, object]:
+        return {
+            "action": self.action,
+            "windowTitle": self.window_title,
+            "backendDriver": self.backend_driver,
+            "nodeCount": self.node_count,
+            "tokenSavingsPercent": self.token_savings_percent,
+            "screenshotBytesUsed": self.screenshot_bytes_used,
+            "compactUiTree": self.compact_ui_tree,
+            "invokedRefId": self.invoked_ref_id,
+            "redactedControlsCount": self.redacted_controls_count,
+            "nodes": [dict(item) for item in self.nodes],
+            "summaryVi": self.summary_vi,
+        }
+
+

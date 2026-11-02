@@ -58,11 +58,13 @@ from xuna_backend.modules.hosts.domain.entities import (
 from xuna_backend.modules.symbiotic.api.routes import (
     evaluate_claw_mind,
     evaluate_frontier_2026,
+    evaluate_ui_accessibility,
     execute_workshop_chain,
 )
 from xuna_backend.modules.symbiotic.application.schemas import (
     ClawMindRequest,
     Frontier2026Request,
+    UiAccessibilityRequest,
     WorkshopChainRequest,
 )
 from xuna_backend.modules.symbiotic.application.services import (
@@ -727,4 +729,46 @@ def test_frontier_2026_evaluation_and_drop_extension_guard() -> None:
     assert api_resp.detectedOwnerTone == "stressed_rushed"
     assert api_resp.pcmByteCount == 844
     assert len(api_resp.wavSha256) == 64
+
+
+def test_ui_accessibility_tree_zero_screenshot_and_security_guards() -> None:
+    svc = ClawPulseService()
+    inspect_receipt = svc.evaluate_ui_accessibility_tree(
+        action="inspect_window",
+        window_title="Excel - Bảng Kê Hóa Đơn",
+        max_nodes=10,
+    )
+    assert inspect_receipt.screenshot_bytes_used == 0
+    assert inspect_receipt.token_savings_percent == 92
+    assert inspect_receipt.node_count == 4
+    assert inspect_receipt.redacted_controls_count == 1
+    assert "[ref=ui_1]" in inspect_receipt.compact_ui_tree
+    assert "[REDACTED_PASSWORD_CONTROL]" in inspect_receipt.compact_ui_tree
+
+    with pytest.raises(ValueError, match="ui_window_forbidden_target"):
+        svc.evaluate_ui_accessibility_tree(
+            action="inspect_window",
+            window_title="1Password Vault",
+        )
+
+    with pytest.raises(ValueError, match="ui_ref_password_or_unsafe_blocked"):
+        svc.evaluate_ui_accessibility_tree(
+            action="invoke_ref",
+            window_title="Excel - Bảng Kê Hóa Đơn",
+            ref_id="password_field_1",
+        )
+
+    api_resp = asyncio.run(
+        evaluate_ui_accessibility(
+            UiAccessibilityRequest(
+                action="invoke_ref",
+                windowTitle="Excel - Bảng Kê Hóa Đơn",
+                refId="ui_3",
+            )
+        )
+    )
+    assert api_resp.screenshotBytesUsed == 0
+    assert api_resp.invokedRefId == "ui_3"
+    assert "0 chụp màn hình" in api_resp.summaryVi
+
 

@@ -29,6 +29,8 @@ from xuna_backend.modules.symbiotic.application.schemas import (
     SerendipityNoteResponse,
     SocialEncounterNoteResponse,
     SocialPostcardResponse,
+    UiAccessibilityRequest,
+    UiAccessibilityResponse,
     UnstuckCoachRequest,
     UnstuckCoachResponse,
     WorkshopChainRequest,
@@ -372,4 +374,35 @@ async def evaluate_frontier_2026(
         playdateSummaryVi=receipt.playdate_summary_vi,
         summaryVi=receipt.summary_vi,
     )
+
+
+@router.post("/ui-accessibility", response_model=UiAccessibilityResponse)
+async def evaluate_ui_accessibility(
+    body: UiAccessibilityRequest,
+) -> UiAccessibilityResponse:
+    try:
+        receipt = _claw_pulse.evaluate_ui_accessibility_tree(
+            action=body.action,
+            window_title=body.windowTitle,
+            ref_id=body.refId,
+            value_text=body.valueText,
+            max_nodes=body.maxNodes,
+        )
+    except ValueError as err:
+        raise AppError("invalid_argument", HTTPStatus.UNPROCESSABLE_ENTITY) from err
+
+    return UiAccessibilityResponse(
+        action=receipt.action,
+        windowTitle=receipt.window_title,
+        backendDriver=receipt.backend_driver,
+        nodeCount=receipt.node_count,
+        tokenSavingsPercent=receipt.token_savings_percent,
+        screenshotBytesUsed=receipt.screenshot_bytes_used,
+        compactUiTree=receipt.compact_ui_tree,
+        invokedRefId=receipt.invoked_ref_id,
+        redactedControlsCount=receipt.redacted_controls_count,
+        nodes=[dict(item) for item in receipt.nodes],
+        summaryVi=receipt.summary_vi,
+    )
+
 
