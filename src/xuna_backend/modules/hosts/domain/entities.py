@@ -89,7 +89,7 @@ class HostAlias:
         if not 1 <= len(trimmed) <= 24:
             raise ValueError("host alias must be 1..24 characters")
         for ch in trimmed:
-            if not (ch.isalnum() or ch in (" ", "-", "_")):
+            if not (ch.isalnum() or ch in (" ", "-", "_", ".", "'", "\u2019")):
                 raise ValueError(f"unsupported character in host alias: {ch!r}")
         object.__setattr__(self, "value", trimmed)
 
@@ -279,13 +279,13 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
     family_str = name.split(".", 1)[0]
     if family_str == "browser" or name == "tv.cast_media":
         family = ToolFamily.URL
-    elif name in ("tv.list_devices", "tv.control") or family_str == "meeting":
+    elif name in ("tv.list_devices", "tv.control") or family_str in ("meeting", "acoustic"):
         family = ToolFamily.MEDIA
     elif family_str == "system":
         family = ToolFamily.HOST
     elif family_str == "habit":
         family = ToolFamily.WORKFLOW
-    elif name == "tv.launch_app" or family_str in (
+    elif name in ("tv.launch_app", "ui.accessibility_tree") or family_str in (
         "display",
         "workspace",
         "selection",
@@ -308,6 +308,8 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
         "memory",
         "subagent",
         "schedule",
+        "companion",
+        "ritual",
     ):
         family = ToolFamily.APP
     else:
