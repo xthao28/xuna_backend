@@ -309,6 +309,7 @@ class Frontier2026Request(BaseModel):
     previousObjectVal: str = Field(default="Giao thức BLE M02", min_length=1, max_length=240)
     ritualMode: str = Field(default="start_breathing_478", min_length=1, max_length=64)
     neighborShortId: str = Field(default="XUNA9F2A", min_length=1, max_length=32)
+    themeId: str = Field(default="green_edition", min_length=1, max_length=64)
 
 
 class Frontier2026Response(BaseModel):
@@ -330,6 +331,7 @@ class Frontier2026Response(BaseModel):
     standbyDockActive: bool
     unlockedKeepsakeVi: str
     playdateSummaryVi: str
+    activeColorThemeId: str = "green_edition"
     summaryVi: str
 
 

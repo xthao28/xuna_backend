@@ -1024,6 +1024,7 @@ class ClawPulseService:
         previous_object_val: str = "Giao thức BLE M02",
         ritual_mode: str = "start_breathing_478",
         neighbor_short_id: str = "XUNA9F2A",
+        theme_id: str = "green_edition",
     ) -> Frontier2026Receipt:
         clean_drop = dropped_item_name.strip()
         low_drop = clean_drop.lower()
@@ -1115,6 +1116,17 @@ class ClawPulseService:
             f"phát âm '{vocal_kind}' ({len(wav_bytes)}B WAV), cảm nhận giọng '{detected_tone}'."
         )[:240]
 
+        clean_theme = (theme_id or "green_edition").strip().lower()
+        allowed_themes = {
+            "green_edition",
+            "forest_mint",
+            "seafoam",
+            "lavender_dream",
+            "sunny_gold",
+            "sky_blue",
+            "berry_candy",
+        }
+        resolved_theme = clean_theme if clean_theme in allowed_themes else "green_edition"
         return Frontier2026Receipt(
             overlay_anchor=overlay_anchor,
             munch_animation=munch_anim,
@@ -1131,6 +1143,7 @@ class ClawPulseService:
             standby_dock_active=True,
             unlocked_keepsake_vi=keepsake_vi,
             playdate_summary_vi=playdate_vi,
+            active_color_theme_id=resolved_theme,
             summary_vi=summary_vi,
         )
 
