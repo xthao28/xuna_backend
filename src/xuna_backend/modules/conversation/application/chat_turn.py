@@ -503,6 +503,8 @@ async def chat_turn(
     messages = list(request.messages)
     last_finished: ChatFinished | None = None
     gesture_emitted = False
+    emitted_any_text = False
+    last_action_summary: str | None = None
 
     try:
         for round_idx in range(MAX_TOOL_ROUNDS + 1):
@@ -537,10 +539,12 @@ async def chat_turn(
                             yield GestureChosen(gesture)
                         if clean:
                             if sec_filter is None:
+                                emitted_any_text = True
                                 yield TextDelta(clean)
                             else:
                                 for sec, chunk in sec_filter.feed(clean):
                                     if sec == Section.SAY:
+                                        emitted_any_text = True
                                         yield TextDelta(chunk)
                                     else:
                                         detail_accum.append(chunk)
@@ -551,22 +555,26 @@ async def chat_turn(
                         rest = tags.flush()
                         if sec_filter is None:
                             if rest:
+                                emitted_any_text = True
                                 yield TextDelta(rest)
                         else:
                             if rest:
                                 for sec, chunk in sec_filter.feed(rest):
                                     if sec == Section.SAY:
+                                        emitted_any_text = True
                                         yield TextDelta(chunk)
                                     else:
                                         detail_accum.append(chunk)
                                         yield DetailDelta(chunk)
                             for sec, chunk in sec_filter.flush():
                                 if sec == Section.SAY:
+                                    emitted_any_text = True
                                     yield TextDelta(chunk)
                                 else:
                                     detail_accum.append(chunk)
                                     yield DetailDelta(chunk)
                             if not sec_filter.tagged and not round_calls:
+                                emitted_any_text = True
                                 yield TextDelta(fallback_say("".join(detail_accum), locale_vi))
                         round_finished = event
                         last_finished = event
@@ -574,6 +582,9 @@ async def chat_turn(
                         yield event
 
             if not round_calls or not allow_tools_this_round:
+                if not emitted_any_text and last_action_summary:
+                    emitted_any_text = True
+                    yield TextDelta(last_action_summary)
                 if round_finished is not None:
                     yield round_finished
                 return
@@ -596,13 +607,23 @@ async def chat_turn(
                 if isinstance(item, Message):
                     tool_messages.append(item)
                 else:
+                    if isinstance(item, ActionResultEvent) and item.summary:
+                        last_action_summary = item.summary
                     yield item
 
             messages.extend(tool_messages)
 
+        if not emitted_any_text and last_action_summary:
+            emitted_any_text = True
+            yield TextDelta(last_action_summary)
         if last_finished is not None:
             yield last_finished
     except ProviderUnavailableError:
+        if not emitted_any_text and last_action_summary:
+            yield TextDelta(last_action_summary)
+            if last_finished is not None:
+                yield last_finished
+            return
         yield ProviderFailed()
 
 

@@ -1,6 +1,7 @@
 """`POST /v1/conversations/{petId}/turns` → Server-Sent Events (contract §2), and
 phone voice V1: `POST /v1/speech/transcriptions` plus spoken replies (`speak`)."""
 
+import asyncio
 import base64
 import binascii
 import json
@@ -492,109 +493,139 @@ async def turn(
             else text_events
         )
         has_detail = False
-        async for event in stream:
-            match event:
-                case TextDelta(text=text):
-                    yield _sse("delta", {"text": text})
-                case DetailDelta(text=text):
-                    has_detail = True
-                    yield _sse("detail", {"text": text})
-                case GestureChosen(gesture=gesture):
-                    yield _sse("gesture", {"name": gesture.value})
-                case ActionPendingEvent() as pending:
-                    pending_payload: dict[str, Any] = {
-                        "approvalId": pending.approval_id,
-                        "target": pending.target,
-                        "summary": pending.summary,
-                        "risk": pending.risk,
-                        "expiresIn": pending.expires_in,
-                    }
-                    if pending.host_id is not None:
-                        pending_payload["hostId"] = pending.host_id
-                    if pending.args_sha256 is not None:
-                        pending_payload["argsSha256"] = pending.args_sha256
-                    if pending.expires_at is not None:
-                        pending_payload["expiresAt"] = pending.expires_at
-                    yield _sse("action_pending", pending_payload)
-                case BoardHidRequestEvent() as hid_req:
-                    yield _sse(
-                        "board_hid_request",
-                        {
-                            "invocationId": hid_req.invocation_id,
-                            "approvalId": hid_req.approval_id,
-                            "key": hid_req.key,
-                            "usageIndex": hid_req.usage_index,
-                        },
-                    )
-                case LocalActionRequestEvent() as local_req:
-                    local_payload: dict[str, Any] = {
-                        "invocationId": local_req.invocation_id,
-                        "target": local_req.target,
-                        "tool": local_req.tool,
-                        "arguments": local_req.arguments,
-                    }
-                    if local_req.approval_id is not None:
-                        local_payload["approvalId"] = local_req.approval_id
-                    yield _sse("local_action_request", local_payload)
-                case HostWakeRequestEvent() as wake_req:
-                    wake_payload: dict[str, Any] = {
-                        "invocationId": wake_req.invocation_id,
-                        "hostId": wake_req.host_id,
-                        "target": wake_req.target,
-                    }
-                    if wake_req.mac_address is not None:
-                        wake_payload["macAddress"] = wake_req.mac_address
-                    yield _sse("host_wake_request", wake_payload)
-                case ActionResultEvent() as act_res:
-                    act_payload: dict[str, Any] = {
-                        "invocationId": act_res.invocation_id,
-                        "target": act_res.target,
-                        "summary": act_res.summary,
-                        "status": act_res.status,
-                    }
-                    if act_res.gesture is not None:
-                        act_payload["gesture"] = act_res.gesture
-                    yield _sse("action_result", act_payload)
-                case ToolCallRequested():
+        event_queue: asyncio.Queue[SpokenTurnEvent | BaseException | None] = asyncio.Queue()
+
+        async def _pump_stream() -> None:
+            try:
+                async for ev in stream:
+                    await event_queue.put(ev)
+            except BaseException as exc:
+                await event_queue.put(exc)
+            finally:
+                await event_queue.put(None)
+
+        pump_task = asyncio.create_task(_pump_stream())
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(event_queue.get(), timeout=4.0)
+                except TimeoutError:
+                    yield ": keepalive\n\n"
                     continue
-                case ChatFinished() as done:
-                    extra = {
-                        "mode": chosen_mode.value,
-                        "domainId": domain_id_str,
-                        "hasDetail": has_detail,
-                    }
-                    yield _sse("finished", _finished(done) | signals | candidate_payload | extra)
-                case SpokenFinished(finished=done, spoken=spoken, first_audio_ms=first_ms):
-                    timing = {} if first_ms is None else {"firstAudioMs": first_ms}
-                    extra = {
-                        "mode": chosen_mode.value,
-                        "domainId": domain_id_str,
-                        "hasDetail": has_detail,
-                    }
-                    yield _sse(
-                        "finished",
-                        _finished(done)
-                        | {"spoken": spoken}
-                        | timing
-                        | signals
-                        | candidate_payload
-                        | extra,
-                    )
-                case SpokenAudio() as audio:
-                    yield _sse(
-                        "audio",
-                        {
-                            "seq": audio.seq,
-                            "text": audio.text,
-                            "format": audio.codec,
-                            "sampleRate": audio.sample_rate,
-                            "data": base64.b64encode(audio.data).decode("ascii"),
-                        },
-                    )
-                case SpeechUnavailable(code=code):
-                    yield _sse("speech_unavailable", {"code": code})
-                case ProviderFailed(code=code):
-                    yield _sse("error", {"code": code})
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                event = item
+                match event:
+                    case TextDelta(text=text):
+                        yield _sse("delta", {"text": text})
+                    case DetailDelta(text=text):
+                        has_detail = True
+                        yield _sse("detail", {"text": text})
+                    case GestureChosen(gesture=gesture):
+                        yield _sse("gesture", {"name": gesture.value})
+                    case ActionPendingEvent() as pending:
+                        pending_payload: dict[str, Any] = {
+                            "approvalId": pending.approval_id,
+                            "target": pending.target,
+                            "summary": pending.summary,
+                            "risk": pending.risk,
+                            "expiresIn": pending.expires_in,
+                        }
+                        if pending.host_id is not None:
+                            pending_payload["hostId"] = pending.host_id
+                        if pending.args_sha256 is not None:
+                            pending_payload["argsSha256"] = pending.args_sha256
+                        if pending.expires_at is not None:
+                            pending_payload["expiresAt"] = pending.expires_at
+                        yield _sse("action_pending", pending_payload)
+                    case BoardHidRequestEvent() as hid_req:
+                        yield _sse(
+                            "board_hid_request",
+                            {
+                                "invocationId": hid_req.invocation_id,
+                                "approvalId": hid_req.approval_id,
+                                "key": hid_req.key,
+                                "usageIndex": hid_req.usage_index,
+                            },
+                        )
+                    case LocalActionRequestEvent() as local_req:
+                        local_payload: dict[str, Any] = {
+                            "invocationId": local_req.invocation_id,
+                            "target": local_req.target,
+                            "tool": local_req.tool,
+                            "arguments": local_req.arguments,
+                        }
+                        if local_req.approval_id is not None:
+                            local_payload["approvalId"] = local_req.approval_id
+                        yield _sse("local_action_request", local_payload)
+                    case HostWakeRequestEvent() as wake_req:
+                        wake_payload: dict[str, Any] = {
+                            "invocationId": wake_req.invocation_id,
+                            "hostId": wake_req.host_id,
+                            "target": wake_req.target,
+                        }
+                        if wake_req.mac_address is not None:
+                            wake_payload["macAddress"] = wake_req.mac_address
+                        yield _sse("host_wake_request", wake_payload)
+                    case ActionResultEvent() as act_res:
+                        act_payload: dict[str, Any] = {
+                            "invocationId": act_res.invocation_id,
+                            "target": act_res.target,
+                            "summary": act_res.summary,
+                            "status": act_res.status,
+                        }
+                        if act_res.gesture is not None:
+                            act_payload["gesture"] = act_res.gesture
+                        yield _sse("action_result", act_payload)
+                    case ToolCallRequested():
+                        continue
+                    case ChatFinished() as done:
+                        extra = {
+                            "mode": chosen_mode.value,
+                            "domainId": domain_id_str,
+                            "hasDetail": has_detail,
+                        }
+                        yield _sse(
+                            "finished",
+                            _finished(done) | signals | candidate_payload | extra,
+                        )
+                    case SpokenFinished(finished=done, spoken=spoken, first_audio_ms=first_ms):
+                        timing = {} if first_ms is None else {"firstAudioMs": first_ms}
+                        extra = {
+                            "mode": chosen_mode.value,
+                            "domainId": domain_id_str,
+                            "hasDetail": has_detail,
+                        }
+                        yield _sse(
+                            "finished",
+                            _finished(done)
+                            | {"spoken": spoken}
+                            | timing
+                            | signals
+                            | candidate_payload
+                            | extra,
+                        )
+                    case SpokenAudio() as audio:
+                        yield _sse(
+                            "audio",
+                            {
+                                "seq": audio.seq,
+                                "text": audio.text,
+                                "format": audio.codec,
+                                "sampleRate": audio.sample_rate,
+                                "data": base64.b64encode(audio.data).decode("ascii"),
+                            },
+                        )
+                    case SpeechUnavailable(code=code):
+                        yield _sse("speech_unavailable", {"code": code})
+                    case ProviderFailed(code=code):
+                        yield _sse("error", {"code": code})
+        finally:
+            if not pump_task.done():
+                pump_task.cancel()
+                await asyncio.gather(pump_task, return_exceptions=True)
 
     return StreamingResponse(
         events(), media_type="text/event-stream", headers={"Cache-Control": "no-store"}
