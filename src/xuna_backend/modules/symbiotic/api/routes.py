@@ -352,6 +352,7 @@ async def evaluate_frontier_2026(
             previous_object_val=body.previousObjectVal,
             ritual_mode=body.ritualMode,
             neighbor_short_id=body.neighborShortId,
+            theme_id=body.themeId,
         )
     except ValueError as err:
         raise AppError("invalid_argument", HTTPStatus.UNPROCESSABLE_ENTITY) from err
@@ -372,6 +373,7 @@ async def evaluate_frontier_2026(
         standbyDockActive=receipt.standby_dock_active,
         unlockedKeepsakeVi=receipt.unlocked_keepsake_vi,
         playdateSummaryVi=receipt.playdate_summary_vi,
+        activeColorThemeId=receipt.active_color_theme_id,
         summaryVi=receipt.summary_vi,
     )
 

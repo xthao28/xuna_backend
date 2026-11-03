@@ -1024,6 +1024,7 @@ class ClawPulseService:
         previous_object_val: str = "Giao thức BLE M02",
         ritual_mode: str = "start_breathing_478",
         neighbor_short_id: str = "XUNA9F2A",
+        theme_id: str = "theme_01_green_edition",
     ) -> Frontier2026Receipt:
         clean_drop = dropped_item_name.strip()
         low_drop = clean_drop.lower()
@@ -1132,6 +1133,7 @@ class ClawPulseService:
             unlocked_keepsake_vi=keepsake_vi,
             playdate_summary_vi=playdate_vi,
             summary_vi=summary_vi,
+            active_color_theme_id=theme_id.strip() or "theme_01_green_edition",
         )
 
     def evaluate_ui_accessibility_tree(

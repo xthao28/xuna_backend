@@ -430,6 +430,7 @@ class Frontier2026Receipt:
     unlocked_keepsake_vi: str
     playdate_summary_vi: str
     summary_vi: str
+    active_color_theme_id: str = "theme_01_green_edition"
 
     def to_wire(self) -> dict[str, object]:
         return {
@@ -448,6 +449,7 @@ class Frontier2026Receipt:
             "standbyDockActive": self.standby_dock_active,
             "unlockedKeepsakeVi": self.unlocked_keepsake_vi,
             "playdateSummaryVi": self.playdate_summary_vi,
+            "activeColorThemeId": self.active_color_theme_id,
             "summaryVi": self.summary_vi,
         }
 
