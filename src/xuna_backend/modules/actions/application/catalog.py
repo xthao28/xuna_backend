@@ -32,7 +32,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     ToolPermissionState,
 )
 
-MAX_CATALOG_TOOLS = 8
+MAX_CATALOG_TOOLS = 20
 CAP_HOST_ACTIONS_V1 = "host_actions_v1"
 CAP_BOARD_HID_V1 = "board_hid_v1"
 CAP_WORKFLOW_TEMPLATES_V1 = "workflow_templates_v1"
@@ -53,10 +53,15 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "media.volume_set",
     "media.now_playing",
     "app.launch",
+    "app.list_allowed",
+    "host.status",
     "workspace.coding_agent",
     "workspace.open",
     "workspace.git_summary",
     "workspace.watch_task",
+    "forge.synthesize_skill",
+    "forge.run_skill",
+    "forge.list_and_manage",
     "window.active_context",
     "browser.read_page",
     "selection.read",
@@ -86,9 +91,6 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "coach.decompose_overwhelm",
     "meeting.desk_whisper_digest",
     "habit.propose_workflow",
-    "forge.synthesize_skill",
-    "forge.run_skill",
-    "forge.list_and_manage",
     "teach.record_session",
     "forge.extract_invoices_to_sheet",
     "skill.markdown_bridge",
@@ -110,8 +112,6 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "browser.current_url",
     "workflow.run",
     "host.notify",
-    "host.status",
-    "app.list_allowed",
     "workflow.list",
     "ui.tap_text",
     "ui.back",
