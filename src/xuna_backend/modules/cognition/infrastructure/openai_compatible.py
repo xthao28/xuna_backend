@@ -6,6 +6,7 @@ later is configuration only. Network reachability (VPN) is the host's job;
 this adapter only needs a base URL. Prompts and outputs are never logged.
 """
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Mapping
@@ -32,22 +33,28 @@ from xuna_backend.modules.cognition.domain.types import (
 NAME = "openai_compatible"
 
 
-def _serialize_message(m: Message) -> dict[str, Any]:
+def _serialize_message(
+    m: Message,
+    extra_by_call_id: Mapping[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if m.role is Role.ASSISTANT and m.tool_calls:
+        serialized_calls: list[dict[str, Any]] = []
+        for tc in m.tool_calls:
+            item: dict[str, Any] = {
+                "id": tc.id,
+                "type": "function",
+                "function": {
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.arguments, ensure_ascii=False),
+                },
+            }
+            if extra_by_call_id and tc.id in extra_by_call_id:
+                item["extra_content"] = extra_by_call_id[tc.id]
+            serialized_calls.append(item)
         return {
             "role": Role.ASSISTANT.value,
             "content": m.content or None,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.arguments, ensure_ascii=False),
-                    },
-                }
-                for tc in m.tool_calls
-            ],
+            "tool_calls": serialized_calls,
         }
     msg: dict[str, Any] = {"role": m.role.value, "content": m.content}
     if m.tool_call_id:
@@ -84,13 +91,14 @@ class OpenAICompatibleTextGenerator:
         self._reasoning_effort = reasoning_effort
         self._transport = transport
         self._label = provider_label
+        self._tool_call_extra: dict[str, dict[str, Any]] = {}
 
     def _payload(self, request: ChatRequest) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self._model,
             "stream": True,
             "max_tokens": request.max_output_tokens,
-            "messages": [_serialize_message(m) for m in request.messages],
+            "messages": [_serialize_message(m, self._tool_call_extra) for m in request.messages],
         }
         if self._reasoning_effort:
             payload["reasoning_effort"] = self._reasoning_effort
@@ -112,36 +120,50 @@ class OpenAICompatibleTextGenerator:
         started = time.perf_counter()
         timeout = httpx.Timeout(request.timeout_s, connect=min(5.0, request.timeout_s))
         usage: dict[str, int] = {}
-        calls: dict[int, dict[str, str]] = {}
+        calls: dict[int, dict[str, Any]] = {}
         try:
-            async with (
-                httpx.AsyncClient(timeout=timeout, transport=self._transport) as client,
-                client.stream(
-                    "POST", self._url, json=self._payload(request), headers=self._headers
-                ) as response,
-            ):
-                if response.status_code != 200:
-                    raise ProviderUnavailableError(f"status {response.status_code}")
-                async for line in response.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
+            max_attempts = 3
+            async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
+                for attempt in range(max_attempts):
+                    calls.clear()
+                    async with client.stream(
+                        "POST", self._url, json=self._payload(request), headers=self._headers
+                    ) as response:
+                        if response.status_code in (429, 503) and attempt + 1 < max_attempts:
+                            retry_after_raw = response.headers.get("retry-after", "")
+                            try:
+                                delay_s = min(max(float(retry_after_raw), 0.8), 4.0)
+                            except ValueError:
+                                delay_s = 1.2 * (attempt + 1)
+                            await asyncio.sleep(delay_s)
+                            continue
+                        if response.status_code != 200:
+                            raise ProviderUnavailableError(f"status {response.status_code}")
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            data = line[5:].strip()
+                            if data == "[DONE]":
+                                break
+                            chunk = json.loads(data)
+                            usage = chunk.get("usage") or usage
+                            for choice in chunk.get("choices") or []:
+                                delta = choice.get("delta") or {}
+                                if delta.get("content"):
+                                    yield TextDelta(str(delta["content"]))
+                                for call in delta.get("tool_calls") or []:
+                                    slot = calls.setdefault(
+                                        int(call.get("index", 0)),
+                                        {"id": "", "name": "", "args": "", "extra": None},
+                                    )
+                                    function = call.get("function") or {}
+                                    slot["id"] = call.get("id") or slot["id"]
+                                    slot["name"] = function.get("name") or slot["name"]
+                                    slot["args"] += function.get("arguments") or ""
+                                    extra = call.get("extra_content")
+                                    if isinstance(extra, dict):
+                                        slot["extra"] = extra
                         break
-                    chunk = json.loads(data)
-                    usage = chunk.get("usage") or usage
-                    for choice in chunk.get("choices") or []:
-                        delta = choice.get("delta") or {}
-                        if delta.get("content"):
-                            yield TextDelta(str(delta["content"]))
-                        for call in delta.get("tool_calls") or []:
-                            slot = calls.setdefault(
-                                int(call.get("index", 0)), {"id": "", "name": "", "args": ""}
-                            )
-                            function = call.get("function") or {}
-                            slot["id"] = call.get("id") or slot["id"]
-                            slot["name"] = function.get("name") or slot["name"]
-                            slot["args"] += function.get("arguments") or ""
         except (httpx.HTTPError, json.JSONDecodeError) as error:
             raise ProviderUnavailableError(type(error).__name__) from error
         for slot in calls.values():
@@ -150,7 +172,12 @@ class OpenAICompatibleTextGenerator:
             except json.JSONDecodeError:
                 arguments = {}
             if isinstance(arguments, dict) and slot["name"]:
-                yield ToolCallRequested(ToolCall(slot["id"], slot["name"], arguments))
+                call_id = str(slot["id"])
+                if isinstance(slot.get("extra"), dict) and call_id:
+                    if len(self._tool_call_extra) >= 128:
+                        self._tool_call_extra.clear()
+                    self._tool_call_extra[call_id] = slot["extra"]
+                yield ToolCallRequested(ToolCall(call_id, str(slot["name"]), arguments))
         yield ChatFinished(
             provider=self._label,
             model=self._model,

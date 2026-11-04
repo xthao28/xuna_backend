@@ -28,7 +28,7 @@ from xuna_backend.modules.hosts.domain.session import (
     HostSessionRejected,
 )
 
-MAX_FRAME_BYTES_DEFAULT = 65_536
+MAX_FRAME_BYTES_DEFAULT = 131_072
 
 
 class _StrictModel(BaseModel):

@@ -510,6 +510,8 @@ async def chat_turn(
     active_generator: TextGenerator = generator
     active_max_tokens: int = request.max_output_tokens
 
+    needs_followup_tools = True
+
     try:
         for round_idx in range(MAX_TOOL_ROUNDS + 1):
             elapsed = time.monotonic() - turn_started
@@ -517,7 +519,11 @@ async def chat_turn(
             if remaining_budget <= 0:
                 break
 
-            allow_tools_this_round = round_idx < MAX_TOOL_ROUNDS and bool(request.tools)
+            allow_tools_this_round = (
+                round_idx < MAX_TOOL_ROUNDS
+                and bool(request.tools)
+                and (round_idx == 0 or needs_followup_tools)
+            )
             round_request = ChatRequest(
                 messages=tuple(messages),
                 locale=request.locale,
@@ -533,7 +539,29 @@ async def chat_turn(
             round_calls: list[ToolCall] = []
             round_finished: ChatFinished | None = None
 
-            async for event in active_generator.stream(round_request):
+            async def _iter_round_events(
+                req: ChatRequest = round_request,
+                text_parts: list[str] = round_text_parts,
+                calls: list[ToolCall] = round_calls,
+            ) -> AsyncIterator[ChatEvent]:
+                nonlocal active_generator
+                try:
+                    async for ev in active_generator.stream(req):
+                        yield ev
+                except ProviderUnavailableError:
+                    if (
+                        code_generator is not None
+                        and active_generator is not code_generator
+                        and not text_parts
+                        and not calls
+                    ):
+                        active_generator = code_generator
+                        async for ev in active_generator.stream(req):
+                            yield ev
+                    else:
+                        raise
+
+            async for event in _iter_round_events():
                 match event:
                     case TextDelta(text=text):
                         round_text_parts.append(text)
@@ -616,6 +644,21 @@ async def chat_turn(
                     yield item
 
             messages.extend(tool_messages)
+            followup_prefixes = (
+                "ui__",
+                "browser__",
+                "app__launch",
+                "forge__",
+                "workspace__",
+                "skill__",
+            )
+            needs_followup_tools = any(
+                c.name.startswith(followup_prefixes)
+                or '"status":"error"' in m.content
+                or '"status":"needs_permission"' in m.content
+                for c in round_calls
+                for m in tool_messages
+            )
             if code_generator is not None and any(
                 c.name.startswith(("forge__", "workspace__", "skill__"))
                 for c in round_calls
