@@ -485,10 +485,12 @@ async def chat_turn(
     sections: bool = False,
     locale_vi: bool = True,
     tool_runner: ToolCallRunner | None = None,
+    code_generator: TextGenerator | None = None,
 ) -> AsyncIterator[TurnEvent]:
     """Streams the reply with gesture tags removed, splits say/detail when `sections=True`,
     and executes up to `MAX_TOOL_ROUNDS` (3) x `MAX_CALLS_PER_ROUND` (3) tool calls when
-    `tool_runner` is supplied."""
+    `tool_runner` is supplied. Automatically switches to `code_generator` on subsequent
+    rounds when a `forge__*` or `workspace__*` tool call is triggered."""
     if tool_runner is None:
         async for ev in _single_round_chat_turn(
             generator,
@@ -505,6 +507,8 @@ async def chat_turn(
     gesture_emitted = False
     emitted_any_text = False
     last_action_summary: str | None = None
+    active_generator: TextGenerator = generator
+    active_max_tokens: int = request.max_output_tokens
 
     try:
         for round_idx in range(MAX_TOOL_ROUNDS + 1):
@@ -517,7 +521,7 @@ async def chat_turn(
             round_request = ChatRequest(
                 messages=tuple(messages),
                 locale=request.locale,
-                max_output_tokens=request.max_output_tokens,
+                max_output_tokens=active_max_tokens,
                 timeout_s=min(request.timeout_s, max(remaining_budget, 1.0)),
                 tools=request.tools if allow_tools_this_round else (),
             )
@@ -529,7 +533,7 @@ async def chat_turn(
             round_calls: list[ToolCall] = []
             round_finished: ChatFinished | None = None
 
-            async for event in generator.stream(round_request):
+            async for event in active_generator.stream(round_request):
                 match event:
                     case TextDelta(text=text):
                         round_text_parts.append(text)
@@ -612,6 +616,12 @@ async def chat_turn(
                     yield item
 
             messages.extend(tool_messages)
+            if code_generator is not None and any(
+                c.name.startswith(("forge__", "workspace__", "skill__"))
+                for c in round_calls
+            ):
+                active_generator = code_generator
+                active_max_tokens = max(active_max_tokens, 3000)
 
         if not emitted_any_text and last_action_summary:
             emitted_any_text = True

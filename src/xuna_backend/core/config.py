@@ -48,6 +48,16 @@ class Settings:
     text_expert_reasoning_effort: str = ""
     text_expert_timeout_s: float = 60.0
     text_expert_max_tokens: int = 3000
+    # Dedicated Code Specialist text provider (FORGE-LATM Dual-Model).
+    # Empty provider/model = reuse `expert_text_generator` or `text_generator`.
+    text_code_provider: str = ""
+    text_code_base_url: str = ""
+    text_code_model: str = ""
+    text_code_api_key: str = ""
+    text_code_api_key_header: str = ""
+    text_code_reasoning_effort: str = ""
+    text_code_timeout_s: float = 60.0
+    text_code_max_tokens: int = 4096
     # Phone voice V1 (owner D16, 2026-10-22). Empty provider = voice off (the
     # endpoints answer 503 voice_unavailable). ASR `openai_transcription` = any
     # OpenAI-style /audio/transcriptions server (Groq Whisper in V0).
@@ -80,6 +90,10 @@ class Settings:
             raise ValueError("text_expert_timeout_s must be in (0, 120]")
         if not 512 <= self.text_expert_max_tokens <= 8192:
             raise ValueError("text_expert_max_tokens must be in 512..8192")
+        if not 0 < self.text_code_timeout_s <= 120:
+            raise ValueError("text_code_timeout_s must be in (0, 120]")
+        if not 512 <= self.text_code_max_tokens <= 8192:
+            raise ValueError("text_code_max_tokens must be in 512..8192")
         if self.dev_host_tools and self.environment == Environment.PRODUCTION:
             raise ValueError("dev_host_tools must never be enabled in production")
 
@@ -112,6 +126,14 @@ class Settings:
             text_expert_reasoning_effort=source.get("XUNA_TEXT_EXPERT_REASONING_EFFORT", ""),
             text_expert_timeout_s=float(source.get("XUNA_TEXT_EXPERT_TIMEOUT_S", "60") or "60"),
             text_expert_max_tokens=int(source.get("XUNA_TEXT_EXPERT_MAX_TOKENS", "3000") or "3000"),
+            text_code_provider=source.get("XUNA_TEXT_CODE_PROVIDER", ""),
+            text_code_base_url=source.get("XUNA_TEXT_CODE_BASE_URL", ""),
+            text_code_model=source.get("XUNA_TEXT_CODE_MODEL", ""),
+            text_code_api_key=source.get("XUNA_TEXT_CODE_API_KEY", ""),
+            text_code_api_key_header=source.get("XUNA_TEXT_CODE_API_KEY_HEADER", ""),
+            text_code_reasoning_effort=source.get("XUNA_TEXT_CODE_REASONING_EFFORT", ""),
+            text_code_timeout_s=float(source.get("XUNA_TEXT_CODE_TIMEOUT_S", "60") or "60"),
+            text_code_max_tokens=int(source.get("XUNA_TEXT_CODE_MAX_TOKENS", "4096") or "4096"),
             asr_provider=source.get("XUNA_ASR_PROVIDER", ""),
             asr_base_url=source.get("XUNA_ASR_BASE_URL", ""),
             asr_model=source.get("XUNA_ASR_MODEL", ""),
@@ -139,6 +161,7 @@ class Settings:
             f"Settings(environment={self.environment.value!r}, "
             f"text_provider={self.text_provider!r}, "
             f"text_expert_provider={self.text_expert_provider!r}, "
+            f"text_code_provider={self.text_code_provider!r}, "
             f"asr_provider={self.asr_provider!r}, "
             f"tts_provider={self.tts_provider!r})"
         )

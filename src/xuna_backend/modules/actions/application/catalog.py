@@ -58,6 +58,9 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "app.launch",
     "app.open_scheme",
     "app.list_allowed",
+    "forge.synthesize_skill",
+    "forge.run_skill",
+    "forge.list_and_manage",
     "ui.accessibility_tree",
     "ui.inspect_tree",
     "ui.set_text",
@@ -73,9 +76,6 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "selection.read",
     "clipboard.read",
     "clipboard.write",
-    "forge.synthesize_skill",
-    "forge.run_skill",
-    "forge.list_and_manage",
     "host.status",
     "workspace.watch_task",
     "beam.transfer",
@@ -225,6 +225,8 @@ def build_tool_catalog(
                         aliases.append(alias_str)
 
         def _sort_key(tool_name: str) -> tuple[int, str]:
+            if tool_name.startswith("forge.custom_"):
+                return (14, tool_name)
             try:
                 idx = _PRIORITY_ORDER.index(tool_name)
             except ValueError:

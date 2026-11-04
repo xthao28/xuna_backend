@@ -178,6 +178,7 @@ class VoiceSession:
         mode: TurnMode = TurnMode.CHAT,
         budget: ReplyBudget | None = None,
         generator: TextGenerator | None = None,
+        code_generator: TextGenerator | None = None,
         tools: tuple[ToolSpec, ...] = (),
         tool_runner: ToolCallRunner | None = None,
     ) -> AsyncIterator[SpokenTurnEvent]:
@@ -202,6 +203,7 @@ class VoiceSession:
                 sections=(mode == TurnMode.EXPERT),
                 locale_vi=(req.locale == Locale.VI),
                 tool_runner=tool_runner,
+                code_generator=code_generator,
             )
             chosen_voice = voice or self.voice
             if self.speak and self.synthesizer is not None:

@@ -87,6 +87,7 @@ from xuna_backend.modules.conversation.domain.turn_mode import (
     RequestedMode,
     TurnMode,
     decide_mode,
+    is_code_or_tool_synthesis_request,
 )
 from xuna_backend.modules.identity.application.ports import IdentityRepository
 from xuna_backend.modules.identity.domain.pet_id import PetId
@@ -498,14 +499,36 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
                     settings = getattr(app.state, "settings", None)
                     chosen_mode = prepared.decision.mode
+                    code_gen: TextGenerator | None = getattr(
+                        app.state, "code_text_generator", None
+                    ) or getattr(app.state, "expert_text_generator", None)
+                    expert_gen: TextGenerator | None = (
+                        getattr(app.state, "expert_text_generator", None) or code_gen
+                    )
+                    is_code_turn = is_code_or_tool_synthesis_request(turn_text)
                     if chosen_mode == TurnMode.EXPERT:
-                        max_tok = settings.text_expert_max_tokens if settings is not None else 3000
-                        timeout_s = settings.text_expert_timeout_s if settings is not None else 60.0
-                        budget = ReplyBudget(max_output_tokens=max_tok, timeout_s=timeout_s)
-                        expert_gen: TextGenerator | None = getattr(
-                            app.state, "expert_text_generator", None
-                        )
-                        turn_generator: TextGenerator = expert_gen or app.state.text_generator
+                        if is_code_turn and code_gen is not None:
+                            max_tok = (
+                                getattr(settings, "text_code_max_tokens", 4096)
+                                if settings is not None
+                                else 4096
+                            )
+                            timeout_s = (
+                                getattr(settings, "text_code_timeout_s", 60.0)
+                                if settings is not None
+                                else 60.0
+                            )
+                            budget = ReplyBudget(max_output_tokens=max_tok, timeout_s=timeout_s)
+                            turn_generator: TextGenerator = code_gen
+                        else:
+                            max_tok = (
+                                settings.text_expert_max_tokens if settings is not None else 3000
+                            )
+                            timeout_s = (
+                                settings.text_expert_timeout_s if settings is not None else 60.0
+                            )
+                            budget = ReplyBudget(max_output_tokens=max_tok, timeout_s=timeout_s)
+                            turn_generator = expert_gen or app.state.text_generator
                     else:
                         budget = ReplyBudget(max_output_tokens=400, timeout_s=30.0)
                         turn_generator = app.state.text_generator
@@ -550,6 +573,8 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         tools_arg: tuple[ToolSpec, ...],
                         runner_arg: ToolCallRunner | None,
                         v: str | None = None,
+                        *,
+                        _code_gen: TextGenerator | None = code_gen,
                     ) -> None:
                         signals = {
                             "signals": list(
@@ -576,6 +601,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                 mode=prep.decision.mode,
                                 budget=bud,
                                 generator=gen,
+                                code_generator=_code_gen,
                                 tools=tools_arg,
                                 tool_runner=runner_arg,
                             ):

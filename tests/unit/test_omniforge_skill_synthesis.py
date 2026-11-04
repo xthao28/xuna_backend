@@ -772,3 +772,351 @@ def test_ui_accessibility_tree_zero_screenshot_and_security_guards() -> None:
     assert "0 chụp màn hình" in api_resp.summaryVi
 
 
+def test_latm_dynamic_tool_catalog_and_array_schema_validation() -> None:
+    from xuna_backend.modules.actions.application.prompts import SYSTEM_PROMPT_VI
+    from xuna_backend.modules.actions.domain.schema_validator import SchemaValidator
+
+    synth_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "goal": {"type": "string", "minLength": 1, "maxLength": 400},
+            "fileExtensions": {
+                "type": "array",
+                "items": {"type": "string", "maxLength": 12},
+                "maxItems": 10,
+            },
+            "toolName": {"type": "string", "maxLength": 48},
+            "runtime": {
+                "type": "string",
+                "enum": ["auto", "pipeline", "python", "node", "powershell", "bash"],
+            },
+            "scriptCode": {"type": "string", "maxLength": 4000},
+            "testArgsJson": {"type": "string", "maxLength": 1000},
+            "skillIdToUpdate": {"type": "string", "maxLength": 64},
+        },
+        "required": ["goal"],
+        "additionalProperties": False,
+    }
+    clean, target = SchemaValidator.validate_arguments(
+        synth_schema,
+        {
+            "goal": "Tổng hợp VAT hóa đơn từ CSV",
+            "fileExtensions": ["csv", "xml"],
+            "toolName": "calc_vat_summary",
+            "runtime": "python",
+            "scriptCode": "import json, os; print(json.dumps({'ok': True}))",
+            "testArgsJson": '{"rate": 0.1}',
+        },
+    )
+    assert clean["toolName"] == "calc_vat_summary"
+    assert clean["fileExtensions"] == ["csv", "xml"]
+    assert target is None
+
+    host_id = HostId.generate()
+    host = Host(
+        host_id=host_id,
+        owner_id=uuid.uuid4(),
+        alias=HostAlias("MacStudio"),
+        platform=HostPlatform.MACOS,
+        hostname="MacStudio.local",
+        os_version="macOS 15.1",
+        agent_version="0.1.0",
+        public_key=FAKE_PUBKEY,
+        status=HostStatus.ACTIVE,
+        created_at=NOW,
+        last_seen_at=NOW,
+    )
+    custom_tool = ToolDescriptor(
+        name="forge.custom_calc_vat_summary",
+        description="Tính tổng doanh thu hóa đơn theo thuế suất VAT",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "argsJson": {"type": "string", "maxLength": 2000},
+                "outputFolder": {"type": "string", "maxLength": 120},
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        output_schema={
+            "type": "object",
+            "properties": {
+                "skillId": {"type": "string"},
+                "summaryVi": {"type": "string"},
+            },
+            "required": ["skillId", "summaryVi"],
+            "additionalProperties": False,
+        },
+        family=ToolFamily.APP,
+        risk=RiskTier.R2,
+        observes=False,
+        reversible=True,
+    )
+    manifest = Manifest(
+        host_id=host_id,
+        tools=(*_build_omniforge_manifest(host_id).tools, custom_tool),
+        updated_at=NOW,
+    )
+    grants = [
+        Grant(
+            host_id=host_id,
+            family=ToolFamily.APP,
+            max_risk=RiskTier.R2,
+            enabled=True,
+            updated_at=NOW,
+        )
+    ]
+    catalog = build_tool_catalog(
+        hosts=[host],
+        manifests_by_host={host_id: manifest},
+        grants_by_host={host_id: grants},
+        online_host_ids={str(host_id)},
+        client_caps=frozenset({CAP_HOST_ACTIONS_V1}),
+        host_screen_consent=True,
+        now=NOW,
+    )
+    names = [t.name for t in catalog]
+    assert "forge__synthesize_skill" in names
+    assert "forge__run_skill" in names
+    assert "forge__custom_calc_vat_summary" in names
+    assert "XUNA_TOOL_ARGS_JSON" in SYSTEM_PROMPT_VI
+    assert "skillIdToUpdate" in SYSTEM_PROMPT_VI
+
+
+def test_dual_model_code_specialist_delegation_and_self_debug() -> None:
+    """Verifies that Model 1 (Chat) can call `forge__synthesize_skill` without `scriptCode`
+    and `Orchestrator` delegates code writing + `stderrPreview` self-debugging to Model 2
+    (`code_generator`), and that `turn_mode` routes short code/tool requests to `EXPERT`."""
+    asyncio.run(_run_dual_model_code_specialist_test())
+
+
+async def _run_dual_model_code_specialist_test() -> None:
+    from collections.abc import AsyncIterator
+
+    from xuna_backend.core.config import Settings
+    from xuna_backend.main import code_text_generator
+    from xuna_backend.modules.actions.application.orchestrator import (
+        ActionContext,
+        Orchestrator,
+    )
+    from xuna_backend.modules.actions.infrastructure.brokers import InMemoryLastTargetStore
+    from xuna_backend.modules.cognition.domain.types import (
+        ChatEvent,
+        ChatFinished,
+        ChatRequest,
+        TextDelta,
+    )
+    from xuna_backend.modules.conversation.domain.turn_mode import (
+        Channel,
+        ModeDecision,
+        ModeReason,
+        RequestedMode,
+        TurnMode,
+        decide_mode,
+        is_code_or_tool_synthesis_request,
+    )
+
+    assert is_code_or_tool_synthesis_request("Tạo cho mình 1 tool Python lọc hóa đơn") is True
+    assert is_code_or_tool_synthesis_request("Rèn công cụ tính tổng doanh thu") is True
+    assert is_code_or_tool_synthesis_request("Hôm nay trời đẹp quá") is False
+    assert decide_mode(
+        RequestedMode.AUTO,
+        Channel.TEXT,
+        "Viết script Python tính thuế VAT",
+        domain_matched=False,
+    ) == ModeDecision(TurnMode.EXPERT, ModeReason.CODE_OR_LONG)
+
+    settings = Settings.from_env(
+        {
+            "XUNA_DATABASE_URL": "postgresql+asyncpg://u:p@localhost:5432/xuna",
+            "XUNA_TEXT_PROVIDER": "echo",
+            "XUNA_TEXT_CODE_PROVIDER": "echo",
+            "XUNA_TEXT_CODE_MODEL": "qwen-2.5-coder-32b",
+            "XUNA_TEXT_CODE_MAX_TOKENS": "4096",
+        }
+    )
+    assert settings.text_code_model == "qwen-2.5-coder-32b"
+    assert settings.text_code_max_tokens == 4096
+    assert code_text_generator(settings) is not None
+
+    class _FakeCoderModel:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+            user_msg = request.messages[-1].content
+            self.prompts.append(user_msg)
+            if "Repair this broken" not in user_msg:
+                reply = json.dumps(
+                    {
+                        "runtime": "python",
+                        "toolName": "calc_vat_auto",
+                        "scriptCode": "import json\nprint(json.dumps({'ok': True})",
+                        "testArgsJson": '{"items": [100, 200]}',
+                    }
+                )
+            else:
+                reply = json.dumps(
+                    {
+                        "runtime": "python",
+                        "toolName": "calc_vat_auto",
+                        "scriptCode": (
+                            "import json, os\n"
+                            "args = json.loads(os.environ.get('XUNA_TOOL_ARGS_JSON', '{}'))\n"
+                            "print(json.dumps({'processedCount': len(args.get('items', []))}))"
+                        ),
+                        "testArgsJson": '{"items": [100, 200]}',
+                    }
+                )
+            yield TextDelta(text=reply)
+            yield ChatFinished("fake", "coder", 40, 50, 12)
+
+    class _DryRunSandboxHub(_FakeHub):
+        async def send_request(
+            self,
+            host_id: str,
+            method: str,
+            params: dict[str, Any],
+            timeout_s: float = 10.0,
+        ) -> dict[str, Any]:
+            self.calls.append((host_id, method, params))
+            args = params.get("arguments", {})
+            code = str(args.get("scriptCode", ""))
+            if "os.environ" not in code:
+                return {
+                    "content": [{"type": "text", "text": "SyntaxError"}],
+                    "structuredContent": {
+                        "skillId": "skill-latm-vat-1",
+                        "toolName": "calc_vat_auto",
+                        "runtime": "python",
+                        "titleVi": "Tính thuế VAT",
+                        "category": "custom_automation",
+                        "detectedItemsCount": 0,
+                        "dryRunOk": False,
+                        "dryRunSample": "Dry-Run lỗi",
+                        "stderrPreview": "SyntaxError: '(' was never closed",
+                    },
+                    "isError": False,
+                    "_meta": {"xuna/status": "ok", "xuna/durationMs": 8},
+                }
+            return {
+                "content": [{"type": "text", "text": "ok"}],
+                "structuredContent": {
+                    "skillId": args.get("skillIdToUpdate") or "skill-latm-vat-1",
+                    "toolName": "calc_vat_auto",
+                    "runtime": "python",
+                    "titleVi": "Tính thuế VAT",
+                    "category": "custom_automation",
+                    "detectedItemsCount": 2,
+                    "dryRunOk": True,
+                    "dryRunSample": '{"processedCount": 2}',
+                    "stdoutPreview": '{"processedCount": 2}',
+                    "stderrPreview": "",
+                },
+                "isError": False,
+                "_meta": {"xuna/status": "ok", "xuna/durationMs": 10},
+            }
+
+    owner_id = uuid.uuid4()
+    host_id = HostId.generate()
+    host = Host(
+        host_id=host_id,
+        owner_id=owner_id,
+        alias=HostAlias("WorkPC"),
+        platform=HostPlatform.WINDOWS,
+        hostname="WorkPC",
+        os_version="Windows 11",
+        agent_version="0.1.0",
+        public_key=FAKE_PUBKEY,
+        status=HostStatus.ACTIVE,
+        created_at=NOW,
+        last_seen_at=NOW,
+    )
+    synth_tool = ToolDescriptor(
+        name="forge.synthesize_skill",
+        description="Synthesize tool",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "minLength": 2, "maxLength": 360},
+                "toolName": {"type": "string", "maxLength": 48},
+                "runtime": {
+                    "type": "string",
+                    "enum": ["pipeline", "python", "node", "powershell", "bash"],
+                },
+                "scriptCode": {"type": "string", "maxLength": 8000},
+                "testArgsJson": {"type": "string", "maxLength": 2000},
+                "skillIdToUpdate": {"type": "string", "maxLength": 64},
+            },
+            "required": ["goal"],
+            "additionalProperties": False,
+        },
+        output_schema={"type": "object", "additionalProperties": False},
+        family=ToolFamily.APP,
+        risk=RiskTier.R1,
+        observes=True,
+        reversible=True,
+    )
+    repo = _FakeHostRepo()
+    await repo.save_host(host)
+    await repo.save_manifest(Manifest(host_id=host_id, tools=(synth_tool,), updated_at=NOW))
+    await repo.set_grants(
+        host_id,
+        [
+            Grant(
+                host_id=host_id,
+                family=ToolFamily.APP,
+                max_risk=RiskTier.R2,
+                enabled=True,
+                updated_at=NOW,
+            )
+        ],
+    )
+    hub = _DryRunSandboxHub()
+    hub.online_ids.add(str(host_id))
+    coder = _FakeCoderModel()
+
+    orch = Orchestrator(
+        host_repo=repo,
+        hub=hub,
+        approval_repo=InMemoryApprovalRepository(),
+        approval_broker=InMemoryApprovalBroker(),
+        local_result_broker=InMemoryLocalResultBroker(),
+        last_target_store=InMemoryLastTargetStore(),
+        audit=MemoryAuditLog(),
+        clock=lambda: NOW,
+        code_generator=coder,
+    )
+
+    events: list[ActionStreamEvent] = []
+
+    async def _emit(ev: ActionStreamEvent) -> None:
+        events.append(ev)
+
+    # Model 1 calls forge__synthesize_skill with ONLY goal & runtime (no scriptCode!)
+    msg = await orch.handle_call(
+        ToolCall(
+            id="call-dual-1",
+            name="forge__synthesize_skill",
+            arguments={"goal": "Tính thuế VAT cho danh sách hóa đơn", "runtime": "python"},
+        ),
+        ActionContext(
+            owner_id=owner_id,
+            pet_id="pet-1",
+            locale=Locale.VI,
+            client_caps=frozenset({CAP_HOST_ACTIONS_V1}),
+            board_available=False,
+            emit_event=_emit,
+        ),
+    )
+    payload = json.loads(msg.content)
+    assert payload["status"] == "ok"
+    out = payload["output"]
+    assert out["dryRunOk"] is True
+    assert out["codeSpecialistDelegated"] is True
+    assert len(coder.prompts) == 2  # 1 initial synthesis + 1 self-debug repair!
+    assert len(hub.calls) == 2
+
+
+
+

@@ -254,6 +254,9 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
     verifier: SignatureVerifier | None = getattr(
         app_state, "signature_verifier", None
     )
+    code_gen = getattr(app_state, "code_text_generator", None) or getattr(
+        app_state, "expert_text_generator", None
+    )
     return Orchestrator(
         host_repo=_SessionPerCallHostRepository(app_state),
         hub=hub,
@@ -264,6 +267,7 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
         audit=_SessionPerCallAuditLog(app_state),
         scope_store=scope_store,
         verifier=verifier,
+        code_generator=code_gen,
     )
 
 

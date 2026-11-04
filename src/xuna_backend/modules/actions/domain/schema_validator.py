@@ -13,9 +13,12 @@ Any other keyword or type in a descriptor schema is rejected with `SchemaDefinit
 import re
 
 _ALLOWED_TOP_KEYS = frozenset({"type", "properties", "required", "additionalProperties"})
-_ALLOWED_STRING_KEYS = frozenset({"type", "minLength", "maxLength", "pattern", "enum", "description"})
+_ALLOWED_STRING_KEYS = frozenset(
+    {"type", "minLength", "maxLength", "pattern", "enum", "description"}
+)
 _ALLOWED_INT_KEYS = frozenset({"type", "minimum", "maximum", "enum", "description"})
 _ALLOWED_BOOL_KEYS = frozenset({"type", "description"})
+_ALLOWED_ARRAY_KEYS = frozenset({"type", "items", "minItems", "maxItems", "description"})
 
 
 class SchemaDefinitionError(ValueError):
@@ -72,7 +75,9 @@ class SchemaValidator:
                 if len_key in prop:
                     val = prop[len_key]
                     if type(val) is not int or val < 0:
-                        raise SchemaDefinitionError(f"{len_key} on {name!r} must be a non-negative int")
+                        raise SchemaDefinitionError(
+                            f"{len_key} on {name!r} must be a non-negative int"
+                        )
             if "pattern" in prop:
                 pat = prop["pattern"]
                 if not isinstance(pat, str):
@@ -112,6 +117,23 @@ class SchemaValidator:
                 raise SchemaDefinitionError(
                     f"unsupported boolean keywords on {name!r}: {sorted(unknown)}"
                 )
+        elif prop_type == "array":
+            unknown = set(prop.keys()) - _ALLOWED_ARRAY_KEYS
+            if unknown:
+                raise SchemaDefinitionError(
+                    f"unsupported array keywords on {name!r}: {sorted(unknown)}"
+                )
+            for bound_key in ("minItems", "maxItems"):
+                if bound_key in prop:
+                    val = prop[bound_key]
+                    if type(val) is not int or val < 0:
+                        raise SchemaDefinitionError(
+                            f"{bound_key} on {name!r} must be a non-negative int"
+                        )
+            items_schema = prop.get("items")
+            if not isinstance(items_schema, dict):
+                raise SchemaDefinitionError(f"items on {name!r} must be a dict")
+            SchemaValidator._validate_property_definition(f"{name}[]", items_schema)
         else:
             raise SchemaDefinitionError(f"unsupported property type {prop_type!r} on {name!r}")
 
@@ -199,3 +221,16 @@ class SchemaValidator:
         elif prop_type == "boolean":
             if type(value) is not bool:
                 raise ArgumentValidationError(f"argument {name!r} must be a boolean")
+        elif prop_type == "array":
+            if not isinstance(value, list):
+                raise ArgumentValidationError(f"argument {name!r} must be an array")
+            min_items = prop.get("minItems")
+            if type(min_items) is int and len(value) < min_items:
+                raise ArgumentValidationError(f"argument {name!r} has fewer than {min_items} items")
+            max_items = prop.get("maxItems")
+            if type(max_items) is int and len(value) > max_items:
+                raise ArgumentValidationError(f"argument {name!r} exceeds maxItems {max_items}")
+            items_schema = prop.get("items")
+            if isinstance(items_schema, dict):
+                for idx, elem in enumerate(value):
+                    SchemaValidator._validate_value(f"{name}[{idx}]", elem, items_schema)

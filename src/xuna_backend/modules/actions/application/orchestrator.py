@@ -26,6 +26,9 @@ from xuna_backend.modules.actions.application.catalog import (
     CAP_HOST_ACTIONS_V1,
     is_tool_granted,
 )
+from xuna_backend.modules.actions.application.code_synthesizer import (
+    CodeSpecialistSynthesizer,
+)
 from xuna_backend.modules.actions.application.ports import (
     ApprovalBroker,
     ApprovalRepository,
@@ -85,6 +88,7 @@ from xuna_backend.modules.actions.domain.tool_names import (
 )
 from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.audit.domain.event import AuditAction, AuditEvent
+from xuna_backend.modules.cognition.application.ports import TextGenerator
 from xuna_backend.modules.cognition.domain.types import Locale, Message, Role, ToolCall
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
 from xuna_backend.modules.hosts.domain.crypto import args_sha256
@@ -154,6 +158,7 @@ class Orchestrator:
         workflow_slot_store: InMemoryBoardWorkflowSlotStore | None = None,
         host_default_store: InMemoryHostDefaultStore | None = None,
         clock: Callable[[], datetime] | None = None,
+        code_generator: TextGenerator | None = None,
     ) -> None:
         self._host_repo = host_repo
         self._hub = hub
@@ -165,6 +170,9 @@ class Orchestrator:
         self._scope_store = scope_store
         self._verifier = verifier
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._code_synthesizer = (
+            CodeSpecialistSynthesizer(code_generator) if code_generator is not None else None
+        )
         self._workflow_slot_store = workflow_slot_store or InMemoryBoardWorkflowSlotStore()
         self._host_default_store = host_default_store or InMemoryHostDefaultStore()
         self._approval_and_board = ApprovalAndBoardService(
@@ -736,6 +744,37 @@ class Orchestrator:
             if local_report.error_code and "errorCode" not in structured_content:
                 structured_content["errorCode"] = local_report.error_code
         else:
+            schema_props = (
+                descriptor.input_schema.get("properties")
+                if isinstance(descriptor.input_schema, dict)
+                else None
+            )
+            supports_latm_script = isinstance(schema_props, dict) and "scriptCode" in schema_props
+            code_specialist_used = False
+
+            if (
+                descriptor.name == "forge.synthesize_skill"
+                and supports_latm_script
+                and self._code_synthesizer is not None
+                and not str(clean_args.get("scriptCode", "")).strip()
+            ):
+                draft = await self._code_synthesizer.synthesize_or_refine(
+                    goal=str(clean_args.get("goal", "")),
+                    runtime=str(clean_args.get("runtime", "python")),
+                    tool_name=str(clean_args.get("toolName", "custom_tool")),
+                    test_args_json=str(clean_args.get("testArgsJson", "{}")),
+                    locale=ctx.locale,
+                )
+                if draft is not None:
+                    clean_args = dict(clean_args)
+                    clean_args["scriptCode"] = draft.script_code
+                    clean_args["runtime"] = draft.runtime
+                    if not str(clean_args.get("toolName", "")).strip():
+                        clean_args["toolName"] = draft.tool_name
+                    if not str(clean_args.get("testArgsJson", "")).strip():
+                        clean_args["testArgsJson"] = draft.test_args_json
+                    code_specialist_used = True
+
             meta: dict[str, object] = {
                 "xuna/invocationId": invocation_id,
                 "xuna/deadlineMs": DEADLINE_MS,
@@ -779,6 +818,59 @@ class Orchestrator:
                 sc_raw = raw_result.get("structuredContent")
                 if isinstance(sc_raw, dict):
                     structured_content = dict(sc_raw)
+
+                # Automatic Code-Specialist Self-Debug Loop when dryRunOk is False
+                if (
+                    descriptor.name == "forge.synthesize_skill"
+                    and supports_latm_script
+                    and self._code_synthesizer is not None
+                    and status == "ok"
+                    and structured_content.get("dryRunOk") is False
+                    and str(structured_content.get("stderrPreview", "")).strip()
+                ):
+                    for _ in range(2):
+                        if structured_content.get("dryRunOk") is not False:
+                            break
+                        repaired = await self._code_synthesizer.synthesize_or_refine(
+                            goal=str(clean_args.get("goal", "")),
+                            runtime=str(clean_args.get("runtime", "python")),
+                            tool_name=str(
+                                structured_content.get("toolName")
+                                or clean_args.get("toolName", "custom_tool")
+                            ),
+                            test_args_json=str(clean_args.get("testArgsJson", "{}")),
+                            broken_script=str(clean_args.get("scriptCode", "")),
+                            stderr_preview=str(structured_content.get("stderrPreview", "")),
+                            locale=ctx.locale,
+                        )
+                        if repaired is None:
+                            break
+                        clean_args = dict(clean_args)
+                        clean_args["scriptCode"] = repaired.script_code
+                        clean_args["runtime"] = repaired.runtime
+                        skill_id_val = str(structured_content.get("skillId", "")).strip()
+                        if skill_id_val:
+                            clean_args["skillIdToUpdate"] = skill_id_val
+                        retry_params: dict[str, object] = {
+                            "name": descriptor.name,
+                            "arguments": clean_args,
+                            "_meta": {
+                                "xuna/invocationId": str(uuid.uuid4()),
+                                "xuna/deadlineMs": DEADLINE_MS,
+                            },
+                        }
+                        retry_res = await self._hub.send_request(
+                            str(host.host_id),
+                            "tools/call",
+                            retry_params,
+                            timeout_s=DEADLINE_SECONDS,
+                        )
+                        retry_sc = retry_res.get("structuredContent")
+                        if isinstance(retry_sc, dict):
+                            structured_content = dict(retry_sc)
+                            code_specialist_used = True
+                if code_specialist_used and structured_content:
+                    structured_content["codeSpecialistDelegated"] = True
             except TimeoutError:
                 status = "timeout"
                 duration_ms = DEADLINE_MS

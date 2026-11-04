@@ -115,6 +115,42 @@ def expert_text_generator(settings: Settings) -> TextGenerator | None:
     )
 
 
+def code_text_generator(settings: Settings) -> TextGenerator | None:
+    """Dedicated Code Specialist generator (`XUNA_TEXT_CODE_*`), falling back to expert."""
+    provider = settings.text_code_provider or (
+        (settings.text_expert_provider or settings.text_provider)
+        if settings.text_code_model
+        else ""
+    )
+    if not provider:
+        return expert_text_generator(settings)
+    registry = ProviderRegistry()
+    echo.register(registry)
+    openai_compatible.register(registry)
+    options = {
+        "base_url": (
+            settings.text_code_base_url
+            or settings.text_expert_base_url
+            or settings.text_base_url
+        ),
+        "model": settings.text_code_model or settings.text_expert_model or settings.text_model,
+        "api_key": (
+            settings.text_code_api_key
+            or settings.text_expert_api_key
+            or settings.text_api_key
+        ),
+        "api_key_header": (
+            settings.text_code_api_key_header
+            or settings.text_expert_api_key_header
+            or settings.text_api_key_header
+        ),
+        "reasoning_effort": (
+            settings.text_code_reasoning_effort or settings.text_expert_reasoning_effort
+        ),
+    }
+    return cast(TextGenerator, registry.create(Capability.TEXT, provider, options))
+
+
 def speech_recognizer(settings: Settings) -> SpeechRecognizer | None:
     """None when voice is off; fails at startup on an unknown/misconfigured provider."""
     if not settings.asr_provider:
@@ -176,6 +212,7 @@ def create_app(
     verifier: TokenVerifier | None = None,
     generator: TextGenerator | None = None,
     expert_generator: TextGenerator | None = None,
+    code_generator: TextGenerator | None = None,
     recognizer: SpeechRecognizer | None = None,
     synthesizer: SpeechSynthesizer | None = None,
     embedder_instance: Embedder | None = None,
@@ -221,7 +258,10 @@ def create_app(
     )
     app.state.device_session_hub = InMemoryDeviceSessionHub()
     app.state.text_generator = generator or text_generator(resolved)
-    app.state.expert_text_generator = expert_generator or expert_text_generator(resolved)
+    resolved_expert = expert_generator or expert_text_generator(resolved)
+    resolved_code = code_generator or code_text_generator(resolved) or resolved_expert
+    app.state.expert_text_generator = resolved_expert or resolved_code
+    app.state.code_text_generator = resolved_code
     app.state.speech_recognizer = recognizer or speech_recognizer(resolved)
     app.state.speech_synthesizer = synthesizer or speech_synthesizer(resolved)
     app.state.embedder = embedder_instance or embedder(resolved)

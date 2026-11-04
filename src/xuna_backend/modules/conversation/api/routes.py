@@ -93,6 +93,7 @@ from xuna_backend.modules.conversation.domain.turn_mode import (
     RequestedMode,
     TurnMode,
     decide_mode,
+    is_code_or_tool_synthesis_request,
 )
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
 from xuna_backend.modules.identity.application.use_cases import IdentityError, get_owned_pet
@@ -416,13 +417,31 @@ async def turn(
 
     settings = state(request, "settings")
     chosen_mode = prepared.decision.mode
+    code_gen: TextGenerator | None = getattr(
+        request.app.state, "code_text_generator", None
+    ) or getattr(request.app.state, "expert_text_generator", None)
+    expert_gen: TextGenerator | None = (
+        getattr(request.app.state, "expert_text_generator", None) or code_gen
+    )
+    is_code_turn = is_code_or_tool_synthesis_request(body.text)
+
     if chosen_mode == TurnMode.EXPERT:
-        budget = ReplyBudget(
-            max_output_tokens=settings.text_expert_max_tokens,
-            timeout_s=settings.text_expert_timeout_s,
-        )
-        expert_gen: TextGenerator | None = getattr(request.app.state, "expert_text_generator", None)
-        generator: TextGenerator = expert_gen or state(request, "text_generator")
+        if is_code_turn and code_gen is not None:
+            budget = ReplyBudget(
+                max_output_tokens=getattr(
+                    settings, "text_code_max_tokens", settings.text_expert_max_tokens
+                ),
+                timeout_s=getattr(
+                    settings, "text_code_timeout_s", settings.text_expert_timeout_s
+                ),
+            )
+            generator: TextGenerator = code_gen
+        else:
+            budget = ReplyBudget(
+                max_output_tokens=settings.text_expert_max_tokens,
+                timeout_s=settings.text_expert_timeout_s,
+            )
+            generator = expert_gen or state(request, "text_generator")
     else:
         budget = ReplyBudget(max_output_tokens=400, timeout_s=settings.text_timeout_s)
         generator = state(request, "text_generator")
@@ -486,6 +505,7 @@ async def turn(
             sections=(chosen_mode == TurnMode.EXPERT),
             locale_vi=(chat_request.locale == Locale.VI),
             tool_runner=tool_runner,
+            code_generator=code_gen,
         )
         stream: AsyncIterator[SpokenTurnEvent] = (
             spoken_turn(text_events, synthesizer, body.locale, voice=body.voice)

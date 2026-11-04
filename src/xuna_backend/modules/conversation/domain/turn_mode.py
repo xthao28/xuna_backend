@@ -54,9 +54,29 @@ _TASK_RE = re.compile(
 )
 
 
+_CODE_SYNTHESIS_RE = re.compile(
+    r"\b("
+    r"viết\s+code|viết\s+script|tạo\s+script|tạo\s+tool|rèn\s+tool|rèn\s+công\s+cụ|"
+    r"tạo\s+công\s+cụ|viết\s+công\s+cụ|viết\s+hàm|viết\s+chương\s+trình|"
+    r"sửa\s+code|debug\s+code|code\s+python|script\s+python|script\s+powershell|"
+    r"script\s+node|script\s+bash|tool\s+python|synthesize_skill|forge\s+tool|"
+    r"write\s+a?\s*script|build\s+a?\s*tool|create\s+a?\s*tool|write\s+python\s+code"
+    r")\b",
+    re.UNICODE,
+)
+
+
 def looks_like_code(text: str) -> bool:
     """True when text contains a fenced code block or at least 3 newlines."""
     return "```" in text or text.count("\n") >= 3
+
+
+def is_code_or_tool_synthesis_request(text: str) -> bool:
+    """True when text explicitly asks to write/debug code or synthesize a custom tool/script."""
+    if looks_like_code(text):
+        return True
+    norm = unicodedata.normalize("NFC", text).lower()
+    return _CODE_SYNTHESIS_RE.search(norm) is not None
 
 
 def is_task_request(text: str) -> bool:
@@ -82,6 +102,8 @@ def decide_mode(
         return ModeDecision(TurnMode.EXPERT, ModeReason.REQUESTED_EXPERT)
 
     # AUTO
+    if is_code_or_tool_synthesis_request(text):
+        return ModeDecision(TurnMode.EXPERT, ModeReason.CODE_OR_LONG)
     if channel == Channel.TEXT and (looks_like_code(text) or len(text.strip()) >= LONG_TEXT_CHARS):
         return ModeDecision(TurnMode.EXPERT, ModeReason.CODE_OR_LONG)
     if domain_matched and is_task_request(text):
