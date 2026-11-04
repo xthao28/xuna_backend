@@ -13,7 +13,7 @@ Any other keyword or type in a descriptor schema is rejected with `SchemaDefinit
 import re
 
 _ALLOWED_TOP_KEYS = frozenset({"type", "properties", "required", "additionalProperties"})
-_ALLOWED_STRING_KEYS = frozenset({"type", "maxLength", "pattern", "enum", "description"})
+_ALLOWED_STRING_KEYS = frozenset({"type", "minLength", "maxLength", "pattern", "enum", "description"})
 _ALLOWED_INT_KEYS = frozenset({"type", "minimum", "maximum", "enum", "description"})
 _ALLOWED_BOOL_KEYS = frozenset({"type", "description"})
 
@@ -68,10 +68,11 @@ class SchemaValidator:
                 raise SchemaDefinitionError(
                     f"unsupported string keywords on {name!r}: {sorted(unknown)}"
                 )
-            if "maxLength" in prop:
-                val = prop["maxLength"]
-                if type(val) is not int or val < 0:
-                    raise SchemaDefinitionError(f"maxLength on {name!r} must be a non-negative int")
+            for len_key in ("minLength", "maxLength"):
+                if len_key in prop:
+                    val = prop[len_key]
+                    if type(val) is not int or val < 0:
+                        raise SchemaDefinitionError(f"{len_key} on {name!r} must be a non-negative int")
             if "pattern" in prop:
                 pat = prop["pattern"]
                 if not isinstance(pat, str):
@@ -88,15 +89,15 @@ class SchemaValidator:
                     or not all(isinstance(v, str) for v in enum_vals)
                 ):
                     raise SchemaDefinitionError(f"enum on {name!r} must be a non-empty str list")
-        elif prop_type == "integer":
+        elif prop_type in ("integer", "number"):
             unknown = set(prop.keys()) - _ALLOWED_INT_KEYS
             if unknown:
                 raise SchemaDefinitionError(
-                    f"unsupported integer keywords on {name!r}: {sorted(unknown)}"
+                    f"unsupported {prop_type} keywords on {name!r}: {sorted(unknown)}"
                 )
             for bound_key in ("minimum", "maximum"):
-                if bound_key in prop and type(prop[bound_key]) is not int:
-                    raise SchemaDefinitionError(f"{bound_key} on {name!r} must be an int")
+                if bound_key in prop and type(prop[bound_key]) not in (int, float):
+                    raise SchemaDefinitionError(f"{bound_key} on {name!r} must be a number")
             if "enum" in prop:
                 enum_vals = prop["enum"]
                 if (
@@ -161,6 +162,9 @@ class SchemaValidator:
         if prop_type == "string":
             if not isinstance(value, str):
                 raise ArgumentValidationError(f"argument {name!r} must be a string")
+            min_len = prop.get("minLength")
+            if type(min_len) is int and len(value) < min_len:
+                raise ArgumentValidationError(f"argument {name!r} shorter than minLength {min_len}")
             max_len = prop.get("maxLength")
             if type(max_len) is int and len(value) > max_len:
                 raise ArgumentValidationError(f"argument {name!r} exceeds maxLength {max_len}")
@@ -183,6 +187,15 @@ class SchemaValidator:
             enum_vals = prop.get("enum")
             if isinstance(enum_vals, list) and value not in enum_vals:
                 raise ArgumentValidationError(f"argument {name!r} not in allowed enum")
+        elif prop_type == "number":
+            if type(value) not in (int, float):
+                raise ArgumentValidationError(f"argument {name!r} must be a number")
+            minimum = prop.get("minimum")
+            if isinstance(minimum, int | float) and value < minimum:
+                raise ArgumentValidationError(f"argument {name!r} < minimum {minimum}")
+            maximum = prop.get("maximum")
+            if isinstance(maximum, int | float) and value > maximum:
+                raise ArgumentValidationError(f"argument {name!r} > maximum {maximum}")
         elif prop_type == "boolean":
             if type(value) is not bool:
                 raise ArgumentValidationError(f"argument {name!r} must be a boolean")

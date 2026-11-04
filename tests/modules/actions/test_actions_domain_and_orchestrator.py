@@ -415,7 +415,12 @@ def test_board_media_key_hid_text_impossibility(bad_args: dict[str, object]) -> 
         },
         {
             "type": "object",
-            "properties": {"name": {"type": "string", "minLength": 1}},
+            "properties": {"name": {"type": "string", "format": "uri"}},
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {"name": {"type": "string", "minLength": -1}},
             "additionalProperties": False,
         },
     ],

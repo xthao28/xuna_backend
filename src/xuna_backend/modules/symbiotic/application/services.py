@@ -1151,16 +1151,17 @@ class ClawPulseService:
         self,
         *,
         action: str = "inspect_window",
-        window_title: str = "Excel - Bảng Kê Hóa Đơn",
+        window_title: str = "Active Desktop Window",
         ref_id: str = "ui_3",
         value_text: str = "",
         max_nodes: int = 30,
     ) -> UiAccessibilityTreeReceipt:
         clean_action = action.strip()
-        if clean_action not in ("inspect_window", "invoke_ref", "set_value_ref"):
+        allowed_ui_actions = ("inspect_window", "invoke_ref", "set_value_ref", "double_click", "triple_click", "right_click", "middle_click", "drag", "scroll_up", "scroll_down", "scroll_left", "scroll_right", "invoke_menu", "browser_click", "browser_type", "shortcut", "bring_to_front", "close_window"); 
+        if clean_action not in allowed_ui_actions:
             raise ValueError("invalid_ui_action")
 
-        clean_title = window_title.strip() or "Excel - Bảng Kê Hóa Đơn"
+        clean_title = window_title.strip() or "Active Desktop Window"
         low_title = clean_title.lower()
         forbidden_patterns = (
             "1password",
@@ -1184,7 +1185,7 @@ class ClawPulseService:
             {
                 "refId": "ui_1",
                 "role": "edit",
-                "label": "Tìm kiếm chứng từ / Mã số thuế",
+                "label": f"Ô nhập liệu / Tìm kiếm ({clean_title})",
                 "pattern": "ValuePattern / AXValue",
                 "value": value_text.strip() if clean_action == "set_value_ref" else "",
                 "isPassword": False,
@@ -1202,7 +1203,7 @@ class ClawPulseService:
             {
                 "refId": "ui_3",
                 "role": "button",
-                "label": "Tổng hợp & Xuất Bảng kê Excel",
+                "label": f"Nút thực thi chính ({clean_title})",
                 "pattern": "InvokePattern / AXPress",
                 "value": "",
                 "isPassword": False,
@@ -1211,7 +1212,7 @@ class ClawPulseService:
             {
                 "refId": "ui_4",
                 "role": "checkbox",
-                "label": "Tự động đối chiếu sao kê ngân hàng",
+                "label": f"Tùy chọn xác nhận ({clean_title})",
                 "pattern": "TogglePattern / AXValue",
                 "value": "checked",
                 "isPassword": False,
@@ -1251,7 +1252,7 @@ class ClawPulseService:
             token_savings_percent=92,
             screenshot_bytes_used=0,
             compact_ui_tree=compact_tree,
-            invoked_ref_id=clean_ref if clean_action in ("invoke_ref", "set_value_ref") else "none",
+            invoked_ref_id=clean_ref if clean_action != "inspect_window" else "none",
             redacted_controls_count=1,
             nodes=bounded_nodes,
             summary_vi=summary_vi[:240],
