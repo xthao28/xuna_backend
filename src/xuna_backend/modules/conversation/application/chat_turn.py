@@ -7,6 +7,7 @@ through owner confirmation + device commit).
 """
 
 import asyncio
+import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
@@ -445,7 +446,7 @@ def build_request(
         system = " ".join(parts)
 
     if tools:
-        system = f"{system}{tool_system_prompt(effective_locale)}"
+        system = f"{system}{tool_system_prompt(effective_locale, tools=tools)}"
 
     earlier = () if context is None else context.history
     max_tokens = budget.max_output_tokens if budget is not None else 400
@@ -477,6 +478,91 @@ TurnEvent = (
 
 ToolCallRunner = Callable[[ToolCall, EventSink], Awaitable[Message]]
 
+# A third identical call that already failed twice with the same result is blocked before
+# execution (OpenClaw-style loop guard); the model must change approach or answer.
+_REPEAT_FAILURE_LIMIT = 2
+_CODE_TOOL_PREFIXES = ("forge__", "workspace__", "skill__")
+
+
+def _effective_function_name(call: ToolCall) -> str:
+    """Function name actually executed, looking through `tool_invoke(name=...)`."""
+    if call.name == "tool_invoke":
+        inner = call.arguments.get("name")
+        if isinstance(inner, str) and inner.strip():
+            return inner.strip().replace(".", "__")
+    return call.name
+
+
+def _call_signature(call: ToolCall) -> str:
+    try:
+        args = json.dumps(call.arguments, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        args = repr(call.arguments)
+    return f"{call.name}|{args}"
+
+
+def _payload_fields(content: str) -> tuple[str, bool]:
+    """Returns `(status, repeat_safe)` from an encoded tool payload. `repeatSafe: false` is
+    set by the orchestrator from the host's `xuna/policy.idempotent` declaration."""
+    try:
+        parsed = json.loads(content)
+    except ValueError:
+        return "", True
+    if not isinstance(parsed, dict):
+        return "", True
+    status = parsed.get("status")
+    return (status if isinstance(status, str) else ""), parsed.get("repeatSafe") is not False
+
+
+class _ToolLoopGuard:
+    """Per-turn guard around the tool runner against repeated failures and repeats of a
+    successful non-idempotent call (one whose result said `repeatSafe: false`)."""
+
+    def __init__(self, runner: ToolCallRunner) -> None:
+        self._runner = runner
+        self._failures: dict[str, tuple[str, int]] = {}
+        self._done_toggles: set[str] = set()
+
+    async def __call__(self, call: ToolCall, emit: EventSink) -> Message:
+        sig = _call_signature(call)
+        if sig in self._done_toggles:
+            return Message(
+                role=Role.TOOL,
+                content=json.dumps(
+                    {
+                        "status": "duplicate_skipped",
+                        "hint": "This exact non-idempotent call already succeeded in this "
+                        "turn; repeating it would change the state again.",
+                    }
+                ),
+                tool_call_id=call.id,
+            )
+        previous = self._failures.get(sig)
+        if previous is not None and previous[1] >= _REPEAT_FAILURE_LIMIT:
+            return Message(
+                role=Role.TOOL,
+                content=json.dumps(
+                    {
+                        "status": "blocked_repeat",
+                        "hint": "This exact call failed the same way twice; change the "
+                        "arguments, use another tool, or tell the owner what is blocked.",
+                    }
+                ),
+                tool_call_id=call.id,
+            )
+        message = await self._runner(call, emit)
+        status, repeat_safe = _payload_fields(message.content)
+        if status == "ok":
+            self._failures.pop(sig, None)
+            if not repeat_safe:
+                self._done_toggles.add(sig)
+        else:
+            count = (
+                previous[1] + 1 if previous is not None and previous[0] == message.content else 1
+            )
+            self._failures[sig] = (message.content, count)
+        return message
+
 
 async def chat_turn(
     generator: TextGenerator,
@@ -488,9 +574,11 @@ async def chat_turn(
     code_generator: TextGenerator | None = None,
 ) -> AsyncIterator[TurnEvent]:
     """Streams the reply with gesture tags removed, splits say/detail when `sections=True`,
-    and executes up to `MAX_TOOL_ROUNDS` (3) x `MAX_CALLS_PER_ROUND` (3) tool calls when
-    `tool_runner` is supplied. Automatically switches to `code_generator` on subsequent
-    rounds when a `forge__*` or `workspace__*` tool call is triggered."""
+    and executes up to `MAX_TOOL_ROUNDS` x `MAX_CALLS_PER_ROUND` tool calls when
+    `tool_runner` is supplied, bounded by `TURN_BUDGET_SECONDS` and guarded by
+    `_ToolLoopGuard`. The round after the last tool round is tool-free so the model must
+    answer. Automatically switches to `code_generator` on subsequent rounds when a
+    `forge__*`, `workspace__*` or `skill__*` tool is called (directly or via `tool_invoke`)."""
     if tool_runner is None:
         async for ev in _single_round_chat_turn(
             generator,
@@ -501,6 +589,7 @@ async def chat_turn(
             yield ev
         return
 
+    guarded_runner: ToolCallRunner = _ToolLoopGuard(tool_runner)
     turn_started = time.monotonic()
     messages = list(request.messages)
     last_finished: ChatFinished | None = None
@@ -510,8 +599,6 @@ async def chat_turn(
     active_generator: TextGenerator = generator
     active_max_tokens: int = request.max_output_tokens
 
-    needs_followup_tools = True
-
     try:
         for round_idx in range(MAX_TOOL_ROUNDS + 1):
             elapsed = time.monotonic() - turn_started
@@ -519,11 +606,7 @@ async def chat_turn(
             if remaining_budget <= 0:
                 break
 
-            allow_tools_this_round = (
-                round_idx < MAX_TOOL_ROUNDS
-                and bool(request.tools)
-                and (round_idx == 0 or needs_followup_tools)
-            )
+            allow_tools_this_round = round_idx < MAX_TOOL_ROUNDS and bool(request.tools)
             round_request = ChatRequest(
                 messages=tuple(messages),
                 locale=request.locale,
@@ -633,7 +716,7 @@ async def chat_turn(
             tool_messages: list[Message] = []
             async for item in _execute_round_tool_calls(
                 round_calls,
-                tool_runner,
+                guarded_runner,
                 remaining_budget=max(TURN_BUDGET_SECONDS - (time.monotonic() - turn_started), 0.5),
             ):
                 if isinstance(item, Message):
@@ -644,24 +727,8 @@ async def chat_turn(
                     yield item
 
             messages.extend(tool_messages)
-            followup_prefixes = (
-                "ui__",
-                "browser__",
-                "app__launch",
-                "forge__",
-                "workspace__",
-                "skill__",
-            )
-            needs_followup_tools = any(
-                c.name.startswith(followup_prefixes)
-                or '"status":"error"' in m.content
-                or '"status":"needs_permission"' in m.content
-                for c in round_calls
-                for m in tool_messages
-            )
             if code_generator is not None and any(
-                c.name.startswith(("forge__", "workspace__", "skill__"))
-                for c in round_calls
+                _effective_function_name(c).startswith(_CODE_TOOL_PREFIXES) for c in round_calls
             ):
                 active_generator = code_generator
                 active_max_tokens = max(active_max_tokens, 3000)

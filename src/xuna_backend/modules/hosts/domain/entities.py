@@ -166,6 +166,9 @@ class ToolDescriptor:
     permission: ToolPermissionState = ToolPermissionState.GRANTED
     policy_version: int = 1
     platform: str | None = None
+    # Optional host declaration: `False` means repeating a successful call changes state
+    # again (e.g. a play/pause toggle). `None` means the host did not declare it.
+    idempotent: bool | None = None
 
     def __post_init__(self) -> None:
         validate_tool_name(self.name, expected_family=self.family)
@@ -215,7 +218,7 @@ class ToolDescriptor:
             "reversible",
             "permission",
         }
-        allowed_policy_keys = required_policy_keys | {"platform"}
+        allowed_policy_keys = required_policy_keys | {"platform", "idempotent"}
         actual_policy_keys = set(policy.keys())
         if not (required_policy_keys <= actual_policy_keys <= allowed_policy_keys):
             raise ValueError("xuna/policy must have exact keys")
@@ -223,11 +226,13 @@ class ToolDescriptor:
         observes = policy["observes"]
         reversible = policy["reversible"]
         raw_platform = policy.get("platform")
+        raw_idempotent = policy.get("idempotent")
         if (
             type(version) is not int
             or not isinstance(observes, bool)
             or not isinstance(reversible, bool)
             or (raw_platform is not None and not isinstance(raw_platform, str))
+            or (raw_idempotent is not None and not isinstance(raw_idempotent, bool))
         ):
             raise ValueError("invalid xuna/policy scalar types")
         return cls(
@@ -242,6 +247,7 @@ class ToolDescriptor:
             permission=ToolPermissionState(str(policy["permission"])),
             policy_version=version,
             platform=raw_platform,
+            idempotent=raw_idempotent,
         )
 
     def to_wire(self) -> dict[str, object]:
@@ -255,6 +261,8 @@ class ToolDescriptor:
         }
         if self.platform is not None:
             policy_wire["platform"] = self.platform
+        if self.idempotent is not None:
+            policy_wire["idempotent"] = self.idempotent
         return {
             "name": self.name,
             "description": self.description,

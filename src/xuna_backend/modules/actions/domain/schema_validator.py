@@ -210,13 +210,14 @@ class SchemaValidator:
             if isinstance(enum_vals, list) and value not in enum_vals:
                 raise ArgumentValidationError(f"argument {name!r} not in allowed enum")
         elif prop_type == "number":
-            if type(value) not in (int, float):
+            if isinstance(value, bool) or not isinstance(value, int | float):
                 raise ArgumentValidationError(f"argument {name!r} must be a number")
+            num_val = float(value)
             minimum = prop.get("minimum")
-            if isinstance(minimum, int | float) and value < minimum:
+            if isinstance(minimum, int | float) and num_val < float(minimum):
                 raise ArgumentValidationError(f"argument {name!r} < minimum {minimum}")
             maximum = prop.get("maximum")
-            if isinstance(maximum, int | float) and value > maximum:
+            if isinstance(maximum, int | float) and num_val > float(maximum):
                 raise ArgumentValidationError(f"argument {name!r} > maximum {maximum}")
         elif prop_type == "boolean":
             if type(value) is not bool:

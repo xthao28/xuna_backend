@@ -1,4 +1,4 @@
-"""Owner approval verification, emergency stop, and Board HID execution for `Orchestrator` (UDC-4, UDC-7).
+"""Owner approval verification, emergency stop, and Board HID execution (UDC-4, UDC-7).
 
 Extracted from `orchestrator.py` to separate lifecycle/approval/board responsibilities
 from host tool routing.

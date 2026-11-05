@@ -24,7 +24,9 @@ from xuna_backend.modules.actions.application.approval_and_board_service import 
 from xuna_backend.modules.actions.application.catalog import (
     CAP_BOARD_HID_V1,
     CAP_HOST_ACTIONS_V1,
+    collect_eligible_host_tools,
     is_tool_granted,
+    load_owner_host_state,
 )
 from xuna_backend.modules.actions.application.code_synthesizer import (
     CodeSpecialistSynthesizer,
@@ -46,6 +48,16 @@ from xuna_backend.modules.actions.application.prompts import (
     encode_tool_payload,
     tool_system_prompt,
     truncate_tool_value,
+)
+from xuna_backend.modules.actions.application.tool_discovery import (
+    META_FUNCTION_NAMES,
+    TOOL_DESCRIBE_FUNCTION,
+    TOOL_SEARCH_FUNCTION,
+    MetaToolArgumentError,
+    describe_tool,
+    encode_meta_payload,
+    parse_invoke,
+    search_tools,
 )
 from xuna_backend.modules.actions.application.workflows import (
     BoardWorkflowTriggerResult,
@@ -124,6 +136,18 @@ EventSink = Callable[[ActionStreamEvent], Awaitable[None]]
 _truncate_value = truncate_tool_value
 _encode_tool_payload = encode_tool_payload
 
+# Host agents built before `xuna/policy.idempotent` existed do not declare it. Only for
+# those undeclared descriptors, these known toggles keep repeat protection; a host's own
+# declaration always wins. Remove once every shipped host agent declares the flag.
+_LEGACY_UNDECLARED_TOGGLES: frozenset[str] = frozenset({"media.play_pause"})
+
+
+def is_repeat_safe(descriptor: ToolDescriptor) -> bool:
+    """Whether re-running a successful call with identical arguments is harmless."""
+    if descriptor.idempotent is not None:
+        return descriptor.idempotent
+    return descriptor.name not in _LEGACY_UNDECLARED_TOGGLES
+
 
 @dataclass(frozen=True, slots=True)
 class ActionContext:
@@ -138,6 +162,7 @@ class ActionContext:
     request_id: str = ""
     self_host_id: str | None = None
     host_defaults: dict[str, str] | None = None
+    host_screen_consent: bool = True
 
 
 class Orchestrator:
@@ -256,6 +281,15 @@ class Orchestrator:
 
     async def handle_call(self, call: ToolCall, ctx: ActionContext) -> Message:
         """Executes the 8-step orchestrator pipeline for a single `ToolCall`."""
+        if call.name in META_FUNCTION_NAMES:
+            if CAP_HOST_ACTIONS_V1 not in ctx.client_caps:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_tool_payload("unknown_tool"),
+                    tool_call_id=call.id,
+                )
+            return await self._handle_meta_call(call, ctx)
+
         tool_name = from_function_name(call.name)
         if tool_name is None or is_forbidden_tool_name(tool_name):
             return Message(
@@ -355,6 +389,48 @@ class Orchestrator:
             request_id=request_id,
             self_host_id=self_host_id,
         )
+
+    async def _handle_meta_call(self, call: ToolCall, ctx: ActionContext) -> Message:
+        """`tool_search` / `tool_describe` / `tool_invoke` over the same eligible host tools
+        the catalog uses; `tool_invoke` re-enters `_handle_host_call` with every gate."""
+        hosts, manifests, grants, online = await load_owner_host_state(
+            owner_id=ctx.owner_id,
+            host_repo=self._host_repo,
+            hub=self._hub,
+            self_host_id=ctx.self_host_id,
+        )
+        eligible = collect_eligible_host_tools(
+            hosts=hosts,
+            manifests_by_host=manifests,
+            grants_by_host=grants,
+            online_host_ids=online,
+            host_screen_consent=ctx.host_screen_consent,
+            now=self._clock(),
+        )
+        try:
+            if call.name == TOOL_SEARCH_FUNCTION:
+                output = search_tools(
+                    eligible, call.arguments.get("query"), call.arguments.get("limit")
+                )
+                content = encode_meta_payload("ok", output)
+            elif call.name == TOOL_DESCRIBE_FUNCTION:
+                content = describe_tool(eligible, call.arguments.get("name"))
+            else:
+                invoke = parse_invoke(eligible, call.arguments)
+                inner_call = ToolCall(
+                    id=call.id,
+                    name=invoke.function_name,
+                    arguments=invoke.arguments,
+                )
+                return await self._handle_host_call(invoke.tool_name, inner_call, ctx)
+        except MetaToolArgumentError as error:
+            hint = (
+                "Use tool_search to find a valid tool name."
+                if error.code == "unknown_tool"
+                else "Check the arguments against tool_describe and retry."
+            )
+            content = _encode_tool_payload(error.code, hint=hint)
+        return Message(role=Role.TOOL, content=content, tool_call_id=call.id)
 
     async def _handle_host_call(
         self,
@@ -818,6 +894,10 @@ class Orchestrator:
                 sc_raw = raw_result.get("structuredContent")
                 if isinstance(sc_raw, dict):
                     structured_content = dict(sc_raw)
+                if isinstance(result_meta, dict):
+                    remote_error = result_meta.get("xuna/errorCode")
+                    if isinstance(remote_error, str) and "errorCode" not in structured_content:
+                        structured_content["errorCode"] = remote_error[:64]
 
                 # Automatic Code-Specialist Self-Debug Loop when dryRunOk is False
                 if (
@@ -908,8 +988,8 @@ class Orchestrator:
                 gesture=gesture_for_action_status(status),
             )
         )
-        return Message(
-            role=Role.TOOL,
-            content=_encode_tool_payload(status, structured_content),
-            tool_call_id=call.id,
-        )
+        if status == "ok" and not is_repeat_safe(descriptor):
+            content = _encode_tool_payload(status, structured_content, repeatSafe=False)
+        else:
+            content = _encode_tool_payload(status, structured_content)
+        return Message(role=Role.TOOL, content=content, tool_call_id=call.id)

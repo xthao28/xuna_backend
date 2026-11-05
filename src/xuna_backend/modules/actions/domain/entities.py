@@ -47,8 +47,11 @@ _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 APPROVAL_TTL_SECONDS = 60
 CONVERSATION_SCOPE_TTL = timedelta(minutes=15)
-MAX_TOOL_OUTPUT_BYTES = 2048
-MAX_TOOL_ROUNDS = 3
+# A UI snapshot (compactUiTree, up to 3600 chars) plus status must fit in one tool message.
+MAX_TOOL_OUTPUT_BYTES = 6144
+# Multi-step host control (open app -> inspect -> act -> verify) needs several rounds;
+# TURN_BUDGET_SECONDS remains the hard stop.
+MAX_TOOL_ROUNDS = 12
 MAX_CALLS_PER_ROUND = 3
 TURN_BUDGET_SECONDS = 90.0
 

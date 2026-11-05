@@ -408,6 +408,7 @@ async def turn(
                 host_repo=host_factory(session),
                 hub=hub,
                 self_host_id=self_host_id,
+                audit=state(request, "audit_log")(session),
             )
         except Exception:
             _logger.debug("Failed to load tool catalog for turn", exc_info=True)
@@ -431,9 +432,7 @@ async def turn(
                 max_output_tokens=getattr(
                     settings, "text_code_max_tokens", settings.text_expert_max_tokens
                 ),
-                timeout_s=getattr(
-                    settings, "text_code_timeout_s", settings.text_expert_timeout_s
-                ),
+                timeout_s=getattr(settings, "text_code_timeout_s", settings.text_expert_timeout_s),
             )
             generator: TextGenerator = code_gen
         else:

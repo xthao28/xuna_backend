@@ -1157,7 +1157,26 @@ class ClawPulseService:
         max_nodes: int = 30,
     ) -> UiAccessibilityTreeReceipt:
         clean_action = action.strip()
-        allowed_ui_actions = ("inspect_window", "invoke_ref", "set_value_ref", "double_click", "triple_click", "right_click", "middle_click", "drag", "scroll_up", "scroll_down", "scroll_left", "scroll_right", "invoke_menu", "browser_click", "browser_type", "shortcut", "bring_to_front", "close_window"); 
+        allowed_ui_actions = (
+            "inspect_window",
+            "invoke_ref",
+            "set_value_ref",
+            "double_click",
+            "triple_click",
+            "right_click",
+            "middle_click",
+            "drag",
+            "scroll_up",
+            "scroll_down",
+            "scroll_left",
+            "scroll_right",
+            "invoke_menu",
+            "browser_click",
+            "browser_type",
+            "shortcut",
+            "bring_to_front",
+            "close_window",
+        )
         if clean_action not in allowed_ui_actions:
             raise ValueError("invalid_ui_action")
 
@@ -1257,5 +1276,3 @@ class ClawPulseService:
             nodes=bounded_nodes,
             summary_vi=summary_vi[:240],
         )
-
-

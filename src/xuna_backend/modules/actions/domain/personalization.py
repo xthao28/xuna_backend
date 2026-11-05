@@ -92,6 +92,24 @@ _FAMILY_PROMPT_VI: dict[str, str] = {
     "app": "mở ứng dụng",
     "url": "mở liên kết web",
     "workflow": "chạy quy trình",
+    "ui": "điều khiển giao diện",
+    "screen": "quan sát màn hình",
+    "input": "nhập liệu",
+    "cu": "điều khiển máy tính",
+    "clipboard": "dùng clipboard",
+    "selection": "đọc vùng chọn",
+    "window": "xem cửa sổ đang mở",
+    "browser": "đọc trình duyệt",
+    "display": "đánh thức màn hình",
+    "host": "quản lý thiết bị",
+    "mcp": "gọi công cụ MCP",
+    "workspace": "mở không gian làm việc",
+    "notifications": "xử lý thông báo",
+    "tv": "điều khiển TV",
+    "smarthome": "điều khiển nhà thông minh",
+    "meeting": "điều khiển cuộc họp",
+    "dev": "kiểm tra cổng phát triển",
+    "system": "xem thông số hệ thống",
 }
 
 
@@ -158,8 +176,7 @@ class HostPickTracker:
                 label=OFFER_LABEL_RULE_VI,
                 prompt_vi=f"Lần sau {verb} trên {clean_alias} luôn nhé?",
                 why_vi=(
-                    f"Quy tắc: Bạn đã chọn {clean_alias} {count} lần liên tiếp "
-                    f"khi {verb}."
+                    f"Quy tắc: Bạn đã chọn {clean_alias} {count} lần liên tiếp " f"khi {verb}."
                 ),
             )
         return None
@@ -277,7 +294,8 @@ def format_routine_offer_wording(
 
     Personality changes ONLY wording, never cap or execution.
     """
-    verb = _FAMILY_PROMPT_VI.get(family.strip().lower(), "mở nhạc")
+    norm_fam = family.strip().lower()
+    verb = _FAMILY_PROMPT_VI.get(norm_fam, "làm việc này" if norm_fam else "mở nhạc")
     day_prefix = (
         "Sáng rồi"
         if 5 <= hour < 11

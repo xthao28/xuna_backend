@@ -11,7 +11,7 @@ Covers:
 4. Capable client with `board__media_key` (`clientCapabilities=["board_hid_v1"]`,
    `boardHid={"available": True}`) -> `action_pending` -> approve ->
    `board_hid_request` -> `POST /v1/actions/{invocationId}/result` -> `action_result`.
-5. Multi-round cap (`MAX_TOOL_ROUNDS = 3`) and per-round cap (`MAX_CALLS_PER_ROUND = 3`).
+5. Multi-round cap (`MAX_TOOL_ROUNDS`) and per-round cap (`MAX_CALLS_PER_ROUND = 3`).
 """
 
 import asyncio
@@ -29,6 +29,8 @@ from xuna_backend.core.config import Environment, Settings
 from xuna_backend.main import create_app
 from xuna_backend.modules.accounts.domain.owner import Owner
 from xuna_backend.modules.actions.domain.entities import (
+    MAX_CALLS_PER_ROUND,
+    MAX_TOOL_ROUNDS,
     ActionPendingEvent,
     ActionResultEvent,
     ApprovalRequest,
@@ -557,26 +559,26 @@ def test_action_approval_and_board_result_endpoints_owner_scoping_and_idempotenc
 
 
 # ---------------------------------------------------------------------------
-# 4. Multi-round cap (3 rounds) and per-round cap (3 calls) in `chat_turn`
+# 4. Multi-round cap (`MAX_TOOL_ROUNDS`) and per-round cap (3 calls) in `chat_turn`
 # ---------------------------------------------------------------------------
 
 
-def test_chat_turn_enforces_three_rounds_and_three_calls_per_round() -> None:
+def test_chat_turn_enforces_round_cap_and_calls_per_round() -> None:
     async def scripted_stream(request: ChatRequest, round_idx: int) -> AsyncIterator[ChatEvent]:
         if request.tools:
-            # Emit 4 tool calls in round 0 to test MAX_CALLS_PER_ROUND = 3
-            count = 4 if round_idx == 0 else 1
+            # Emit one call too many in round 0 to test MAX_CALLS_PER_ROUND.
+            count = MAX_CALLS_PER_ROUND + 1 if round_idx == 0 else 1
             for i in range(count):
                 yield ToolCallRequested(
                     ToolCall(
                         id=f"r{round_idx}-c{i}",
-                        name="media__play_pause",
+                        name="media__next",
                         arguments={},
                     )
                 )
             yield _done(5)
         else:
-            # Final round has `tools == ()` after 3 tool rounds
+            # The round after the last tool round has `tools == ()`.
             yield TextDelta("Đã hoàn tất chuỗi hành động.")
             yield _done(5)
 
@@ -585,8 +587,8 @@ def test_chat_turn_enforces_three_rounds_and_three_calls_per_round() -> None:
         "Thử chuỗi công cụ",
         tools=(
             ToolSpec(
-                name="media__play_pause",
-                description="Play/pause",
+                name="media__next",
+                description="Next track",
                 parameters={
                     "type": "object",
                     "properties": {},
@@ -619,30 +621,23 @@ def test_chat_turn_enforces_three_rounds_and_three_calls_per_round() -> None:
         return [ev async for ev in chat_turn(llm, base_req, tool_runner=runner)]
 
     events = asyncio.run(collect())
-    # Round 0 had 4 calls -> only 3 executed, 4th got `too_many_calls`.
-    # Rounds 1 and 2 had 1 call each -> total 5 executed calls across 3 rounds.
-    assert executed_ids == [
-        "r0-c0",
-        "r0-c1",
-        "r0-c2",
-        "r1-c0",
-        "r2-c0",
+    # Round 0 had one call too many -> only MAX_CALLS_PER_ROUND executed, the extra one got
+    # `too_many_calls`; every later tool round executed its single call.
+    expected = [f"r0-c{i}" for i in range(MAX_CALLS_PER_ROUND)] + [
+        f"r{r}-c0" for r in range(1, MAX_TOOL_ROUNDS)
     ]
-    # Round 3 (4th LLM call) had `tools == ()`
-    assert len(llm.requests) == 4
-    assert llm.requests[3].tools == ()
-    # Check that r0-c3 received `{"status":"too_many_calls"}`
+    assert executed_ids == expected
+    # The LLM call after the last tool round had `tools == ()`.
+    assert len(llm.requests) == MAX_TOOL_ROUNDS + 1
+    assert llm.requests[MAX_TOOL_ROUNDS].tools == ()
     r1_tool_msgs = [m for m in llm.requests[1].messages if m.role == Role.TOOL]
-    assert len(r1_tool_msgs) == 4
-    assert json.loads(r1_tool_msgs[3].content) == {"status": "too_many_calls"}
+    assert len(r1_tool_msgs) == MAX_CALLS_PER_ROUND + 1
+    assert json.loads(r1_tool_msgs[-1].content) == {"status": "too_many_calls"}
     assert any(
         isinstance(e, TextDelta) and e.text == "Đã hoàn tất chuỗi hành động." for e in events
     )
-    assert (
-        sum(
-            1
-            for e in events
-            if isinstance(e, ActionPendingEvent | BoardHidRequestEvent | ActionResultEvent)
-        )
-        == 5
-    )
+    assert sum(
+        1
+        for e in events
+        if isinstance(e, ActionPendingEvent | BoardHidRequestEvent | ActionResultEvent)
+    ) == len(expected)

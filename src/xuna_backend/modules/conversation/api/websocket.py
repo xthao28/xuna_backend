@@ -451,6 +451,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         host_repo=app.state.host_repository(db),
                                         hub=app.state.host_session_hub,
                                         self_host_id=turn_self_host_id,
+                                        audit=app.state.audit_log(db),
                                     )
                                 except Exception:
                                     logger.debug(
@@ -743,14 +744,10 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                 else ApprovalScope.ONCE
                             )
                             sig_bytes = (
-                                _decode_b64_flex(raw_sig, 64)
-                                if isinstance(raw_sig, str)
-                                else None
+                                _decode_b64_flex(raw_sig, 64) if isinstance(raw_sig, str) else None
                             )
                             pub_bytes = (
-                                _decode_b64_flex(raw_pub, 65)
-                                if isinstance(raw_pub, str)
-                                else None
+                                _decode_b64_flex(raw_pub, 65) if isinstance(raw_pub, str) else None
                             )
                             ws_orch = build_stream_orchestrator(app.state)
                             await ws_orch.decide_approval(

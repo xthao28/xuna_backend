@@ -1118,5 +1118,91 @@ async def _run_dual_model_code_specialist_test() -> None:
     assert len(hub.calls) == 2
 
 
+def test_dynamic_capability_scoped_prompt_and_state_hint() -> None:
+    """Verifies that `tool_system_prompt` contains no hardcoded app names or magic refIds,
+    composes only active capability modules based on `tools`, and places a backend-authored
+    `hint` next to (not inside) the tool output in `encode_tool_payload`."""
+    from xuna_backend.modules.actions.application.prompts import (
+        SYSTEM_PROMPT_EN,
+        SYSTEM_PROMPT_VI,
+        encode_tool_payload,
+        tool_system_prompt,
+    )
+    from xuna_backend.modules.cognition.domain.types import Locale, ToolSpec
 
+    for prompt_text in (SYSTEM_PROMPT_VI, SYSTEM_PROMPT_EN):
+        for forbidden_hardcode in (
+            "Spotify",
+            "Chrome",
+            "Safari",
+            "Notes",
+            "Reminders",
+            "Finder",
+            "Terminal",
+            "refId='ui_1'",
+        ):
+            assert forbidden_hardcode not in prompt_text
 
+    # 1. Media-only tools -> only core guardrails, no UI or Forge instructions
+    media_only_prompt = tool_system_prompt(
+        Locale.VI,
+        tools=(
+            ToolSpec(
+                name="media__play_pause",
+                description="Toggle playback",
+                parameters={"type": "object", "properties": {}},
+            ),
+        ),
+    )
+    assert "Nguyên tắc điều khiển công cụ" in media_only_prompt
+    assert "Observe -> Act -> Verify" not in media_only_prompt
+    assert "XUNA_TOOL_ARGS_JSON" not in media_only_prompt
+
+    # 2. UI tool active -> includes Observe -> Act -> Verify, still excludes Forge
+    ui_prompt = tool_system_prompt(
+        Locale.VI,
+        tools=(
+            ToolSpec(
+                name="ui__accessibility_tree",
+                description="Inspect UI tree",
+                parameters={"type": "object", "properties": {}},
+            ),
+        ),
+    )
+    assert "Observe -> Act -> Verify" in ui_prompt
+    assert "XUNA_TOOL_ARGS_JSON" not in ui_prompt
+
+    # 3. Forge tool active -> includes Sandboxed Skill Synthesis
+    forge_prompt = tool_system_prompt(
+        Locale.EN,
+        tools=(
+            ToolSpec(
+                name="forge__synthesize_skill",
+                description="Synthesize tool",
+                parameters={"type": "object", "properties": {}},
+            ),
+        ),
+    )
+    assert "XUNA_TOOL_ARGS_JSON" in forge_prompt
+    assert "skillIdToUpdate" in forge_prompt
+
+    # 4. State-driven hint (outside output) on dryRunOk=False or stale_ref
+    dry_run_payload = json.loads(
+        encode_tool_payload(
+            "ok",
+            {
+                "skillId": "sk_vat_1",
+                "dryRunOk": False,
+                "stderrPreview": "ZeroDivisionError: division by zero",
+            },
+        )
+    )
+    assert "skillIdToUpdate='sk_vat_1'" in dry_run_payload["hint"]
+
+    stale_payload = json.loads(
+        encode_tool_payload(
+            "failed",
+            {"errorCode": "stale_ref"},
+        )
+    )
+    assert "re-inspect" in stale_payload["hint"]
