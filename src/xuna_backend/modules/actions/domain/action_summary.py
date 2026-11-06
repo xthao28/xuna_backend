@@ -181,11 +181,6 @@ class ActionSummary:
             case "clipboard.write":
                 raw_txt = str(arguments.get("text", ""))
                 return f"Chép {len(raw_txt)} ký tự vào clipboard của {target}"[:240]
-            case "meeting.status":
-                return f"Kiểm tra trạng thái cuộc họp và mic trên {target}"[:240]
-            case "meeting.control":
-                act = str(arguments.get("action", "toggle_mic"))[:24]
-                return f"Điều khiển mic cuộc họp ({act}) trên {target}"[:240]
             case "dev.ports":
                 return f"Quét cổng dev localhost trên {target}"[:240]
             case "system.vitals":
@@ -217,9 +212,6 @@ class ActionSummary:
             case "coach.decompose_overwhelm":
                 goal = str(arguments.get("goal", "công việc"))[:40]
                 return f"Chia nhỏ mục tiêu '{goal}' thành bước 5 phút trên {target}"[:240]
-            case "meeting.desk_whisper_digest":
-                topic = str(arguments.get("topic", "cuộc họp"))[:40]
-                return f"Tạo nhắc bài thầm lặng ({topic}) từ {target}"[:240]
             case "habit.propose_workflow":
                 return f"Phân tích thói quen đề xuất quy trình trên {target}"[:240]
             case "forge.synthesize_skill":
@@ -414,11 +406,6 @@ class ActionSummary:
             case "clipboard.write":
                 raw_txt = str(arguments.get("text", ""))
                 return f"Copy {len(raw_txt)} characters to clipboard on {target}"[:240]
-            case "meeting.status":
-                return f"Check meeting & microphone status on {target}"[:240]
-            case "meeting.control":
-                act = str(arguments.get("action", "toggle_mic"))[:24]
-                return f"Control meeting microphone ({act}) on {target}"[:240]
             case "dev.ports":
                 return f"Scan active localhost dev ports on {target}"[:240]
             case "system.vitals":
@@ -450,9 +437,6 @@ class ActionSummary:
             case "coach.decompose_overwhelm":
                 goal = str(arguments.get("goal", "task"))[:40]
                 return f"Decompose '{goal}' into a 5-minute starter step on {target}"[:240]
-            case "meeting.desk_whisper_digest":
-                topic = str(arguments.get("topic", "meeting"))[:40]
-                return f"Prepare silent desk whisper ({topic}) on {target}"[:240]
             case "habit.propose_workflow":
                 return f"Mine repeated habits to propose workflow on {target}"[:240]
             case "forge.synthesize_skill":

@@ -1,12 +1,11 @@
 """SYM-2 (`S2.1` -> `S2.2`) unit tests for Symbiotic Watchdogs, Coach & Serendipity:
 
-- Track H (`H3` Ambient Sentinel Watchdogs + `H4` Neurodivergent Micro-Step Coach +
-  `H5` Live Meeting / Call Desk Whisper):
-  - Validates the 6 `SYM-2` XTP tools (`watchdog.watch_process_or_port`,
+- Track H (`H3` Ambient Sentinel Watchdogs + `H4` Neurodivergent Micro-Step Coach):
+  - Validates the 5 `SYM-2` XTP tools (`watchdog.watch_process_or_port`,
     `watchdog.watch_resource_threshold`, `watchdog.list_and_clear`,
-    `coach.decompose_overwhelm`, `meeting.desk_whisper_digest`,
-    `habit.propose_workflow`) in `validate_tool_name`, `ActionSummary`, and `build_tool_catalog`.
-  - Tests `unstuck_coach` (`R1`), `watch_and_alert` (`R1`), and `desk_whisper` (`R1`)
+    `coach.decompose_overwhelm`, `habit.propose_workflow`) in `validate_tool_name`,
+    `ActionSummary`, and `build_tool_catalog`.
+  - Tests `unstuck_coach` (`R1`), `watch_and_alert` (`R1`)
     workflows.
 - Track L (`L3` Serendipity & Curiosity Sparks + `L4` Emergent Shared Rituals & Habit Mining):
   - Tests `SerendipityEngine` non-intrusive spark generation (`max 1/day`, `<= 280` chars).
@@ -159,19 +158,6 @@ class _FakeHub:
                 "isError": False,
                 "_meta": {"xuna/status": "ok", "xuna/durationMs": 5},
             }
-        if name == "meeting.desk_whisper_digest":
-            topic = args.get("topic", "Daily Sync")
-            return {
-                "content": [{"type": "text", "text": "ok"}],
-                "structuredContent": {
-                    "topic": topic,
-                    "whisperLine": f"[{topic}] Nhắc chốt deadline sprint và hỏi blocker.",
-                    "charCount": 52,
-                    "silentMode": True,
-                },
-                "isError": False,
-                "_meta": {"xuna/status": "ok", "xuna/durationMs": 5},
-            }
         return {
             "content": [{"type": "text", "text": "ok"}],
             "structuredContent": {"ok": True},
@@ -224,15 +210,6 @@ def _build_sym2_manifest(host_id: HostId) -> Manifest:
             reversible=True,
         ),
         ToolDescriptor(
-            name="meeting.desk_whisper_digest",
-            family=ToolFamily.MEDIA,
-            risk=RiskTier.R1,
-            description="Silent <= 120 char meeting whisper",
-            input_schema=empty_schema,
-            output_schema=empty_schema,
-            reversible=True,
-        ),
-        ToolDescriptor(
             name="habit.propose_workflow",
             family=ToolFamily.WORKFLOW,
             risk=RiskTier.R1,
@@ -255,7 +232,6 @@ def test_sym2_tools_validation_catalog_and_summaries() -> None:
         "watchdog.watch_resource_threshold": ToolFamily.APP,
         "watchdog.list_and_clear": ToolFamily.APP,
         "coach.decompose_overwhelm": ToolFamily.APP,
-        "meeting.desk_whisper_digest": ToolFamily.MEDIA,
         "habit.propose_workflow": ToolFamily.WORKFLOW,
     }
     for name, family in expected.items():
@@ -314,7 +290,6 @@ def test_sym2_tools_validation_catalog_and_summaries() -> None:
     assert "watchdog__watch_resource_threshold" in names
     assert "watchdog__list_and_clear" in names
     assert "coach__decompose_overwhelm" in names
-    assert "meeting__desk_whisper_digest" in names
     assert "habit__propose_workflow" in names
 
     s_watch = ActionSummary.format_pending(
@@ -370,7 +345,7 @@ def test_serendipity_engine_and_habit_miner() -> None:
     assert proposals[0].max_risk == "R1"
 
 
-def test_sym2_workflows_unstuck_coach_watch_and_alert_and_desk_whisper() -> None:
+def test_sym2_workflows_unstuck_coach_and_watch_and_alert() -> None:
     async def _run() -> None:
         repo = _FakeHostRepo()
         hub = _FakeHub()
@@ -485,29 +460,5 @@ def test_sym2_workflows_unstuck_coach_watch_and_alert_and_desk_whisper() -> None
         assert watch_out["targetKind"] == "port"
         assert watch_out["watchdogId"] == "wd-1"
         assert watch_out["resourceWatchdogId"] == "wd-res-1"
-
-        # 3. desk_whisper (R1)
-        msg_whisper = await runner.handle_template_call(
-            call=ToolCall(
-                id="call-whisper-1",
-                name="workflow_template",
-                arguments={
-                    "template": "desk_whisper",
-                    "whisper_topic": "Design Review",
-                },
-            ),
-            owner_id=owner_id,
-            locale=Locale.VI,
-            client_caps={CAP_HOST_ACTIONS_V1, CAP_WORKFLOW_TEMPLATES_V1},
-            board_available=True,
-            emit_event=_emit,
-            request_id="req-whisper-1",
-        )
-        payload_whisper = json.loads(msg_whisper.content)
-        assert payload_whisper["status"] == "ok"
-        whisper_out = payload_whisper["output"]
-        assert whisper_out["template"] == "desk_whisper"
-        assert whisper_out["silentMode"] is True
-        assert len(whisper_out["whisperLine"]) <= 120
 
     asyncio.run(_run())

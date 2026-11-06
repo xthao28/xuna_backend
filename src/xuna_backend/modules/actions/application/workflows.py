@@ -103,14 +103,12 @@ class WorkflowTemplate(StrEnum):
     CAST_TO_TV = "cast_to_tv"
     CINEMA_MODE = "cinema_mode"
     GOODNIGHT_MODE = "goodnight_mode"
-    MEETING_READY = "meeting_ready"
     PREVIEW_ON_PHONE = "preview_on_phone"
     DAILY_STANDUP = "daily_standup"
     FREEZE_FOR_TONIGHT = "freeze_for_tonight"
     REHYDRATE_PROJECT = "rehydrate_project"
     UNSTUCK_COACH = "unstuck_coach"
     WATCH_AND_ALERT = "watch_and_alert"
-    DESK_WHISPER = "desk_whisper"
     FORGE_INVOICE_HARVESTER = "forge_invoice_harvester"
     TEACH_AND_COMPILE = "teach_and_compile"
     CLAW_HEARTBEAT_PATROL = "claw_heartbeat_patrol"
@@ -432,15 +430,6 @@ def extract_custom_workflow_candidate(
                     risk=RiskTier.R2,
                 )
             )
-        elif "tắt mic" in low or "bật mic" in low:
-            mic_act = "mute_mic" if "tắt mic" in low else "unmute_mic"
-            steps.append(
-                CustomWorkflowStep(
-                    tool="meeting.control",
-                    arguments={"action": mic_act},
-                    risk=RiskTier.R1,
-                )
-            )
         elif "kiểm tra pin" in low or "xem pin" in low:
             steps.append(
                 CustomWorkflowStep(
@@ -677,16 +666,6 @@ class CompositeWorkflowRunner:
                 request_id=request_id,
                 self_host_id=self_host_id,
             )
-        if template == WorkflowTemplate.MEETING_READY:
-            return await self._run_meeting_ready(
-                call=call,
-                clean_args=clean_args,
-                owner_id=owner_id,
-                locale=locale,
-                emit_event=emit_event,
-                request_id=request_id,
-                self_host_id=self_host_id,
-            )
         if template == WorkflowTemplate.PREVIEW_ON_PHONE:
             return await self._run_preview_on_phone(
                 call=call,
@@ -739,16 +718,6 @@ class CompositeWorkflowRunner:
             )
         if template == WorkflowTemplate.WATCH_AND_ALERT:
             return await self._run_watch_and_alert(
-                call=call,
-                clean_args=clean_args,
-                owner_id=owner_id,
-                locale=locale,
-                emit_event=emit_event,
-                request_id=request_id,
-                self_host_id=self_host_id,
-            )
-        if template == WorkflowTemplate.DESK_WHISPER:
-            return await self._run_desk_whisper(
                 call=call,
                 clean_args=clean_args,
                 owner_id=owner_id,
@@ -3540,200 +3509,6 @@ class CompositeWorkflowRunner:
             tool_call_id=call.id,
         )
 
-    async def _run_meeting_ready(
-        self,
-        *,
-        call: ToolCall,
-        clean_args: dict[str, object],
-        owner_id: uuid.UUID,
-        locale: Locale,
-        emit_event: WorkflowEventSink,
-        request_id: str,
-        self_host_id: str | None,
-    ) -> Message:
-        """UDC-15 S15.2: `meeting_ready` (`R1` workflow, no phone approval needed):
-        1. Pauses local PC music (`media.play_pause`) if playing.
-        2. Mutes Smart TV (`tv.control(mute_toggle)`) if advertised.
-        3. Mutes meeting microphone (`meeting.control(mute_mic)`).
-        4. Reads meeting status (`meeting.status`)."""
-        now = self._clock()
-        online, manifests, grants = await self._load_online_hosts(owner_id, self_host_id)
-
-        desktop_candidates: list[Host] = []
-        for h in online:
-            m = manifests[h.host_id]
-            g = grants[h.host_id]
-            if h.platform in (HostPlatform.WINDOWS, HostPlatform.MACOS, HostPlatform.LINUX):
-                mc_desc = m.find_tool("meeting.control")
-                if mc_desc is not None and is_tool_granted(mc_desc, g, now):
-                    desktop_candidates.append(h)
-
-        if not desktop_candidates:
-            return Message(
-                role=Role.TOOL,
-                content=_encode_workflow_payload("no_host"),
-                tool_call_id=call.id,
-            )
-
-        req_dst = str(
-            clean_args.get("destination_target") or clean_args.get("source_target") or ""
-        ).strip()
-        if req_dst:
-            matched = [h for h in desktop_candidates if str(h.alias).lower() == req_dst.lower()]
-            if not matched:
-                return Message(
-                    role=Role.TOOL,
-                    content=_encode_workflow_payload(
-                        "ask_target",
-                        choices=[str(h.alias) for h in desktop_candidates],
-                    ),
-                    tool_call_id=call.id,
-                )
-            pc_host = matched[0]
-        elif len(desktop_candidates) == 1:
-            pc_host = desktop_candidates[0]
-        else:
-            return Message(
-                role=Role.TOOL,
-                content=_encode_workflow_payload(
-                    "ask_target",
-                    choices=[str(h.alias) for h in desktop_candidates],
-                ),
-                tool_call_id=call.id,
-            )
-
-        manifest = manifests[pc_host.host_id]
-        host_grants = grants[pc_host.host_id]
-
-        # 1. Pause media if playing
-        media_paused = False
-        np_desc = manifest.find_tool("media.now_playing")
-        pp_desc = manifest.find_tool("media.play_pause")
-        if (
-            np_desc is not None
-            and pp_desc is not None
-            and is_tool_granted(np_desc, host_grants, now)
-            and is_tool_granted(pp_desc, host_grants, now)
-        ):
-            np_status, np_sc = await self._invoke_host_step(
-                owner_id=owner_id,
-                host=pc_host,
-                tool_name="media.now_playing",
-                arguments={},
-                risk=RiskTier.R0,
-                request_id=request_id,
-                self_host_id=self_host_id,
-                emit_event=emit_event,
-            )
-            if np_status == "ok" and np_sc.get("state") == "playing":
-                pp_status, _ = await self._invoke_host_step(
-                    owner_id=owner_id,
-                    host=pc_host,
-                    tool_name="media.play_pause",
-                    arguments={},
-                    risk=RiskTier.R1,
-                    request_id=request_id,
-                    self_host_id=self_host_id,
-                    emit_event=emit_event,
-                )
-                media_paused = pp_status == "ok"
-
-        # 2. Mute Smart TV if tv.control is granted
-        tv_muted = False
-        tv_desc = manifest.find_tool("tv.control")
-        if tv_desc is not None and is_tool_granted(tv_desc, host_grants, now):
-            tv_args: dict[str, object] = {"action": "mute_toggle"}
-            if clean_args.get("tv_device"):
-                tv_args["device"] = str(clean_args["tv_device"]).strip()
-            tv_status, _ = await self._invoke_host_step(
-                owner_id=owner_id,
-                host=pc_host,
-                tool_name="tv.control",
-                arguments=tv_args,
-                risk=RiskTier.R1,
-                request_id=request_id,
-                self_host_id=self_host_id,
-                emit_event=emit_event,
-            )
-            tv_muted = tv_status == "ok"
-
-        # 3. Mute meeting microphone
-        mc_status, mc_sc = await self._invoke_host_step(
-            owner_id=owner_id,
-            host=pc_host,
-            tool_name="meeting.control",
-            arguments={"action": "mute_mic"},
-            risk=RiskTier.R1,
-            request_id=request_id,
-            self_host_id=self_host_id,
-            emit_event=emit_event,
-        )
-        if mc_status != "ok":
-            return Message(
-                role=Role.TOOL,
-                content=_encode_workflow_payload(
-                    mc_status,
-                    {
-                        "template": WorkflowTemplate.MEETING_READY.value,
-                        "failedStep": 3,
-                        "failedTool": "meeting.control",
-                        "failedHost": str(pc_host.alias),
-                    },
-                ),
-                tool_call_id=call.id,
-            )
-
-        # 4. Read meeting status if granted
-        meeting_app = str(mc_sc.get("app", "none"))
-        in_meeting = False
-        ms_desc = manifest.find_tool("meeting.status")
-        if ms_desc is not None and is_tool_granted(ms_desc, host_grants, now):
-            ms_status, ms_sc = await self._invoke_host_step(
-                owner_id=owner_id,
-                host=pc_host,
-                tool_name="meeting.status",
-                arguments={},
-                risk=RiskTier.R1,
-                request_id=request_id,
-                self_host_id=self_host_id,
-                emit_event=emit_event,
-            )
-            if ms_status == "ok":
-                in_meeting = bool(ms_sc.get("inMeeting", False))
-                meeting_app = str(ms_sc.get("app", meeting_app))
-
-        summary = (
-            f"Meeting ready on {pc_host.alias} (mic muted, app: {meeting_app})"
-            if locale == Locale.EN
-            else f"Sẵn sàng họp trên {pc_host.alias} (đã tắt nhạc/TV, khóa mic trên {meeting_app})"
-        )
-        await emit_event(
-            ActionResultEvent(
-                invocation_id=str(uuid.uuid4()),
-                target=str(pc_host.alias),
-                summary=f"✓ {summary}"[:240],
-                status="ok",
-                gesture=gesture_for_action_status("ok"),
-            )
-        )
-        return Message(
-            role=Role.TOOL,
-            content=_encode_workflow_payload(
-                "ok",
-                {
-                    "template": WorkflowTemplate.MEETING_READY.value,
-                    "host": str(pc_host.alias),
-                    "inMeeting": in_meeting,
-                    "app": meeting_app,
-                    "micMuted": True,
-                    "mediaPaused": media_paused,
-                    "tvMuted": tv_muted,
-                    "meetingSummary": summary,
-                },
-            ),
-            tool_call_id=call.id,
-        )
-
     async def _run_preview_on_phone(
         self,
         *,
@@ -4675,102 +4450,6 @@ class CompositeWorkflowRunner:
                     "watchdogId": primary_watchdog_id,
                     "resourceWatchdogId": resource_watchdog_id,
                     "summaryVi": summary_vi,
-                },
-            ),
-            tool_call_id=call.id,
-        )
-
-    async def _run_desk_whisper(
-        self,
-        *,
-        call: ToolCall,
-        clean_args: dict[str, object],
-        owner_id: uuid.UUID,
-        locale: Locale,
-        emit_event: WorkflowEventSink,
-        request_id: str,
-        self_host_id: str | None,
-    ) -> Message:
-        """`desk_whisper` (`R1`, `SYM-2`):
-        Synthesizes an ultra-short (`<= 120` chars) silent Desk Whisper card via
-        `meeting.desk_whisper_digest` so XUNA can cue the owner during a call or
-        focus session without making any audio noise."""
-        online, manifests, _ = await self._load_online_hosts(owner_id, self_host_id)
-        raw_target = clean_args.get("target")
-        requested_alias = raw_target.strip() if isinstance(raw_target, str) else ""
-        raw_topic = clean_args.get("whisper_topic")
-        raw_project = clean_args.get("project")
-        topic_str = (
-            raw_topic.strip()[:120]
-            if isinstance(raw_topic, str) and raw_topic.strip()
-            else (
-                raw_project.strip()[:120]
-                if isinstance(raw_project, str) and raw_project.strip()
-                else "Cuộc họp hiện tại"
-            )
-        )
-
-        pc_host: Host | None = None
-        for host in online:
-            if requested_alias and str(host.alias).lower() != requested_alias.lower():
-                continue
-            manifest = manifests.get(host.host_id)
-            if manifest and manifest.find_tool("meeting.desk_whisper_digest") is not None:
-                pc_host = host
-                break
-        if pc_host is None and online:
-            pc_host = online[0]
-
-        if pc_host is None:
-            return Message(
-                role=Role.TOOL,
-                content=_encode_workflow_payload("host_offline"),
-                tool_call_id=call.id,
-            )
-
-        status, sc = await self._invoke_host_step(
-            owner_id=owner_id,
-            host=pc_host,
-            tool_name="meeting.desk_whisper_digest",
-            arguments={
-                "topic": topic_str,
-                "maxChars": 120,
-            },
-            risk=RiskTier.R1,
-            request_id=request_id,
-            self_host_id=self_host_id,
-            emit_event=emit_event,
-        )
-        if status != "ok":
-            return Message(
-                role=Role.TOOL,
-                content=_encode_workflow_payload(status),
-                tool_call_id=call.id,
-            )
-
-        whisper_line = str(
-            sc.get("whisperLine", f"[{topic_str}] Giữ nhịp ngắn gọn & chốt bước kế tiếp.")
-        )[:120]
-        await emit_event(
-            ActionResultEvent(
-                invocation_id=str(uuid.uuid4()),
-                target=str(pc_host.alias),
-                summary=f"✓ {whisper_line}"[:240],
-                status="ok",
-                gesture=gesture_for_action_status("ok"),
-            )
-        )
-        return Message(
-            role=Role.TOOL,
-            content=_encode_workflow_payload(
-                "ok",
-                {
-                    "template": WorkflowTemplate.DESK_WHISPER.value,
-                    "host": str(pc_host.alias),
-                    "topic": topic_str,
-                    "whisperLine": whisper_line,
-                    "charCount": len(whisper_line),
-                    "silentMode": True,
                 },
             ),
             tool_call_id=call.id,

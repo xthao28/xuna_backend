@@ -2,15 +2,9 @@
 
 - `S15.1`-`S15.4`:
   - Validates tool name mapping (`validate_tool_name`) and deterministic summaries
-    (`ActionSummary`) for `clipboard.write`, `meeting.status`, `meeting.control`,
-    `dev.ports`, and `system.vitals`.
+    (`ActionSummary`) for `clipboard.write`, `dev.ports`, and `system.vitals`.
   - Validates conversational routine extraction (`extract_custom_workflow_candidate`)
-    for `"tắt mic"` / `"bật mic"` (`meeting.control`) and `"kiểm tra pin"` (`system.vitals`).
-- `S15.2`:
-  - `CompositeWorkflowRunner` executes `meeting_ready` (`R1`): pauses local PC music if
-    playing (`media.play_pause`), mutes Smart TV (`tv.control(mute_toggle)`), mutes
-    meeting microphone (`meeting.control(mute_mic)`), and checks meeting status
-    (`meeting.status`) without requiring an `R2` approval.
+    for `"kiểm tra pin"` (`system.vitals`).
 - `S15.3`:
   - `CompositeWorkflowRunner` executes `preview_on_phone` (`R2`): scans active localhost
     dev ports via `dev.ports`, requests **one** `R2` confirmation showing
@@ -165,26 +159,6 @@ def _build_symbiotic_manifest(host_id: HostId) -> Manifest:
                 reversible=False,
             ),
             ToolDescriptor(
-                name="meeting.status",
-                description="Check meeting and microphone status.",
-                input_schema=empty_schema,
-                output_schema=empty_schema,
-                family=ToolFamily.MEDIA,
-                risk=RiskTier.R1,
-                observes=True,
-                reversible=True,
-            ),
-            ToolDescriptor(
-                name="meeting.control",
-                description="Control meeting microphone.",
-                input_schema=any_obj_schema,
-                output_schema=empty_schema,
-                family=ToolFamily.MEDIA,
-                risk=RiskTier.R1,
-                observes=False,
-                reversible=True,
-            ),
-            ToolDescriptor(
                 name="dev.ports",
                 description="Scan active localhost dev ports.",
                 input_schema=any_obj_schema,
@@ -251,8 +225,6 @@ def _build_symbiotic_manifest(host_id: HostId) -> Manifest:
 
 def test_udc15_tool_validation_summaries_and_routine_clauses() -> None:
     assert validate_tool_name("clipboard.write") == ToolFamily.APP
-    assert validate_tool_name("meeting.status") == ToolFamily.MEDIA
-    assert validate_tool_name("meeting.control") == ToolFamily.MEDIA
     assert validate_tool_name("dev.ports") == ToolFamily.APP
     assert validate_tool_name("system.vitals") == ToolFamily.HOST
 
@@ -276,19 +248,18 @@ def test_udc15_tool_validation_summaries_and_routine_clauses() -> None:
     owner_id = uuid.uuid4()
     candidate = extract_custom_workflow_candidate(
         owner_id,
-        "Khi mình nói 'vào họp gấp' thì tắt nhạc, tắt mic rồi kiểm tra pin",
+        "Khi mình nói 'vào họp gấp' thì tắt nhạc rồi kiểm tra pin",
         default_host_alias="MacBook",
     )
     assert candidate is not None
     assert [s.tool for s in candidate.steps] == [
         "media.play_pause",
-        "meeting.control",
         "system.vitals",
     ]
     assert candidate.effective_risk == RiskTier.R1
 
 
-def test_udc15_meeting_ready_preview_on_phone_and_daily_standup() -> None:
+def test_udc15_preview_on_phone_and_daily_standup() -> None:
     async def _scenario() -> None:
         owner_id = uuid.uuid4()
         pc_id = HostId.generate()
@@ -373,28 +344,6 @@ def test_udc15_meeting_ready_preview_on_phone_and_daily_standup() -> None:
                     "isError": False,
                     "_meta": {"xuna/status": "ok", "xuna/durationMs": 4},
                 }
-            if name == "meeting.control":
-                return {
-                    "content": [{"type": "text", "text": "muted"}],
-                    "structuredContent": {
-                        "action": "mute_mic",
-                        "micMuted": True,
-                        "app": "zoom",
-                    },
-                    "isError": False,
-                    "_meta": {"xuna/status": "ok", "xuna/durationMs": 5},
-                }
-            if name == "meeting.status":
-                return {
-                    "content": [{"type": "text", "text": "in zoom"}],
-                    "structuredContent": {
-                        "inMeeting": True,
-                        "app": "zoom",
-                        "micMuted": True,
-                    },
-                    "isError": False,
-                    "_meta": {"xuna/status": "ok", "xuna/durationMs": 3},
-                }
             if name == "dev.ports":
                 return {
                     "content": [{"type": "text", "text": "ports"}],
@@ -456,35 +405,7 @@ def test_udc15_meeting_ready_preview_on_phone_and_daily_standup() -> None:
             clock=lambda: NOW,
         )
 
-        # 1. S15.2: meeting_ready (R1, no approval required)
-        meeting_events: list[ActionStreamEvent] = []
-
-        async def _emit_meeting(ev: ActionStreamEvent) -> None:
-            meeting_events.append(ev)
-
-        meeting_msg = await runner.handle_template_call(
-            ToolCall(
-                id="call-meeting-1",
-                name="workflow_template",
-                arguments={"template": "meeting_ready"},
-            ),
-            owner_id=owner_id,
-            locale=Locale.VI,
-            client_caps=set(),
-            board_available=False,
-            emit_event=_emit_meeting,
-            request_id="req-udc15-1",
-        )
-        meeting_payload = json.loads(meeting_msg.content)
-        assert meeting_payload["status"] == "ok"
-        assert meeting_payload["output"]["inMeeting"] is True
-        assert meeting_payload["output"]["app"] == "zoom"
-        assert meeting_payload["output"]["micMuted"] is True
-        assert meeting_payload["output"]["mediaPaused"] is True
-        assert meeting_payload["output"]["tvMuted"] is True
-        assert not any(isinstance(e, ActionPendingEvent) for e in meeting_events)
-
-        # 2. S15.3: preview_on_phone (R2, single approval, zero URL logging)
+        # 1. S15.3: preview_on_phone (R2, single approval, zero URL logging)
         preview_events: list[ActionStreamEvent] = []
 
         async def _emit_preview(ev: ActionStreamEvent) -> None:
@@ -524,7 +445,7 @@ def test_udc15_meeting_ready_preview_on_phone_and_daily_standup() -> None:
         for audit_ev in audit.events:
             assert "192.168.1.42" not in json.dumps(audit_ev.metadata)
 
-        # 3. S15.5: daily_standup (R1, no approval required)
+        # 2. S15.5: daily_standup (R1, no approval required)
         standup_events: list[ActionStreamEvent] = []
 
         async def _emit_standup(ev: ActionStreamEvent) -> None:
