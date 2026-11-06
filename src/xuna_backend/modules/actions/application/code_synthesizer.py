@@ -111,9 +111,7 @@ def parse_code_specialist_reply(
             code = parsed["scriptCode"].strip()
             if not code:
                 continue
-            rt = _normalize_runtime(
-                str(parsed.get("runtime", default_runtime)), default_runtime
-            )
+            rt = _normalize_runtime(str(parsed.get("runtime", default_runtime)), default_runtime)
             slug = _normalize_slug(
                 str(parsed.get("toolName", default_tool_name)), default_tool_name
             )

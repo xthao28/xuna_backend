@@ -97,6 +97,32 @@ class ActionSummary:
                 return f"Cuộn màn hình ({direction}) trên {target}"[:240]
             case "ui.swipe_drag":
                 return f"Vuốt/kéo trên màn hình {target}"[:240]
+            case "ui.observe":
+                return f"Đọc các phần tử trên màn hình {target}"[:240]
+            case "ui.act":
+                # R3 approvals must show what will be touched: the phone verifies `label`
+                # against the element, so the sentence cannot name a different one.
+                act_type = str(arguments.get("type", ""))
+                label = str(arguments.get("label", ""))[:40]
+                match act_type:
+                    case "activate":
+                        return f"Chạm vào '{label}' trên màn hình {target}"[:240]
+                    case "long_press":
+                        return f"Nhấn giữ '{label}' trên màn hình {target}"[:240]
+                    case "set_text":
+                        typed = str(arguments.get("text", ""))[:60]
+                        return f"Nhập '{typed}' vào '{label}' trên {target}"[:240]
+                    case "scroll" | "swipe":
+                        direction = str(arguments.get("direction", ""))[:12]
+                        verb = "Cuộn" if act_type == "scroll" else "Vuốt"
+                        return f"{verb} màn hình ({direction}) trên {target}"[:240]
+                    case "global":
+                        key = str(arguments.get("name", ""))[:16]
+                        return f"Bấm nút hệ thống ({key}) trên {target}"[:240]
+                    case _:
+                        return f"Thao tác giao diện trên {target}"[:240]
+            case "ui.wait_for":
+                return f"Chờ màn hình hiện nội dung mong đợi trên {target}"[:240]
             case "ui.notifications":
                 return f"Mở bảng thông báo trên {target}"[:240]
             case "ui.quick_settings":
@@ -316,6 +342,30 @@ class ActionSummary:
                 return f"Scroll ({direction}) on {target}"[:240]
             case "ui.swipe_drag":
                 return f"Swipe/drag on {target}"[:240]
+            case "ui.observe":
+                return f"Read on-screen elements on {target}"[:240]
+            case "ui.act":
+                act_type = str(arguments.get("type", ""))
+                label = str(arguments.get("label", ""))[:40]
+                match act_type:
+                    case "activate":
+                        return f"Tap '{label}' on {target}"[:240]
+                    case "long_press":
+                        return f"Long-press '{label}' on {target}"[:240]
+                    case "set_text":
+                        typed = str(arguments.get("text", ""))[:60]
+                        return f"Type '{typed}' into '{label}' on {target}"[:240]
+                    case "scroll" | "swipe":
+                        direction = str(arguments.get("direction", ""))[:12]
+                        verb = "Scroll" if act_type == "scroll" else "Swipe"
+                        return f"{verb} the screen ({direction}) on {target}"[:240]
+                    case "global":
+                        key = str(arguments.get("name", ""))[:16]
+                        return f"Press system key ({key}) on {target}"[:240]
+                    case _:
+                        return f"UI action on {target}"[:240]
+            case "ui.wait_for":
+                return f"Wait for the expected screen on {target}"[:240]
             case "ui.notifications":
                 return f"Open notifications shade on {target}"[:240]
             case "ui.quick_settings":

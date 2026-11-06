@@ -77,9 +77,7 @@ class SqlApprovalRepository:
             return None
         return _to_domain(row)
 
-    async def reject_pending_for_owner(
-        self, owner_id: uuid.UUID, now: datetime
-    ) -> int:
+    async def reject_pending_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int:
         stmt = select(ActionApprovalModel).where(
             ActionApprovalModel.owner_id == owner_id,
             ActionApprovalModel.state == ApprovalState.PENDING.value,
@@ -103,9 +101,7 @@ class InMemoryApprovalRepository:
     async def get(self, approval_id: uuid.UUID) -> ApprovalRequest | None:
         return self._items.get(approval_id)
 
-    async def reject_pending_for_owner(
-        self, owner_id: uuid.UUID, now: datetime
-    ) -> int:
+    async def reject_pending_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int:
         count = 0
         for aid, req in list(self._items.items()):
             if req.owner_id == owner_id and req.state == ApprovalState.PENDING:

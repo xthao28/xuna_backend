@@ -130,9 +130,7 @@ class InMemoryApprovalBroker:
         slot.event.set()
         return slot.request
 
-    def reject_all_for_owner(
-        self, owner_id: uuid.UUID, now: datetime
-    ) -> list[ApprovalRequest]:
+    def reject_all_for_owner(self, owner_id: uuid.UUID, now: datetime) -> list[ApprovalRequest]:
         rejected: list[ApprovalRequest] = []
         for slot in list(self._slots.values()):
             if slot.request.owner_id == owner_id and slot.request.state == ApprovalState.PENDING:

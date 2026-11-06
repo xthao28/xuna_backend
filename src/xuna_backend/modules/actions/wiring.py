@@ -13,10 +13,14 @@ from xuna_backend.modules.actions.infrastructure.brokers import (
     InMemoryLocalResultBroker,
 )
 from xuna_backend.modules.actions.infrastructure.repository import SqlApprovalRepository
+from xuna_backend.modules.actions.infrastructure.standing_repository import (
+    SqlStandingApprovalRepository,
+)
 
 
 def wire_actions(app: FastAPI) -> None:
     app.state.approval_repository = SqlApprovalRepository
+    app.state.standing_approval_repository = SqlStandingApprovalRepository
     app.state.approval_broker = InMemoryApprovalBroker()
     app.state.local_result_broker = InMemoryLocalResultBroker()
     app.state.last_target_store = InMemoryLastTargetStore()

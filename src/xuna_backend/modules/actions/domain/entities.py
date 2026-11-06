@@ -135,6 +135,10 @@ class ActionPendingEvent:
     host_id: str | None = None
     args_sha256: str = ""
     expires_at: str = ""
+    # Present only when this exact call may be pre-approved (ADR-0014 D1): the tool name and
+    # the validated arguments, so the owner's phone can sign a standing approval for them.
+    standing_tool: str | None = None
+    standing_arguments: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

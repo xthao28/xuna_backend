@@ -11,6 +11,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalState,
     LocalActionReport,
 )
+from xuna_backend.modules.actions.domain.standing_approval import StandingApproval
 from xuna_backend.modules.hosts.domain.entities import HostId
 
 
@@ -21,9 +22,32 @@ class ApprovalRepository(Protocol):
 
     async def get(self, approval_id: uuid.UUID) -> ApprovalRequest | None: ...
 
-    async def reject_pending_for_owner(
-        self, owner_id: uuid.UUID, now: datetime
-    ) -> int: ...
+    async def reject_pending_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int: ...
+
+
+class StandingApprovalRepository(Protocol):
+    """Durable store for `StandingApproval` records (`host_standing_approvals`, ADR-0014)."""
+
+    async def save(self, approval: StandingApproval) -> None: ...
+
+    async def get(self, owner_id: uuid.UUID, approval_id: uuid.UUID) -> StandingApproval | None: ...
+
+    async def list_active(self, owner_id: uuid.UUID, now: datetime) -> list[StandingApproval]: ...
+
+    async def consume_match(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        tool: str,
+        args_sha256: str,
+        now: datetime,
+    ) -> StandingApproval | None:
+        """Atomically finds a usable approval for exactly this call and counts one use."""
+        ...
+
+    async def revoke(self, owner_id: uuid.UUID, approval_id: uuid.UUID, now: datetime) -> bool:
+        """Marks an owner's approval revoked. `False` when it does not exist or was revoked."""
+        ...
 
 
 class ApprovalBroker(Protocol):
@@ -49,9 +73,7 @@ class ApprovalBroker(Protocol):
         """Applies `decision` if `owner_id` owns the request. Idempotent on repeat calls."""
         ...
 
-    def reject_all_for_owner(
-        self, owner_id: uuid.UUID, now: datetime
-    ) -> list[ApprovalRequest]: ...
+    def reject_all_for_owner(self, owner_id: uuid.UUID, now: datetime) -> list[ApprovalRequest]: ...
 
     def cancel(self, approval_id: uuid.UUID) -> None: ...
 

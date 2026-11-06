@@ -558,6 +558,11 @@ async def turn(
                             pending_payload["argsSha256"] = pending.args_sha256
                         if pending.expires_at is not None:
                             pending_payload["expiresAt"] = pending.expires_at
+                        if pending.standing_tool is not None:
+                            pending_payload["standing"] = {
+                                "tool": pending.standing_tool,
+                                "arguments": pending.standing_arguments or {},
+                            }
                         yield _sse("action_pending", pending_payload)
                     case BoardHidRequestEvent() as hid_req:
                         yield _sse(

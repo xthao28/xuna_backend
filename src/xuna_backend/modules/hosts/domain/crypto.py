@@ -14,6 +14,7 @@ from xuna_backend.modules.hosts.domain.entities import HostId
 DOMAIN = b"xuna.host.proof.v1\x00"
 SAS_DOMAIN = b"xuna.host.sas.v1"
 APPROVAL_DOMAIN = b"xuna.approval.v1\x00"
+PREAPPROVAL_DOMAIN = b"xuna.preapproval.v1\x00"
 NONCE_SIZE = 32
 ENROLLMENT_CODE_SIZE = 16
 PUBLIC_KEY_SIZE = 65
@@ -120,6 +121,29 @@ def approval_proof_message(
         raise ValueError("approval proof fields must be non-empty")
     body = f"{approval_id}|{args_sha256_hex}|{host_id}|{expires_at_iso}".encode()
     return APPROVAL_DOMAIN + body
+
+
+def preapproval_proof_message(
+    approval_id: str,
+    tool: str,
+    args_sha256_hex: str,
+    host_id: str,
+    expires_at_epoch_s: int,
+    max_uses: int,
+) -> bytes:
+    """Builds the phone-signed standing approval message (ADR-0014 D1):
+    `b"xuna.preapproval.v1\\x00" || approvalId || "|" || tool || "|" || argsSha256 || "|"
+    || hostId || "|" || expiresAtEpochSeconds || "|" || maxUses`.
+
+    `maxUses` is `0` for unlimited. The expiry is whole epoch seconds so the app and the
+    backend never disagree about timestamp formatting.
+    """
+    if not approval_id or not tool or not args_sha256_hex or not host_id:
+        raise ValueError("preapproval proof fields must be non-empty")
+    if expires_at_epoch_s <= 0 or max_uses < 0:
+        raise ValueError("preapproval expiry must be positive and maxUses non-negative")
+    body = f"{approval_id}|{tool}|{args_sha256_hex}|{host_id}|{expires_at_epoch_s}|{max_uses}"
+    return PREAPPROVAL_DOMAIN + body.encode()
 
 
 def _reject_floats(value: object) -> None:

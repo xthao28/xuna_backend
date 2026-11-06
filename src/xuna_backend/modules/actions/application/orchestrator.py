@@ -37,6 +37,7 @@ from xuna_backend.modules.actions.application.ports import (
     ApprovalScopeStore,
     LastTargetStore,
     LocalResultBroker,
+    StandingApprovalRepository,
 )
 from xuna_backend.modules.actions.application.prompts import (
     BOARD_TARGET_LABEL_EN,
@@ -88,6 +89,7 @@ from xuna_backend.modules.actions.domain.schema_validator import (
     SchemaDefinitionError,
     SchemaValidator,
 )
+from xuna_backend.modules.actions.domain.standing_approval import is_standing_eligible
 from xuna_backend.modules.actions.domain.target_resolver import (
     TargetResolutionStatus,
     TargetResolver,
@@ -184,7 +186,9 @@ class Orchestrator:
         host_default_store: InMemoryHostDefaultStore | None = None,
         clock: Callable[[], datetime] | None = None,
         code_generator: TextGenerator | None = None,
+        standing_repo: StandingApprovalRepository | None = None,
     ) -> None:
+        self._standing_repo = standing_repo
         self._host_repo = host_repo
         self._hub = hub
         self._approval_repo = approval_repo
@@ -636,6 +640,23 @@ class Orchestrator:
 
         approval_req: ApprovalRequest | None = None
         if descriptor.risk.level >= RiskTier.R2.level:
+            # ADR-0014 D1: an owner approval given in advance for exactly this call. The grant
+            # check above already ran, so suspended grants (and E-Stop, which suspends them)
+            # make a standing approval inert. Eligibility is re-checked against the manifest as
+            # it is now, so a shrunken allowlist stops the approval from matching.
+            standing_hit = None
+            if (
+                self._standing_repo is not None
+                and descriptor.risk == RiskTier.R2
+                and is_standing_eligible(descriptor, clean_args)
+            ):
+                standing_hit = await self._standing_repo.consume_match(
+                    ctx.owner_id,
+                    host.host_id,
+                    descriptor.name,
+                    args_sha256(clean_args),
+                    now,
+                )
             has_15m_scope = (
                 descriptor.risk == RiskTier.R2
                 and self._scope_store is not None
@@ -644,7 +665,41 @@ class Orchestrator:
                 )
             )
             expires_at = now + timedelta(seconds=APPROVAL_TTL_SECONDS)
-            if has_15m_scope:
+            if standing_hit is not None:
+                approval_req = ApprovalRequest(
+                    approval_id=uuid.uuid4(),
+                    owner_id=ctx.owner_id,
+                    host_id=host.host_id,
+                    target_alias=target_alias,
+                    tool=descriptor.name,
+                    args_sha256=args_sha256(clean_args),
+                    risk=descriptor.risk,
+                    summary=ActionSummary.format_pending(
+                        descriptor.name, clean_args, target_alias, ctx.locale
+                    ),
+                    created_at=now,
+                    expires_at=expires_at,
+                    state=ApprovalState.APPROVED,
+                    decided_at=now,
+                    scope=ApprovalScope.ONCE,
+                )
+                await self._approval_repo.save(approval_req)
+                await self._audit.record(
+                    AuditEvent(
+                        owner_id=ctx.owner_id,
+                        action=AuditAction.HOST_PREAPPROVAL_USED,
+                        occurred_at=now,
+                        subject=str(host.host_id),
+                        request_id=ctx.request_id,
+                        metadata={
+                            "approvalId": str(standing_hit.approval_id),
+                            "tool": descriptor.name,
+                            "risk": descriptor.risk.value,
+                            "uses": standing_hit.uses,
+                        },
+                    )
+                )
+            elif has_15m_scope:
                 approval_req = ApprovalRequest(
                     approval_id=uuid.uuid4(),
                     owner_id=ctx.owner_id,
@@ -679,6 +734,14 @@ class Orchestrator:
                     )
                 )
             else:
+                # Offer "always allow this" only when the backend could accept it (ADR-0014).
+                offer = (
+                    self._standing_repo is not None
+                    and descriptor.risk == RiskTier.R2
+                    and is_standing_eligible(descriptor, clean_args)
+                )
+                standing_offer_tool = descriptor.name if offer else None
+                standing_offer_args = dict(clean_args) if offer else None
                 approval_req = ApprovalRequest(
                     approval_id=uuid.uuid4(),
                     owner_id=ctx.owner_id,
@@ -706,6 +769,8 @@ class Orchestrator:
                         host_id=str(host.host_id),
                         args_sha256=approval_req.args_sha256,
                         expires_at=expires_at.astimezone(UTC).isoformat(),
+                        standing_tool=standing_offer_tool,
+                        standing_arguments=standing_offer_args,
                     )
                 )
 

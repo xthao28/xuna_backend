@@ -77,6 +77,9 @@ _UI_AUTOMATION_TOOLS = frozenset(
         "ui__scroll",
         "ui__long_press",
         "ui__swipe_drag",
+        "ui__observe",
+        "ui__act",
+        "ui__wait_for",
         "browser__semantic_snapshot",
     }
 )
@@ -92,7 +95,12 @@ _UI_SKILL_MODULE_VI = (
     "  3) Xác minh (`Verify`): Đọc lại cây giao diện mới nhất trả về sau thao tác để "
     "xác nhận kết quả hoặc thực hiện bước kế tiếp. Nếu gặp `stale_ref`, "
     '`ambiguous_target`, hoặc `disposition.retry="unsafe"`, bắt buộc inspect lại cửa '
-    "sổ để lấy snapshot mới trước khi thử lại."
+    "sổ để lấy snapshot mới trước khi thử lại.\n"
+    "  Trên điện thoại Android: `ui__observe` trả `snapshotId` và `ref` từng phần tử; "
+    "`ui__act` chỉ dùng `ref` của snapshot mới nhất. Gặp `target_stale` hoặc "
+    "`package_changed` thì gọi `ui__observe` lại; `no_visible_change` nghĩa là thao tác "
+    "không làm màn hình đổi (không coi là thành công, không lặp mù quáng); "
+    "`ui__wait_for` để chờ màn hình xuất hiện thay vì đoán thời gian."
 )
 
 _UI_SKILL_MODULE_EN = (
@@ -106,7 +114,12 @@ _UI_SKILL_MODULE_EN = (
     "  3) Verify: Inspect the updated UI tree returned in the tool output to confirm "
     "completion or continue. If a tool returns `stale_ref`, `ambiguous_target`, or "
     '`disposition.retry="unsafe"`, re-inspect the window to obtain fresh snapshot '
-    "references before retrying."
+    "references before retrying.\n"
+    "  On an Android phone: `ui__observe` returns a `snapshotId` and a `ref` per element; "
+    "`ui__act` accepts only refs from the latest snapshot. On `target_stale` or "
+    "`package_changed`, call `ui__observe` again; `no_visible_change` means the action did "
+    "not change the screen (it is not a success, and do not repeat it blindly); use "
+    "`ui__wait_for` to wait for a screen instead of guessing delays."
 )
 
 _FORGE_SYNTHESIS_TOOLS = frozenset(

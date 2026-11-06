@@ -50,6 +50,9 @@ class AuditAction(StrEnum):
     HOST_TOOL_DENIED = "host.tool_denied"
     HOST_APPROVAL_GRANTED = "host.approval_granted"
     HOST_APPROVAL_REJECTED = "host.approval_rejected"
+    HOST_PREAPPROVAL_CREATED = "host.preapproval_created"
+    HOST_PREAPPROVAL_USED = "host.preapproval_used"
+    HOST_PREAPPROVAL_REVOKED = "host.preapproval_revoked"
     BOARD_HID_REQUESTED = "board.hid_requested"
 
 

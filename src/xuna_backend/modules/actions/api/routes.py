@@ -25,6 +25,10 @@ from xuna_backend.modules.actions.application.ports import (
     ApprovalScopeStore,
     LastTargetStore,
     LocalResultBroker,
+    StandingApprovalRepository,
+)
+from xuna_backend.modules.actions.application.standing_approvals import (
+    StandingApprovalService,
 )
 from xuna_backend.modules.actions.application.workflows import (
     InMemoryBoardWorkflowSlotStore,
@@ -34,6 +38,10 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalDecision,
     ApprovalRequest,
     ApprovalScope,
+)
+from xuna_backend.modules.actions.domain.standing_approval import (
+    StandingApproval,
+    StandingApprovalError,
 )
 from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.audit.domain.event import AuditEvent
@@ -58,6 +66,20 @@ class DecideApprovalBody(BaseModel):
     scope: ApprovalScope = ApprovalScope.ONCE
     signature: str | None = Field(default=None, min_length=80, max_length=120)
     publicKey: str | None = Field(default=None, min_length=80, max_length=120)
+
+
+class CreateStandingApprovalBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schemaVersion: Literal[1] = 1
+    approvalId: uuid.UUID
+    hostId: uuid.UUID
+    tool: str = Field(min_length=3, max_length=64)
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    expiresAtEpoch: int | None = Field(default=None, gt=0)
+    maxUses: int | None = Field(default=None, ge=1, le=1000)
+    signature: str = Field(min_length=80, max_length=120)
+    publicKey: str = Field(min_length=80, max_length=120)
 
 
 class EmergencyStopBody(BaseModel):
@@ -175,9 +197,7 @@ class _SessionPerCallHostRepository:
             if s is not None:
                 await s.commit()
 
-    async def suspend_r2_plus_grants_for_owner(
-        self, owner_id: uuid.UUID, now: datetime
-    ) -> int:
+    async def suspend_r2_plus_grants_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int:
         async with _open_short_session(self._state) as s:
             count = await self._repo(s).suspend_r2_plus_grants_for_owner(owner_id, now)
             if s is not None:
@@ -213,14 +233,60 @@ class _SessionPerCallApprovalRepository:
         async with _open_short_session(self._state) as s:
             return await self._repo(s).get(approval_id)
 
-    async def reject_pending_for_owner(
-        self, owner_id: uuid.UUID, now: datetime
-    ) -> int:
+    async def reject_pending_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int:
         async with _open_short_session(self._state) as s:
             count = await self._repo(s).reject_pending_for_owner(owner_id, now)
             if s is not None:
                 await s.commit()
             return count
+
+
+class _SessionPerCallStandingRepository:
+    """Opens a short-lived DB session per call so a long-lived stream never holds one."""
+
+    def __init__(self, app_state: Any) -> None:
+        self._state = app_state
+
+    def _repo(self, session: Any) -> StandingApprovalRepository:
+        factory: Callable[[Any], StandingApprovalRepository] = (
+            self._state.standing_approval_repository
+        )
+        return factory(session)
+
+    async def save(self, approval: StandingApproval) -> None:
+        async with _open_short_session(self._state) as s:
+            await self._repo(s).save(approval)
+            if s is not None:
+                await s.commit()
+
+    async def get(self, owner_id: uuid.UUID, approval_id: uuid.UUID) -> StandingApproval | None:
+        async with _open_short_session(self._state) as s:
+            return await self._repo(s).get(owner_id, approval_id)
+
+    async def list_active(self, owner_id: uuid.UUID, now: datetime) -> list[StandingApproval]:
+        async with _open_short_session(self._state) as s:
+            return await self._repo(s).list_active(owner_id, now)
+
+    async def consume_match(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        tool: str,
+        args_sha256: str,
+        now: datetime,
+    ) -> StandingApproval | None:
+        async with _open_short_session(self._state) as s:
+            found = await self._repo(s).consume_match(owner_id, host_id, tool, args_sha256, now)
+            if s is not None:
+                await s.commit()
+            return found
+
+    async def revoke(self, owner_id: uuid.UUID, approval_id: uuid.UUID, now: datetime) -> bool:
+        async with _open_short_session(self._state) as s:
+            done = await self._repo(s).revoke(owner_id, approval_id, now)
+            if s is not None:
+                await s.commit()
+            return done
 
 
 class _SessionPerCallAuditLog:
@@ -248,12 +314,8 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
     approval_broker: ApprovalBroker = app_state.approval_broker
     local_result_broker: LocalResultBroker = app_state.local_result_broker
     last_target_store: LastTargetStore = app_state.last_target_store
-    scope_store: ApprovalScopeStore | None = getattr(
-        app_state, "approval_scope_store", None
-    )
-    verifier: SignatureVerifier | None = getattr(
-        app_state, "signature_verifier", None
-    )
+    scope_store: ApprovalScopeStore | None = getattr(app_state, "approval_scope_store", None)
+    verifier: SignatureVerifier | None = getattr(app_state, "signature_verifier", None)
     code_gen = getattr(app_state, "code_text_generator", None) or getattr(
         app_state, "expert_text_generator", None
     )
@@ -268,6 +330,11 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
         scope_store=scope_store,
         verifier=verifier,
         code_generator=code_gen,
+        standing_repo=(
+            _SessionPerCallStandingRepository(app_state)
+            if getattr(app_state, "standing_approval_repository", None) is not None
+            else None
+        ),
     )
 
 
@@ -304,9 +371,7 @@ async def decide_action_approval(
     scope_store: ApprovalScopeStore | None = getattr(
         request.app.state, "approval_scope_store", None
     )
-    verifier: SignatureVerifier | None = getattr(
-        request.app.state, "signature_verifier", None
-    )
+    verifier: SignatureVerifier | None = getattr(request.app.state, "signature_verifier", None)
 
     sig_bytes: bytes | None = None
     pub_bytes: bytes | None = None
@@ -358,6 +423,117 @@ async def decide_action_approval(
             else None
         ),
     }
+
+
+_STANDING_STATUS: dict[str, HTTPStatus] = {
+    "host_not_found": HTTPStatus.NOT_FOUND,
+    "unknown_tool": HTTPStatus.NOT_FOUND,
+    "standing_approval_conflict": HTTPStatus.CONFLICT,
+    "invalid_args": HTTPStatus.UNPROCESSABLE_ENTITY,
+    "invalid_expiry": HTTPStatus.UNPROCESSABLE_ENTITY,
+    "invalid_max_uses": HTTPStatus.UNPROCESSABLE_ENTITY,
+    "signature_unverifiable": HTTPStatus.SERVICE_UNAVAILABLE,
+}
+
+
+def _standing_json(approval: StandingApproval) -> dict[str, Any]:
+    return {
+        "approvalId": str(approval.approval_id),
+        "hostId": str(approval.host_id),
+        "tool": approval.tool,
+        "summary": approval.summary,
+        "target": approval.target_alias,
+        "createdAt": approval.created_at.astimezone(UTC).isoformat(),
+        "expiresAt": approval.expires_at.astimezone(UTC).isoformat(),
+        "maxUses": approval.max_uses,
+        "uses": approval.uses,
+    }
+
+
+def _standing_service(request: Request, session: Any) -> StandingApprovalService:
+    standing_factory: Callable[[object], StandingApprovalRepository] | None = getattr(
+        request.app.state, "standing_approval_repository", None
+    )
+    if standing_factory is None:
+        raise AppError("unsupported", HTTPStatus.NOT_IMPLEMENTED)
+    host_factory: Callable[[object], HostRepository] = state(request, "host_repository")
+    audit_factory: Callable[[object], AuditLog] = state(request, "audit_log")
+    return StandingApprovalService(
+        host_repo=host_factory(session),
+        repository=standing_factory(session),
+        audit=audit_factory(session),
+        verifier=getattr(request.app.state, "signature_verifier", None),
+    )
+
+
+@router.post("/standing-approvals", status_code=HTTPStatus.CREATED)
+async def create_standing_approval(
+    body: CreateStandingApprovalBody,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+) -> dict[str, Any]:
+    """Creates a phone-signed standing approval for one exact R2 call (ADR-0014 D1).
+
+    Idempotent on `approvalId`: repeating the same request returns the stored approval; the
+    same id with different content is `standing_approval_conflict`.
+    """
+    try:
+        sig_bytes = _decode_b64_flex(body.signature, 64)
+        pub_bytes = _decode_b64_flex(body.publicKey, 65)
+    except ValueError as error:
+        raise AppError("approval_signature_invalid", HTTPStatus.BAD_REQUEST, str(error)) from error
+    service = _standing_service(request, session)
+    try:
+        approval = await service.create(
+            owner_id=owner.owner_id,
+            approval_id=body.approvalId,
+            host_id=HostId(body.hostId),
+            tool=body.tool,
+            arguments=dict(body.arguments),
+            expires_at_epoch_s=body.expiresAtEpoch,
+            max_uses=body.maxUses,
+            signature=sig_bytes,
+            signer_public_key=pub_bytes,
+            request_id=_request_id(request),
+        )
+    except StandingApprovalError as error:
+        status = _STANDING_STATUS.get(error.code, HTTPStatus.BAD_REQUEST)
+        raise AppError(error.code, status, error.code) from error
+    await session.commit()
+    return _standing_json(approval)
+
+
+@router.get("/standing-approvals")
+async def list_standing_approvals(
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+) -> dict[str, Any]:
+    """Lists the owner's usable standing approvals (not revoked, expired or used up)."""
+    service = _standing_service(request, session)
+    items = await service.list_active(owner.owner_id)
+    return {"items": [_standing_json(item) for item in items]}
+
+
+@router.delete("/standing-approvals/{approval_id}")
+async def revoke_standing_approval(
+    approval_id: uuid.UUID,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+) -> dict[str, Any]:
+    """Revokes a standing approval. Another owner's id is `404 not_found`."""
+    service = _standing_service(request, session)
+    found = await service.revoke(
+        owner_id=owner.owner_id,
+        approval_id=approval_id,
+        request_id=_request_id(request),
+    )
+    if not found:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND)
+    await session.commit()
+    return {"approvalId": str(approval_id), "revoked": True}
 
 
 @router.post("/stop")
@@ -513,9 +689,7 @@ async def trigger_board_workflow_route(
     - `R2` asks approval on the phone.
     - `R3` is forbidden (`UDC-T15`, 403 `workflow_risk_forbidden`)."""
     host_factory: Callable[[object], HostRepository] = state(request, "host_repository")
-    approval_factory: Callable[[object], ApprovalRepository] = state(
-        request, "approval_repository"
-    )
+    approval_factory: Callable[[object], ApprovalRepository] = state(request, "approval_repository")
     audit_factory: Callable[[object], AuditLog] = state(request, "audit_log")
     hub: HostSessionHub = state(request, "host_session_hub")
     approval_broker: ApprovalBroker = state(request, "approval_broker")

@@ -625,6 +625,11 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         pending_msg["argsSha256"] = event.args_sha256
                                     if event.expires_at is not None:
                                         pending_msg["expiresAt"] = event.expires_at
+                                    if event.standing_tool is not None:
+                                        pending_msg["standing"] = {
+                                            "tool": event.standing_tool,
+                                            "arguments": event.standing_arguments or {},
+                                        }
                                     await websocket.send_json(pending_msg)
                                 elif isinstance(event, BoardHidRequestEvent):
                                     await websocket.send_json(

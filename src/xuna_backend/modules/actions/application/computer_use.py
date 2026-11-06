@@ -155,10 +155,7 @@ def is_password_ui_node(node: dict[str, Any]) -> bool:
         return True
     name = str(node.get("name") or "").lower()
     return (
-        "password" in name
-        or "mật khẩu" in name
-        or "mat khau" in name
-        or "passcode" in name
+        "password" in name or "mật khẩu" in name or "mat khau" in name or "passcode" in name
     ) and ("text" in role or "edit" in role or "field" in role or "input" in role)
 
 
@@ -187,9 +184,7 @@ def wrap_untrusted_observation(observation: dict[str, Any]) -> str:
     safe_obs.pop("jpegBase64", None)  # Never serialize raw screenshot pixels into text prompt
     raw_nodes = safe_obs.get("nodes")
     if isinstance(raw_nodes, list):
-        safe_obs["nodes"] = redact_ui_tree_nodes(
-            [n for n in raw_nodes if isinstance(n, dict)]
-        )
+        safe_obs["nodes"] = redact_ui_tree_nodes([n for n in raw_nodes if isinstance(n, dict)])
     payload = json.dumps(safe_obs, ensure_ascii=False, sort_keys=True)
     return f"{UNTRUSTED_OBSERVATION_BANNER}\n{payload}\n[/UNTRUSTED_SCREEN_OBSERVATION]"
 
@@ -359,9 +354,7 @@ class ComputerUseSessionRunner:
             host_id=str(proof.host_id),
             expires_at_iso=proof.expires_at_iso,
         )
-        if not self._verifier.verify(
-            proof.signer_public_key, signing_payload, proof.signature
-        ):
+        if not self._verifier.verify(proof.signer_public_key, signing_payload, proof.signature):
             raise ComputerUseError("approval_signature_invalid")
 
     async def start_session(
@@ -481,9 +474,7 @@ class ComputerUseSessionRunner:
         if not app_id or app_id not in state.allowed_apps:
             state.outside_allowlist_attempts += 1
             raise ComputerUseError("app_not_in_session_allowlist")
-        url_or_domain = str(
-            observation.get("url") or observation.get("domain") or ""
-        ).strip()
+        url_or_domain = str(observation.get("url") or observation.get("domain") or "").strip()
         if url_or_domain and (
             not state.allowed_domains
             or not _domain_matches_allowlist(url_or_domain, state.allowed_domains)
@@ -512,9 +503,7 @@ class ComputerUseSessionRunner:
 
         raw_nodes = raw_tree.get("nodes")
         node_list = (
-            [n for n in raw_nodes if isinstance(n, dict)]
-            if isinstance(raw_nodes, list)
-            else []
+            [n for n in raw_nodes if isinstance(n, dict)] if isinstance(raw_nodes, list) else []
         )
         redacted_nodes = redact_ui_tree_nodes(node_list)
 
@@ -604,9 +593,7 @@ class ComputerUseSessionRunner:
         if tool_name == "input.type_text":
             requires_r3 = True
         elif tool_name == "input.click":
-            node_name = str(
-                (target_node or {}).get("name") or arguments.get("elementName") or ""
-            )
+            node_name = str((target_node or {}).get("name") or arguments.get("elementName") or "")
             if is_consequential_element_name(node_name):
                 requires_r3 = True
         elif tool_name == "input.key":

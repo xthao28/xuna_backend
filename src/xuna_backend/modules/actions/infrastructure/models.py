@@ -1,4 +1,5 @@
-"""SQLAlchemy ORM model for `action_approvals` (UDC-4 §5.2, UDC-7).
+"""SQLAlchemy ORM models for `action_approvals` (UDC-4 §5.2, UDC-7) and
+`host_standing_approvals` (ADR-0014 D1).
 
 No raw arguments are stored — only `args_sha256` and the deterministic summary.
 """
@@ -6,7 +7,7 @@ No raw arguments are stored — only `args_sha256` and the deterministic summary
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, LargeBinary, String
+from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -41,3 +42,32 @@ class ActionApprovalModel(Base):
     scope: Mapped[str] = mapped_column(String(24), nullable=False, default="once")
     signature: Mapped[bytes | None] = mapped_column(LargeBinary(64), nullable=True)
     signer_public_key: Mapped[bytes | None] = mapped_column(LargeBinary(65), nullable=True)
+
+
+class HostStandingApprovalModel(Base):
+    __tablename__ = "host_standing_approvals"
+
+    approval_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("owners.owner_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    host_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("hosts.host_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    target_alias: Mapped[str] = mapped_column(String(32), nullable=False)
+    tool: Mapped[str] = mapped_column(String(64), nullable=False)
+    args_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str] = mapped_column(String(240), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    uses: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    signature: Mapped[bytes] = mapped_column(LargeBinary(64), nullable=False)
+    signer_public_key: Mapped[bytes] = mapped_column(LargeBinary(65), nullable=False)

@@ -211,9 +211,7 @@ class TargetResolver:
                         choices=eligible_aliases,
                         reason="pronoun_other_without_recent_target",
                     )
-                remaining = [
-                    h for h in filtered_eligible if h.host_id != last_host.host_id
-                ]
+                remaining = [h for h in filtered_eligible if h.host_id != last_host.host_id]
                 if folded_needle in _DESKTOP_OTHER_PRONOUNS:
                     remaining = [h for h in remaining if _is_desktop(h)]
                 elif folded_needle in _MOBILE_OTHER_PRONOUNS:
