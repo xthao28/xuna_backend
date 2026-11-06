@@ -56,13 +56,11 @@ from xuna_backend.modules.hosts.domain.entities import (
     validate_tool_name,
 )
 from xuna_backend.modules.symbiotic.api.routes import (
-    evaluate_claw_mind,
     evaluate_frontier_2026,
     evaluate_ui_accessibility,
     execute_workshop_chain,
 )
 from xuna_backend.modules.symbiotic.application.schemas import (
-    ClawMindRequest,
     Frontier2026Request,
     UiAccessibilityRequest,
     WorkshopChainRequest,
@@ -640,11 +638,9 @@ def test_workshop_skill_chain_and_self_test_bench() -> None:
     assert len(api_resp.compactIndex) == 2
 
 
-def test_claw_mind_memory_aria_subagent_and_hooks() -> None:
+def test_memory_vault_and_semantic_snapshot_names_and_summary() -> None:
     assert validate_tool_name("memory.markdown_vault") == ToolFamily.APP
     assert validate_tool_name("browser.semantic_snapshot") == ToolFamily.URL
-    assert validate_tool_name("subagent.spawn_and_poll") == ToolFamily.APP
-    assert validate_tool_name("schedule.cron_and_hooks") == ToolFamily.APP
 
     vi_mem = ActionSummary.format_pending(
         "memory.markdown_vault",
@@ -653,37 +649,6 @@ def test_claw_mind_memory_aria_subagent_and_hooks() -> None:
         Locale.VI,
     )
     assert "Markdown" in vi_mem
-
-    api_resp = asyncio.run(
-        evaluate_claw_mind(
-            ClawMindRequest(
-                sessionTranscript=(
-                    "Chủ nhân thích bảng CSV gọn (api_key=sk-proj-secret1234567890abcdef). "
-                    "Đã chốt quy trình đối soát tháng 11."
-                ),
-                rawHtml='<button>Tải hóa đơn PDF</button><a href="/export.csv">Xuất CSV</a>',
-                subagentGoal="Quét sâu 30 CV ứng viên Backend",
-                tokenBudget=2048,
-                lifecycleEvent="on_morning_wake",
-                targetSkillId="skill-web-harvest-invoices-1",
-            )
-        )
-    )
-    assert api_resp.flushedFactsCount >= 2
-    assert api_resp.redactedSecretsCount >= 1
-    assert "[REDACTED]" in api_resp.ownerProfileMarkdown
-    assert api_resp.ariaElementCount == 2
-    assert api_resp.tokenReductionPercent >= 80
-    assert "[ref=e1]" in api_resp.compactAriaTree
-    assert api_resp.subagentTokensUsed <= 2048
-    assert api_resp.subagentLlmTokensUsed == 0
-    assert api_resp.contextSavedPercent == 88
-    assert api_resp.criticPassed is True
-    assert api_resp.criticConfidenceScore == 98
-    assert len(api_resp.specialistWorkers) == 4
-    assert api_resp.specialistWorkers[0]["role"] == "scout_harvester"
-    assert api_resp.specialistWorkers[0]["readOnly"] is True
-    assert len(api_resp.activeHooks) == 1
 
 
 def test_frontier_2026_evaluation_and_drop_extension_guard() -> None:

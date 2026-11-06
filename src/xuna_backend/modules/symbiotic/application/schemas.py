@@ -246,55 +246,6 @@ class WorkshopChainResponse(BaseModel):
     summaryVi: str
 
 
-class ClawMindRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    sessionTranscript: str = Field(
-        default="Chủ nhân thích báo cáo CSV ngắn gọn và kiểm tra hóa đơn mỗi sáng.",
-        min_length=1,
-        max_length=4000,
-    )
-    rawHtml: str = Field(
-        default='<button>Tải hóa đơn PDF</button><a href="/export.csv">Xuất CSV</a>',
-        min_length=1,
-        max_length=4000,
-    )
-    subagentGoal: str = Field(
-        default="Quét sâu 30 CV ứng viên và lọc top 5 ứng viên",
-        min_length=1,
-        max_length=400,
-    )
-    tokenBudget: int = Field(default=2048, ge=256, le=8192)
-    lifecycleEvent: str = Field(default="on_morning_wake", min_length=1, max_length=64)
-    targetSkillId: str = Field(default="skill-web-harvest-invoices-1", min_length=1, max_length=64)
-
-
-class ClawMindResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    schemaVersion: int = 1
-    vaultFolder: str
-    flushedFactsCount: int
-    redactedSecretsCount: int
-    soulMarkdown: str
-    ownerProfileMarkdown: str
-    memoryJournalMarkdown: str
-    ariaSnapshotId: str
-    ariaElementCount: int
-    tokenReductionPercent: int
-    compactAriaTree: str
-    subagentWorkerId: str
-    subagentTokensUsed: int
-    subagentLlmTokensUsed: int = 0
-    contextSavedPercent: int = 88
-    criticPassed: bool = True
-    criticConfidenceScore: int = 98
-    specialistWorkers: list[dict[str, object]]
-    subagentDistilledVi: str
-    activeHooks: list[dict[str, object]]
-    summaryVi: str
-
-
 class Frontier2026Request(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 

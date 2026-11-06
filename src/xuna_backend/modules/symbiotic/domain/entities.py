@@ -361,56 +361,6 @@ class SkillChainReceipt:
 
 
 @dataclass(frozen=True, slots=True)
-class ClawMindReceipt:
-    """Receipt returned by `ClawPulseService.evaluate_claw_mind` (`MIND-3`, `SWARM-3`)."""
-
-    vault_folder: str
-    flushed_facts_count: int
-    redacted_secrets_count: int
-    soul_markdown: str
-    owner_profile_markdown: str
-    memory_journal_markdown: str
-    aria_snapshot_id: str
-    aria_element_count: int
-    token_reduction_percent: int
-    compact_aria_tree: str
-    subagent_worker_id: str
-    subagent_tokens_used: int
-    subagent_llm_tokens_used: int
-    context_saved_percent: int
-    critic_passed: bool
-    critic_confidence_score: int
-    specialist_workers: tuple[dict[str, object], ...]
-    subagent_distilled_vi: str
-    active_hooks: tuple[dict[str, object], ...]
-    summary_vi: str
-
-    def to_wire(self) -> dict[str, object]:
-        return {
-            "vaultFolder": self.vault_folder,
-            "flushedFactsCount": self.flushed_facts_count,
-            "redactedSecretsCount": self.redacted_secrets_count,
-            "soulMarkdown": self.soul_markdown,
-            "ownerProfileMarkdown": self.owner_profile_markdown,
-            "memoryJournalMarkdown": self.memory_journal_markdown,
-            "ariaSnapshotId": self.aria_snapshot_id,
-            "ariaElementCount": self.aria_element_count,
-            "tokenReductionPercent": self.token_reduction_percent,
-            "compactAriaTree": self.compact_aria_tree,
-            "subagentWorkerId": self.subagent_worker_id,
-            "subagentTokensUsed": self.subagent_tokens_used,
-            "subagentLlmTokensUsed": self.subagent_llm_tokens_used,
-            "contextSavedPercent": self.context_saved_percent,
-            "criticPassed": self.critic_passed,
-            "criticConfidenceScore": self.critic_confidence_score,
-            "specialistWorkers": [dict(item) for item in self.specialist_workers],
-            "subagentDistilledVi": self.subagent_distilled_vi,
-            "activeHooks": [dict(item) for item in self.active_hooks],
-            "summaryVi": self.summary_vi,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class Frontier2026Receipt:
     """Receipt returned by `ClawPulseService.evaluate_frontier_2026` (`FRONTIER-1`-`FRONTIER-4`)."""
 

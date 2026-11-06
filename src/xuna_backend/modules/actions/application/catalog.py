@@ -124,8 +124,6 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "skill.chain_and_test",
     "memory.markdown_vault",
     "browser.semantic_snapshot",
-    "subagent.spawn_and_poll",
-    "schedule.cron_and_hooks",
     "heartbeat.configure_and_tick",
     "canvas.present",
     "pipeline.execute_universal",
