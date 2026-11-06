@@ -246,46 +246,6 @@ class WorkshopChainResponse(BaseModel):
     summaryVi: str
 
 
-class Frontier2026Request(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    overlayAnchor: str = Field(default="mac_notch", min_length=1, max_length=64)
-    droppedItemName: str = Field(default="hoa_don_thang_11.csv", min_length=1, max_length=240)
-    vocalKind: str = Field(default="happy_chirp", min_length=1, max_length=64)
-    speechRateWpm: int = Field(default=110, ge=40, le=320)
-    rmsEnergyDb: int = Field(default=-24, ge=-80, le=0)
-    subject: str = Field(default="Chủ nhân", min_length=1, max_length=120)
-    predicate: str = Field(default="đang_tập_trung_dự_án", min_length=1, max_length=120)
-    objectVal: str = Field(default="XUNA Frontier 2026", min_length=1, max_length=240)
-    previousObjectVal: str = Field(default="Giao thức BLE M02", min_length=1, max_length=240)
-    ritualMode: str = Field(default="start_breathing_478", min_length=1, max_length=64)
-    neighborShortId: str = Field(default="XUNA9F2A", min_length=1, max_length=32)
-    themeId: str = Field(default="green_edition", min_length=1, max_length=64)
-
-
-class Frontier2026Response(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    schemaVersion: int = 1
-    overlayAnchor: str
-    munchAnimation: str
-    routedTarget: str
-    vocalKind: str
-    pcmByteCount: int
-    wavSha256: str
-    detectedOwnerTone: str
-    empathyAdjustmentVi: str
-    activeEdgesCount: int
-    historicalEdgesCount: int
-    temporalNarrativeVi: str
-    activeRitual: str
-    standbyDockActive: bool
-    unlockedKeepsakeVi: str
-    playdateSummaryVi: str
-    activeColorThemeId: str = "green_edition"
-    summaryVi: str
-
-
 class UiAccessibilityRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 

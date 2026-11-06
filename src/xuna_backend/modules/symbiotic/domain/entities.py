@@ -361,50 +361,6 @@ class SkillChainReceipt:
 
 
 @dataclass(frozen=True, slots=True)
-class Frontier2026Receipt:
-    """Receipt returned by `ClawPulseService.evaluate_frontier_2026` (`FRONTIER-1`-`FRONTIER-4`)."""
-
-    overlay_anchor: str
-    munch_animation: str
-    routed_target: str
-    vocal_kind: str
-    pcm_byte_count: int
-    wav_sha256: str
-    detected_owner_tone: str
-    empathy_adjustment_vi: str
-    active_edges_count: int
-    historical_edges_count: int
-    temporal_narrative_vi: str
-    active_ritual: str
-    standby_dock_active: bool
-    unlocked_keepsake_vi: str
-    playdate_summary_vi: str
-    summary_vi: str
-    active_color_theme_id: str = "green_edition"
-
-    def to_wire(self) -> dict[str, object]:
-        return {
-            "overlayAnchor": self.overlay_anchor,
-            "munchAnimation": self.munch_animation,
-            "routedTarget": self.routed_target,
-            "vocalKind": self.vocal_kind,
-            "pcmByteCount": self.pcm_byte_count,
-            "wavSha256": self.wav_sha256,
-            "detectedOwnerTone": self.detected_owner_tone,
-            "empathyAdjustmentVi": self.empathy_adjustment_vi,
-            "activeEdgesCount": self.active_edges_count,
-            "historicalEdgesCount": self.historical_edges_count,
-            "temporalNarrativeVi": self.temporal_narrative_vi,
-            "activeRitual": self.active_ritual,
-            "standbyDockActive": self.standby_dock_active,
-            "unlockedKeepsakeVi": self.unlocked_keepsake_vi,
-            "playdateSummaryVi": self.playdate_summary_vi,
-            "activeColorThemeId": self.active_color_theme_id,
-            "summaryVi": self.summary_vi,
-        }
-
-
-@dataclass(frozen=True, slots=True)
 class UiAccessibilityTreeReceipt:
     """Receipt returned by `ClawPulseService.evaluate_ui_accessibility_tree` (`UIA-3`)."""
 
