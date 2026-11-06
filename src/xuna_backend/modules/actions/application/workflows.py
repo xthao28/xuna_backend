@@ -4799,7 +4799,6 @@ class CompositeWorkflowRunner:
                 "action": "tick",
                 "checkName": "Canh hóa đơn mới & cổng dev",
                 "intervalMinutes": 30,
-                "simulateDelta": False,
             },
             risk=RiskTier.R1,
             request_id=request_id,

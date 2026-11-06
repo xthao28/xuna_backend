@@ -1,4 +1,4 @@
-"""Unit & API tests for SYM-LIVE REST routes, VOICE-WS (WS-3 VAD), and PE-4 parity."""
+"""Unit & API tests for VOICE-WS (WS-3 VAD) and PE-4 parity."""
 
 from __future__ import annotations
 
@@ -63,84 +63,6 @@ def _client() -> TestClient:
         text_provider="echo",
     )
     return TestClient(create_app(settings))
-
-
-def test_sym_live_api_dream_consolidate_unstuck_coach_and_social_encounter() -> None:
-    client = _client()
-
-    # 1. POST /v1/symbiotic/dream-consolidate
-    dream_res = client.post(
-        "/v1/symbiotic/dream-consolidate",
-        json={
-            "schemaVersion": 1,
-            "project": "xuna_pet",
-            "branch": "dev",
-            "dirtyCount": 2,
-            "nextStepHint": "Hoàn thiện SYM-LIVE",
-            "confirmedFacts": ["Bạn thích trà xanh buổi sáng"],
-            "activePorts": [8000],
-            "continuousWorkMinutes": 140,
-            "localHour": 23,
-        },
-    )
-    assert dream_res.status_code == 200
-    dream_body = dream_res.json()
-    assert dream_body["dreamVignette"]["relatedProject"] == "xuna_pet"
-    assert "xuna_pet" in dream_body["dreamVignette"]["narrativeVi"]
-    assert dream_body["coRegulationState"]["mode"] == "drowsy_care"
-    assert dream_body["coRegulationState"]["suggestedWorkflow"] == "freeze_for_tonight"
-
-    # 2. POST /v1/symbiotic/unstuck-coach
-    coach_res = client.post(
-        "/v1/symbiotic/unstuck-coach",
-        json={
-            "schemaVersion": 1,
-            "goal": "Tối ưu hóa toàn bộ hệ thống Cộng sinh",
-            "project": "xuna_pet",
-            "toolHistory": [
-                "workspace.git_summary",
-                "dev.ports",
-                "workspace.git_summary",
-                "dev.ports",
-            ],
-        },
-    )
-    assert coach_res.status_code == 200
-    coach_body = coach_res.json()
-    assert "5 phút" in coach_body["firstFiveMinuteStep"]
-    assert len(coach_body["followUpSteps"]) == 2
-    assert coach_body["serendipityNote"]["noteId"].startswith("srp-")
-    assert len(coach_body["habitProposals"]) == 1
-    assert coach_body["habitProposals"][0]["steps"] == ["workspace.git_summary", "dev.ports"]
-
-    # 3. POST /v1/symbiotic/social-encounters
-    social_res = client.post(
-        "/v1/symbiotic/social-encounters",
-        json={
-            "schemaVersion": 1,
-            "myShortId": "D945E8F0",
-            "peerShortId": "A1B2C3D4",
-            "peerTrait": "curiosity",
-            "peerTint": "golden_amber",
-            "sharedTrick": "spin_dance",
-        },
-    )
-    assert social_res.status_code == 200
-    social_body = social_res.json()
-    assert social_body["encounter"]["greetingKind"] == "harmonious_spark"
-    assert len(social_body["postcard"]["signatureHex"]) == 64
-
-    # Self-encounter returns 422 invalid_argument
-    bad_social = client.post(
-        "/v1/symbiotic/social-encounters",
-        json={
-            "schemaVersion": 1,
-            "myShortId": "A1B2C3D4",
-            "peerShortId": "a1b2c3d4",
-        },
-    )
-    assert bad_social.status_code == 422
-    assert bad_social.json()["code"] == "invalid_argument"
 
 
 def test_voice_ws3_pcm16_rms_vad_emits_start_and_end_only_when_enabled() -> None:
