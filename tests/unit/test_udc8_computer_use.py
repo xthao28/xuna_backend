@@ -23,6 +23,8 @@ import pytest
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+from tests.helpers import SimulatedDevice
+from tests.modules.hosts.test_hosts_use_cases import FakeHostRepository
 
 from xuna_backend.modules.actions.application.catalog import build_tool_catalog
 from xuna_backend.modules.actions.application.computer_use import (
@@ -32,7 +34,32 @@ from xuna_backend.modules.actions.application.computer_use import (
     InMemoryComputerUseSessionStore,
     SignedR3ApprovalProof,
 )
-from xuna_backend.modules.actions.domain.entities import ApprovalScope
+from xuna_backend.modules.actions.application.orchestrator import (
+    ActionContext,
+    Orchestrator,
+)
+from xuna_backend.modules.actions.application.prompts import (
+    encode_tool_payload,
+    state_driven_hint,
+    tool_system_prompt,
+)
+from xuna_backend.modules.actions.domain.action_summary import ActionSummary
+from xuna_backend.modules.actions.domain.entities import (
+    ActionPendingEvent,
+    ActionStreamEvent,
+    ApprovalDecision,
+    ApprovalScope,
+)
+from xuna_backend.modules.actions.infrastructure.brokers import (
+    InMemoryApprovalBroker,
+    InMemoryApprovalScopeStore,
+    InMemoryLastTargetStore,
+    InMemoryLocalResultBroker,
+)
+from xuna_backend.modules.actions.infrastructure.repository import (
+    InMemoryApprovalRepository,
+)
+from xuna_backend.modules.cognition.domain.types import Locale, ToolCall
 from xuna_backend.modules.consent.application.use_cases import (
     UpdateConsent,
     update_consent,
@@ -50,6 +77,10 @@ from xuna_backend.modules.hosts.domain.entities import (
     RiskTier,
     ToolDescriptor,
     ToolFamily,
+    validate_tool_name,
+)
+from xuna_backend.modules.hosts.infrastructure.session_hub import (
+    InMemoryHostSessionHub,
 )
 from xuna_backend.modules.identity.infrastructure.p256 import P256SignatureVerifier
 
@@ -100,9 +131,7 @@ def _sign_r3_proof(
 ) -> SignedR3ApprovalProof:
     approval_id = uuid.uuid4()
     expires_at_iso = "2026-10-31T09:05:00Z"
-    canonical = json.dumps(
-        arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
+    canonical = json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     args_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     payload = approval_proof_message(
         approval_id=str(approval_id),
@@ -637,9 +666,7 @@ def test_s86_prompt_injection_fixtures_and_safety_invariants() -> None:
             # 2. Password value is redacted from observation and prompt block
             assert "SuperSecret123!" not in obs_res["untrustedPromptBlock"]
             assert "AAAA_FAKE_SCREENSHOT_BYTES_NEVER_STORE" not in obs_res["untrustedPromptBlock"]
-            pwd_nodes = [
-                n for n in obs_res["observation"]["nodes"] if n["id"] == "s00000001:pwd"
-            ]
+            pwd_nodes = [n for n in obs_res["observation"]["nodes"] if n["id"] == "s00000001:pwd"]
             assert pwd_nodes[0]["name"] == "•••"
             assert "value" not in pwd_nodes[0]
 
@@ -791,5 +818,585 @@ def test_s86_stop_conditions_heartbeat_deadman_and_emergency_stop_latency() -> N
         assert stop_latency_s <= 1.0
         assert not s4.active
         assert s4.cached_nodes == {}
+
+    asyncio.run(_run())
+
+
+def test_desktop_cu_tools_promoted_to_direct_catalog_and_prompts() -> None:
+    now = datetime(2026, 11, 11, 10, 0, tzinfo=UTC)
+    owner_id = uuid.uuid4()
+    host_id = HostId.generate()
+    _, pub_bytes = _generate_p256_keypair()
+    host = Host(
+        host_id=host_id,
+        owner_id=owner_id,
+        alias=HostAlias("Mac Thảo"),
+        platform=HostPlatform.MACOS,
+        hostname="mac-thao",
+        os_version="15.0",
+        agent_version="0.2.0",
+        public_key=pub_bytes,
+        status=HostStatus.ACTIVE,
+        created_at=now,
+        last_seen_at=now,
+    )
+    empty_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    }
+    desktop_tool_names = (
+        "app.launch",
+        "app.list_allowed",
+        "url.open",
+        "cu.session_start",
+        "ui.inspect",
+        "input.click",
+        "input.type_text",
+        "input.key",
+        "input.scroll",
+        "cu.session_end",
+        "media.play_search",
+        "media.play_pause",
+        "media.next",
+        "media.previous",
+        "media.volume_set",
+        "media.now_playing",
+        "host.status",
+        "host.notify",
+        "host.lock_screen",
+        "workflow.list",
+        "workflow.run",
+        "workflow.batch_steps",
+    )
+    descriptors = tuple(
+        ToolDescriptor(
+            name=name,
+            family=validate_tool_name(name),
+            risk=RiskTier.R3
+            if name in ("cu.session_start", "input.type_text")
+            else (RiskTier.R0 if name == "cu.session_end" else RiskTier.R2),
+            description=f"Desktop tool {name}.",
+            input_schema=empty_schema,
+            output_schema=empty_schema,
+            observes=(name == "ui.inspect"),
+        )
+        for name in desktop_tool_names
+    )
+    manifest = Manifest(host_id=host_id, tools=descriptors, updated_at=now)
+    grants = [
+        Grant(host_id=host_id, family=fam, max_risk=RiskTier.R3, enabled=True, updated_at=now)
+        for fam in (
+            ToolFamily.APP,
+            ToolFamily.URL,
+            ToolFamily.CU,
+            ToolFamily.UI,
+            ToolFamily.INPUT,
+            ToolFamily.MEDIA,
+            ToolFamily.HOST,
+            ToolFamily.WORKFLOW,
+        )
+    ]
+
+    # Positive: with host_screen_consent=True, all 7 CU/UI/INPUT tools fit in direct catalog
+    catalog_u5_on = build_tool_catalog(
+        hosts=[host],
+        manifests_by_host={host_id: manifest},
+        grants_by_host={host_id: grants},
+        online_host_ids={str(host_id)},
+        client_caps={"host_actions_v1"},
+        board_available=False,
+        host_screen_consent=True,
+        now=now,
+    )
+    direct_names_on = {t.name for t in catalog_u5_on}
+    for expected in (
+        "cu__session_start",
+        "ui__inspect",
+        "input__click",
+        "input__type_text",
+        "input__key",
+        "input__scroll",
+        "cu__session_end",
+    ):
+        assert expected in direct_names_on
+
+    # Negative: with host_screen_consent=False, CU/UI/INPUT tools are completely hidden
+    catalog_u5_off = build_tool_catalog(
+        hosts=[host],
+        manifests_by_host={host_id: manifest},
+        grants_by_host={host_id: grants},
+        online_host_ids={str(host_id)},
+        client_caps={"host_actions_v1"},
+        board_available=False,
+        host_screen_consent=False,
+        now=now,
+    )
+    direct_names_off = {t.name for t in catalog_u5_off}
+    assert not (
+        direct_names_off
+        & {
+            "cu__session_start",
+            "ui__inspect",
+            "input__click",
+            "input__type_text",
+            "input__key",
+            "input__scroll",
+            "cu__session_end",
+        }
+    )
+
+    # Prompts & summaries & large nodes payload
+    prompt_vi = tool_system_prompt(Locale.VI, catalog_u5_on)
+    assert "cu__session_start" in prompt_vi
+    assert "cu__session_end" in prompt_vi
+    assert state_driven_hint({"errorCode": "cu_session_required"}) is not None
+    assert state_driven_hint({"errorCode": "target_outside_allowlist"}) is not None
+
+    summary_vi = ActionSummary.format_pending(
+        "input.type_text",
+        {"elementId": "@s1:e2", "elementName": "Tiêu đề", "text": "Mua sữa"},
+        "Mac Thảo",
+        Locale.VI,
+    )
+    assert "Mua sữa" in summary_vi
+    assert "Tiêu đề" in summary_vi
+
+    encoded_nodes = json.loads(
+        encode_tool_payload(
+            "ok",
+            {
+                "appId": "notes",
+                "windowTitle": "Ghi chú",
+                "nodes": [
+                    {"ref": f"@s1:e{i}", "role": "button", "name": f"Nút {i}"} for i in range(30)
+                ],
+            },
+        )
+    )
+    assert len(encoded_nodes["output"]["nodes"]) == 30
+
+
+def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() -> None:
+    async def _run() -> None:
+        now = datetime(2026, 11, 11, 11, 0, tzinfo=UTC)
+        owner_id = uuid.uuid4()
+        repo = FakeHostRepository()
+        hub = InMemoryHostSessionHub()
+        approval_repo = InMemoryApprovalRepository()
+        approval_broker = InMemoryApprovalBroker()
+        local_broker = InMemoryLocalResultBroker()
+        last_target_store = InMemoryLastTargetStore()
+        scope_store = InMemoryApprovalScopeStore()
+        cu_store = InMemoryComputerUseSessionStore()
+        audit = _FakeAuditLog()
+        verifier = P256SignatureVerifier()
+
+        phone_device = SimulatedDevice()
+        _, mac_pub = _generate_p256_keypair()
+        mac_host = Host(
+            host_id=HostId.generate(),
+            owner_id=owner_id,
+            alias=HostAlias("Mac Thảo"),
+            platform=HostPlatform.MACOS,
+            hostname="mac-thao",
+            os_version="15.0",
+            agent_version="0.2.0",
+            public_key=mac_pub,
+            status=HostStatus.ACTIVE,
+            created_at=now,
+            last_seen_at=now,
+        )
+        phone_host = Host(
+            host_id=HostId.generate(),
+            owner_id=owner_id,
+            alias=HostAlias("iPhone Thảo"),
+            platform=HostPlatform.IOS,
+            hostname="iphone-thao",
+            os_version="18.0",
+            agent_version="0.2.0",
+            public_key=phone_device.public_key,
+            status=HostStatus.ACTIVE,
+            created_at=now,
+            last_seen_at=now,
+        )
+        await repo.save_host(mac_host)
+        await repo.save_host(phone_host)
+
+        empty_out: dict[str, object] = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        manifest = Manifest(
+            host_id=mac_host.host_id,
+            tools=(
+                ToolDescriptor(
+                    name="cu.session_start",
+                    family=ToolFamily.CU,
+                    risk=RiskTier.R3,
+                    description="Start CU session.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "goal": {"type": "string"},
+                            "apps": {"type": "array", "items": {"type": "string"}},
+                            "domains": {"type": "array", "items": {"type": "string"}},
+                            "maxSteps": {"type": "integer"},
+                            "maxMinutes": {"type": "integer"},
+                        },
+                        "required": ["goal", "apps", "domains", "maxSteps", "maxMinutes"],
+                        "additionalProperties": False,
+                    },
+                    output_schema=empty_out,
+                ),
+                ToolDescriptor(
+                    name="ui.inspect",
+                    family=ToolFamily.UI,
+                    risk=RiskTier.R2,
+                    observes=True,
+                    description="Inspect active window.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "scope": {"type": "string"},
+                            "maxNodes": {"type": "integer"},
+                        },
+                        "required": ["scope", "maxNodes"],
+                        "additionalProperties": False,
+                    },
+                    output_schema=empty_out,
+                ),
+                ToolDescriptor(
+                    name="input.click",
+                    family=ToolFamily.INPUT,
+                    risk=RiskTier.R2,
+                    description="Click UI element.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "elementId": {"type": "string"},
+                            "elementName": {"type": "string"},
+                        },
+                        "additionalProperties": False,
+                    },
+                    output_schema=empty_out,
+                ),
+                ToolDescriptor(
+                    name="input.type_text",
+                    family=ToolFamily.INPUT,
+                    risk=RiskTier.R3,
+                    description="Type text.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "elementId": {"type": "string"},
+                            "elementName": {"type": "string"},
+                            "text": {"type": "string"},
+                        },
+                        "required": ["elementId", "text"],
+                        "additionalProperties": False,
+                    },
+                    output_schema=empty_out,
+                ),
+                ToolDescriptor(
+                    name="input.key",
+                    family=ToolFamily.INPUT,
+                    risk=RiskTier.R2,
+                    description="Press key.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "combo": {"type": "string"},
+                            "inForm": {"type": "boolean"},
+                        },
+                        "required": ["combo"],
+                        "additionalProperties": False,
+                    },
+                    output_schema=empty_out,
+                ),
+                ToolDescriptor(
+                    name="cu.session_end",
+                    family=ToolFamily.CU,
+                    risk=RiskTier.R0,
+                    description="End CU session.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "sessionId": {"type": "string"},
+                            "outcome": {"type": "string"},
+                        },
+                        "required": ["sessionId", "outcome"],
+                        "additionalProperties": False,
+                    },
+                    output_schema=empty_out,
+                ),
+            ),
+            updated_at=now,
+        )
+        await repo.save_manifest(manifest)
+        await repo.set_grants(
+            mac_host.host_id,
+            [
+                Grant(mac_host.host_id, ToolFamily.CU, RiskTier.R3, True, now),
+                Grant(mac_host.host_id, ToolFamily.UI, RiskTier.R2, True, now),
+                Grant(mac_host.host_id, ToolFamily.INPUT, RiskTier.R3, True, now),
+            ],
+        )
+
+        sent_calls: list[dict[str, Any]] = []
+
+        async def _send_text(raw: str) -> None:
+            frame = json.loads(raw)
+            if frame.get("method") != "tools/call":
+                return
+            params = frame["params"]
+            sent_calls.append(params)
+            tname = params["name"]
+            if tname == "cu.session_start":
+                sc: dict[str, Any] = {"sessionId": "cu-sess-1"}
+            elif tname == "ui.inspect":
+                sc = {
+                    "appId": "notes",
+                    "windowTitle": "Ghi chú",
+                    "snapshotId": "s1",
+                    "nodes": [
+                        {"id": "1", "ref": "@s1:e1", "role": "button", "name": "Tạo mới"},
+                        {
+                            "id": "2",
+                            "ref": "@s1:e2",
+                            "role": "textfield",
+                            "name": "Mật khẩu đăng nhập",
+                        },
+                        {"id": "3", "ref": "@s1:e3", "role": "button", "name": "Xóa ghi chú"},
+                        {"id": "4", "ref": "@s1:e4", "role": "textfield", "name": "Nội dung"},
+                    ],
+                }
+            elif tname == "cu.session_end":
+                sc = {"ended": True}
+            else:
+                sc = {"effect": "changed"}
+            hub.on_response(
+                str(mac_host.host_id),
+                frame["id"],
+                {"_meta": {"xuna/status": "ok", "xuna/durationMs": 4}, "structuredContent": sc},
+            )
+
+        async def _noop() -> None:
+            pass
+
+        await hub.open_session(str(mac_host.host_id), object(), _send_text, _noop, _noop)
+
+        orch = Orchestrator(
+            host_repo=repo,
+            hub=hub,
+            approval_repo=approval_repo,
+            approval_broker=approval_broker,
+            local_result_broker=local_broker,
+            last_target_store=last_target_store,
+            audit=audit,
+            scope_store=scope_store,
+            verifier=verifier,
+            cu_session_store=cu_store,
+            clock=lambda: now,
+        )
+
+        pending_events: list[ActionPendingEvent] = []
+
+        async def _sink(ev: ActionStreamEvent) -> None:
+            if isinstance(ev, ActionPendingEvent):
+                pending_events.append(ev)
+                aid = uuid.UUID(ev.approval_id)
+                if ev.risk == "R3":
+                    assert ev.host_id is not None
+                    msg = approval_proof_message(
+                        ev.approval_id, ev.args_sha256, ev.host_id, ev.expires_at
+                    )
+                    sig = phone_device.sign(msg)
+                    await orch.decide_approval(
+                        approval_id=aid,
+                        owner_id=owner_id,
+                        decision=ApprovalDecision.APPROVE,
+                        scope=ApprovalScope.ONCE,
+                        signature=sig,
+                        signer_public_key=phone_device.public_key,
+                    )
+                else:
+                    await orch.decide_approval(
+                        approval_id=aid,
+                        owner_id=owner_id,
+                        decision=ApprovalDecision.APPROVE,
+                        scope=ApprovalScope.ONCE,
+                    )
+
+        # 1. Negative: host_screen_consent=False blocks cu.session_start fail-closed
+        ctx_no_u5 = ActionContext(
+            owner_id=owner_id,
+            pet_id="pet-1",
+            locale=Locale.VI,
+            client_caps={"host_actions_v1"},
+            board_available=False,
+            emit_event=_sink,
+            host_screen_consent=False,
+        )
+        denied_u5 = await orch.handle_call(
+            ToolCall(
+                id="c-u5",
+                name="cu__session_start",
+                arguments={
+                    "goal": "Ghi chú",
+                    "apps": ["notes"],
+                    "domains": [],
+                    "maxSteps": 8,
+                    "maxMinutes": 5,
+                },
+            ),
+            ctx_no_u5,
+        )
+        assert json.loads(denied_u5.content)["status"] == "denied"
+        assert audit.events[-1].metadata["reason"] == "u5_consent_required"
+        assert len(sent_calls) == 0
+
+        # 2. Positive: host_screen_consent=True starts session with R3 phone-signed approval
+        ctx = ActionContext(
+            owner_id=owner_id,
+            pet_id="pet-1",
+            locale=Locale.VI,
+            client_caps={"host_actions_v1"},
+            board_available=False,
+            emit_event=_sink,
+            host_screen_consent=True,
+        )
+        res_start = await orch.handle_call(
+            ToolCall(
+                id="c-start",
+                name="cu__session_start",
+                arguments={
+                    "goal": "Ghi chú mới",
+                    "apps": ["notes"],
+                    "domains": [],
+                    "maxSteps": 8,
+                    "maxMinutes": 5,
+                },
+            ),
+            ctx,
+        )
+        assert json.loads(res_start.content)["status"] == "ok"
+        assert len(pending_events) == 1
+        assert pending_events[-1].risk == "R3"
+        assert "signature" in sent_calls[-1]["_meta"]["xuna/approval"]
+
+        # 3. Positive: inside active session, ui.inspect & non-consequential input.click
+        #    do NOT prompt for R2 approval and omit xuna/approval!
+        res_inspect = await orch.handle_call(
+            ToolCall(
+                id="c-insp",
+                name="ui__inspect",
+                arguments={"scope": "active_window", "maxNodes": 50},
+            ),
+            ctx,
+        )
+        insp_payload = json.loads(res_inspect.content)
+        assert insp_payload["status"] == "ok"
+        assert len(pending_events) == 1  # No new prompt!
+        assert "xuna/approval" not in sent_calls[-1]["_meta"]
+        # Password node was redacted in tool payload
+        assert insp_payload["output"]["nodes"][1]["name"] == "•••"
+
+        res_click_safe = await orch.handle_call(
+            ToolCall(
+                id="c-click-safe",
+                name="input__click",
+                arguments={"elementId": "@s1:e1", "elementName": "Tạo mới"},
+            ),
+            ctx,
+        )
+        assert json.loads(res_click_safe.content)["status"] == "ok"
+        assert len(pending_events) == 1  # Still no new prompt!
+        assert "xuna/approval" not in sent_calls[-1]["_meta"]
+
+        # 4. Negative / Security: typing into cached password node (@s1:e2) fails closed
+        #    before approval or host call!
+        calls_before_pwd = len(sent_calls)
+        res_pwd = await orch.handle_call(
+            ToolCall(
+                id="c-pwd",
+                name="input__type_text",
+                arguments={"elementId": "@s1:e2", "text": "secret123"},
+            ),
+            ctx,
+        )
+        pwd_payload = json.loads(res_pwd.content)
+        assert pwd_payload["status"] == "denied"
+        assert pwd_payload["output"]["errorCode"] == "password_field_forbidden"
+        assert len(sent_calls) == calls_before_pwd
+        assert len(pending_events) == 1
+
+        # 5. Security: input.type_text on normal field requires R3 phone-signed approval
+        res_type = await orch.handle_call(
+            ToolCall(
+                id="c-type",
+                name="input__type_text",
+                arguments={"elementId": "@s1:e4", "elementName": "Nội dung", "text": "Mua sữa"},
+            ),
+            ctx,
+        )
+        assert json.loads(res_type.content)["status"] == "ok"
+        assert len(pending_events) == 2
+        assert pending_events[-1].risk == "R3"
+        assert "Mua sữa" in pending_events[-1].summary
+        assert "signature" in sent_calls[-1]["_meta"]["xuna/approval"]
+
+        # 6. Security: clicking consequential cached button (@s1:e3 = "Xóa ghi chú") WITHOUT
+        #    passing elementName STILL escalates to R3!
+        res_click_del = await orch.handle_call(
+            ToolCall(
+                id="c-click-del",
+                name="input__click",
+                arguments={"elementId": "@s1:e3"},
+            ),
+            ctx,
+        )
+        assert json.loads(res_click_del.content)["status"] == "ok"
+        assert len(pending_events) == 3
+        assert pending_events[-1].risk == "R3"
+        assert "signature" in sent_calls[-1]["_meta"]["xuna/approval"]
+
+        # 7. Security: input.key(combo="Enter", inForm=True) escalates to R3!
+        res_enter = await orch.handle_call(
+            ToolCall(
+                id="c-enter",
+                name="input__key",
+                arguments={"combo": "Enter", "inForm": True},
+            ),
+            ctx,
+        )
+        assert json.loads(res_enter.content)["status"] == "ok"
+        assert len(pending_events) == 4
+        assert pending_events[-1].risk == "R3"
+
+        # 8. Session end terminates R2 exemption so a subsequent ui.inspect prompts R2 approval
+        res_end = await orch.handle_call(
+            ToolCall(
+                id="c-end",
+                name="cu__session_end",
+                arguments={"sessionId": "cu-sess-1", "outcome": "completed"},
+            ),
+            ctx,
+        )
+        assert json.loads(res_end.content)["status"] == "ok"
+        assert cu_store.get_active_for_owner(owner_id) is None
+
+        res_inspect_after = await orch.handle_call(
+            ToolCall(
+                id="c-insp-after",
+                name="ui__inspect",
+                arguments={"scope": "active_window", "maxNodes": 50},
+            ),
+            ctx,
+        )
+        assert json.loads(res_inspect_after.content)["status"] == "ok"
+        assert len(pending_events) == 5
+        assert pending_events[-1].risk == "R2"
 
     asyncio.run(_run())

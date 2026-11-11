@@ -13,6 +13,7 @@ Executes the 8-step pipeline per tool call:
 """
 
 import base64
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
@@ -30,6 +31,13 @@ from xuna_backend.modules.actions.application.catalog import (
 )
 from xuna_backend.modules.actions.application.code_synthesizer import (
     CodeSpecialistSynthesizer,
+)
+from xuna_backend.modules.actions.application.computer_use import (
+    ComputerUseSessionState,
+    InMemoryComputerUseSessionStore,
+    is_consequential_element_name,
+    is_password_ui_node,
+    redact_ui_tree_nodes,
 )
 from xuna_backend.modules.actions.application.ports import (
     ApprovalBroker,
@@ -114,6 +122,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     Manifest,
     RiskTier,
     ToolDescriptor,
+    ToolFamily,
     ToolPermissionState,
 )
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
@@ -187,8 +196,12 @@ class Orchestrator:
         clock: Callable[[], datetime] | None = None,
         code_generator: TextGenerator | None = None,
         standing_repo: StandingApprovalRepository | None = None,
+        cu_session_store: InMemoryComputerUseSessionStore | None = None,
     ) -> None:
         self._standing_repo = standing_repo
+        self._cu_session_store = (
+            cu_session_store if cu_session_store is not None else InMemoryComputerUseSessionStore()
+        )
         self._host_repo = host_repo
         self._hub = hub
         self._approval_repo = approval_repo
@@ -236,11 +249,153 @@ class Orchestrator:
     ) -> EmergencyStopSummary:
         """Cancels all active invocations, rejects pending approvals, sends `xuna/stop`
         to every live host, suspends R2+ grants, and audits `host.stopped` (`UDC-7` S7.3)."""
+        self._cu_session_store.stop_all_for_owner(owner_id, reason=reason)
         return await self._approval_and_board.emergency_stop(
             owner_id=owner_id,
             reason=reason,
             request_id=request_id,
         )
+
+    @staticmethod
+    def _lookup_cached_cu_node(
+        active_cu: ComputerUseSessionState | None,
+        clean_args: dict[str, object],
+    ) -> dict[str, object] | None:
+        if active_cu is None:
+            return None
+        raw_id = clean_args.get("elementId")
+        if not isinstance(raw_id, str) or not raw_id.strip():
+            return None
+        key = raw_id.strip()
+        node = active_cu.cached_nodes.get(key)
+        if node is None and key.startswith("@"):
+            node = active_cu.cached_nodes.get(key[1:])
+        return node
+
+    @classmethod
+    def _effective_tool_risk(
+        cls,
+        descriptor: ToolDescriptor,
+        clean_args: dict[str, object],
+        active_cu: ComputerUseSessionState | None,
+    ) -> RiskTier:
+        if descriptor.name == "input.click":
+            explicit_name = clean_args.get("elementName")
+            if isinstance(explicit_name, str) and is_consequential_element_name(explicit_name):
+                return RiskTier.R3
+            cached_node = cls._lookup_cached_cu_node(active_cu, clean_args)
+            if cached_node is not None:
+                cached_name = cached_node.get("name")
+                if isinstance(cached_name, str) and is_consequential_element_name(cached_name):
+                    return RiskTier.R3
+        elif (
+            descriptor.name == "input.key"
+            and clean_args.get("combo") == "Enter"
+            and clean_args.get("inForm") is True
+        ):
+            return RiskTier.R3
+        return descriptor.risk
+
+    def _update_cu_session_after_call(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        descriptor: ToolDescriptor,
+        clean_args: dict[str, object],
+        status: str,
+        structured_content: dict[str, object],
+        active_cu: ComputerUseSessionState | None,
+        now: datetime,
+    ) -> None:
+        if descriptor.name == "cu.session_start" and status == "ok":
+            existing = self._cu_session_store.get_active_for_owner(owner_id)
+            if existing is not None:
+                self._cu_session_store.mark_ended(existing.session_id, "replaced")
+            raw_sid = structured_content.get("sessionId")
+            session_id = (
+                raw_sid.strip()
+                if isinstance(raw_sid, str) and raw_sid.strip()
+                else str(uuid.uuid4())
+            )
+            raw_apps = clean_args.get("apps")
+            apps = (
+                tuple(str(a).strip().lower() for a in raw_apps if str(a).strip())
+                if isinstance(raw_apps, list)
+                else ()
+            )
+            raw_domains = clean_args.get("domains")
+            domains = (
+                tuple(str(d).strip().lower() for d in raw_domains if str(d).strip())
+                if isinstance(raw_domains, list)
+                else ()
+            )
+            raw_steps = clean_args.get("maxSteps")
+            max_steps = raw_steps if type(raw_steps) is int else 12
+            raw_mins = clean_args.get("maxMinutes")
+            max_mins = raw_mins if type(raw_mins) is int else 5
+            now_m = time.monotonic()
+            self._cu_session_store.put(
+                ComputerUseSessionState(
+                    session_id=session_id,
+                    owner_id=owner_id,
+                    host_id=host_id,
+                    goal=str(clean_args.get("goal", "")),
+                    allowed_apps=apps,
+                    allowed_domains=domains,
+                    max_steps=max_steps,
+                    max_minutes=max_mins,
+                    started_at_monotonic=now_m,
+                    last_heartbeat_monotonic=now_m,
+                    started_at_utc=now,
+                )
+            )
+            return
+
+        if descriptor.name == "cu.session_end":
+            outcome = str(clean_args.get("outcome") or "completed")
+            raw_sid = clean_args.get("sessionId")
+            if isinstance(raw_sid, str) and raw_sid.strip():
+                self._cu_session_store.mark_ended(raw_sid.strip(), outcome)
+            if active_cu is not None:
+                self._cu_session_store.mark_ended(active_cu.session_id, outcome)
+            return
+
+        if descriptor.name == "ui.inspect" and status == "ok":
+            raw_nodes = structured_content.get("nodes")
+            if isinstance(raw_nodes, list):
+                dict_nodes = [n for n in raw_nodes if isinstance(n, dict)]
+                redacted = redact_ui_tree_nodes(dict_nodes)
+                structured_content["nodes"] = redacted
+                if active_cu is not None:
+                    active_cu.cached_nodes.clear()
+                    for orig, red in zip(dict_nodes, redacted, strict=False):
+                        raw_id = str(red.get("id") or "").strip()
+                        qual_ref = str(red.get("ref") or raw_id).strip()
+                        if raw_id:
+                            active_cu.cached_nodes[raw_id] = orig
+                        if qual_ref:
+                            active_cu.cached_nodes[qual_ref] = orig
+                            if qual_ref.startswith("@"):
+                                active_cu.cached_nodes[qual_ref[1:]] = orig
+            return
+
+        if descriptor.family == ToolFamily.INPUT and active_cu is not None:
+            if status == "ok":
+                active_cu.steps_used += 1
+                if active_cu.steps_used >= active_cu.max_steps:
+                    self._cu_session_store.mark_ended(active_cu.session_id, "step_budget_exceeded")
+            else:
+                err_code = str(structured_content.get("errorCode") or "")
+                if err_code in (
+                    "cu_session_required",
+                    "step_budget_exceeded",
+                    "time_budget_exceeded",
+                    "duplicate_action",
+                    "no_progress",
+                    "stopped",
+                ):
+                    self._cu_session_store.mark_ended(active_cu.session_id, err_code)
 
     async def decide_approval(
         self,
@@ -468,7 +623,12 @@ class Orchestrator:
             grants = await self._host_repo.get_grants(host.host_id)
             grants_by_host[host.host_id] = grants
             online_hosts_with_tool.append(host)
-            if is_tool_granted(descriptor, grants, now):
+            if is_tool_granted(
+                descriptor,
+                grants,
+                now,
+                host_screen_consent=ctx.host_screen_consent,
+            ):
                 eligible_hosts.append(host)
 
         if reference_descriptor is None:
@@ -602,7 +762,23 @@ class Orchestrator:
                 tool_call_id=call.id,
             )
 
-        if not is_tool_granted(descriptor, host_grants, now):
+        if not is_tool_granted(
+            descriptor,
+            host_grants,
+            now,
+            host_screen_consent=ctx.host_screen_consent,
+        ):
+            needs_u5 = descriptor.observes or descriptor.family in (
+                ToolFamily.CU,
+                ToolFamily.SCREEN,
+                ToolFamily.UI,
+                ToolFamily.INPUT,
+            )
+            deny_reason = (
+                "u5_consent_required"
+                if needs_u5 and not ctx.host_screen_consent
+                else "grant_denied"
+            )
             await self._audit.record(
                 AuditEvent(
                     owner_id=ctx.owner_id,
@@ -613,6 +789,48 @@ class Orchestrator:
                     metadata={
                         "tool": descriptor.name,
                         "risk": descriptor.risk.value,
+                        "status": "denied",
+                        "reason": deny_reason,
+                        "platform": host.platform.value,
+                    },
+                )
+            )
+            await ctx.emit_event(
+                ActionResultEvent(
+                    invocation_id=invocation_id,
+                    target=target_alias,
+                    summary=ActionSummary.format_result(
+                        descriptor.name, clean_args, target_alias, "denied", ctx.locale
+                    ),
+                    status="denied",
+                    gesture=gesture_for_action_status("denied"),
+                )
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload("denied"),
+                tool_call_id=call.id,
+            )
+
+        active_cu = self._cu_session_store.get_active_for_owner_and_host(
+            ctx.owner_id, host.host_id, now
+        )
+        effective_risk = self._effective_tool_risk(descriptor, clean_args, active_cu)
+
+        if effective_risk != descriptor.risk and not any(
+            g.family == descriptor.family and g.is_active(now) and g.max_risk.allows(effective_risk)
+            for g in host_grants
+        ):
+            await self._audit.record(
+                AuditEvent(
+                    owner_id=ctx.owner_id,
+                    action=AuditAction.HOST_TOOL_DENIED,
+                    occurred_at=now,
+                    subject=str(host.host_id),
+                    request_id=ctx.request_id,
+                    metadata={
+                        "tool": descriptor.name,
+                        "risk": effective_risk.value,
                         "status": "denied",
                         "reason": "grant_denied",
                         "platform": host.platform.value,
@@ -636,10 +854,62 @@ class Orchestrator:
                 tool_call_id=call.id,
             )
 
+        if descriptor.name in ("input.click", "input.type_text", "input.key"):
+            cached_node = self._lookup_cached_cu_node(active_cu, clean_args)
+            explicit_elem_name = clean_args.get("elementName")
+            synthetic_node: dict[str, object] = (
+                {"name": explicit_elem_name, "role": "textfield"}
+                if isinstance(explicit_elem_name, str)
+                else {}
+            )
+            if (cached_node is not None and is_password_ui_node(cached_node)) or (
+                bool(synthetic_node) and is_password_ui_node(synthetic_node)
+            ):
+                await self._audit.record(
+                    AuditEvent(
+                        owner_id=ctx.owner_id,
+                        action=AuditAction.HOST_TOOL_DENIED,
+                        occurred_at=now,
+                        subject=str(host.host_id),
+                        request_id=ctx.request_id,
+                        metadata={
+                            "tool": descriptor.name,
+                            "risk": effective_risk.value,
+                            "status": "denied",
+                            "reason": "password_field_forbidden",
+                            "platform": host.platform.value,
+                        },
+                    )
+                )
+                await ctx.emit_event(
+                    ActionResultEvent(
+                        invocation_id=invocation_id,
+                        target=target_alias,
+                        summary=ActionSummary.format_result(
+                            descriptor.name, clean_args, target_alias, "denied", ctx.locale
+                        ),
+                        status="denied",
+                        gesture=gesture_for_action_status("denied"),
+                    )
+                )
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_tool_payload(
+                        "denied", {"errorCode": "password_field_forbidden"}
+                    ),
+                    tool_call_id=call.id,
+                )
+
         self._last_target_store.set_last_target(ctx.owner_id, ctx.pet_id, target_alias, now)
 
+        exempt_by_cu_session = (
+            active_cu is not None
+            and descriptor.family in (ToolFamily.SCREEN, ToolFamily.UI, ToolFamily.INPUT)
+            and effective_risk == RiskTier.R2
+        )
+
         approval_req: ApprovalRequest | None = None
-        if descriptor.risk.level >= RiskTier.R2.level:
+        if effective_risk.level >= RiskTier.R2.level and not exempt_by_cu_session:
             # ADR-0014 D1: an owner approval given in advance for exactly this call. The grant
             # check above already ran, so suspended grants (and E-Stop, which suspends them)
             # make a standing approval inert. Eligibility is re-checked against the manifest as
@@ -647,7 +917,7 @@ class Orchestrator:
             standing_hit = None
             if (
                 self._standing_repo is not None
-                and descriptor.risk == RiskTier.R2
+                and effective_risk == RiskTier.R2
                 and is_standing_eligible(descriptor, clean_args)
             ):
                 standing_hit = await self._standing_repo.consume_match(
@@ -658,7 +928,7 @@ class Orchestrator:
                     now,
                 )
             has_15m_scope = (
-                descriptor.risk == RiskTier.R2
+                effective_risk == RiskTier.R2
                 and self._scope_store is not None
                 and self._scope_store.has_valid_scope(
                     ctx.owner_id, ctx.pet_id, host.host_id, descriptor.name, now
@@ -673,7 +943,7 @@ class Orchestrator:
                     target_alias=target_alias,
                     tool=descriptor.name,
                     args_sha256=args_sha256(clean_args),
-                    risk=descriptor.risk,
+                    risk=effective_risk,
                     summary=ActionSummary.format_pending(
                         descriptor.name, clean_args, target_alias, ctx.locale
                     ),
@@ -694,7 +964,7 @@ class Orchestrator:
                         metadata={
                             "approvalId": str(standing_hit.approval_id),
                             "tool": descriptor.name,
-                            "risk": descriptor.risk.value,
+                            "risk": effective_risk.value,
                             "uses": standing_hit.uses,
                         },
                     )
@@ -707,7 +977,7 @@ class Orchestrator:
                     target_alias=target_alias,
                     tool=descriptor.name,
                     args_sha256=args_sha256(clean_args),
-                    risk=descriptor.risk,
+                    risk=effective_risk,
                     summary=ActionSummary.format_pending(
                         descriptor.name, clean_args, target_alias, ctx.locale
                     ),
@@ -728,7 +998,7 @@ class Orchestrator:
                         metadata={
                             "approvalId": str(approval_req.approval_id),
                             "tool": descriptor.name,
-                            "risk": descriptor.risk.value,
+                            "risk": effective_risk.value,
                             "scope": ApprovalScope.CONVERSATION_15M.value,
                         },
                     )
@@ -737,7 +1007,7 @@ class Orchestrator:
                 # Offer "always allow this" only when the backend could accept it (ADR-0014).
                 offer = (
                     self._standing_repo is not None
-                    and descriptor.risk == RiskTier.R2
+                    and effective_risk == RiskTier.R2
                     and is_standing_eligible(descriptor, clean_args)
                 )
                 standing_offer_tool = descriptor.name if offer else None
@@ -749,7 +1019,7 @@ class Orchestrator:
                     target_alias=target_alias,
                     tool=descriptor.name,
                     args_sha256=args_sha256(clean_args),
-                    risk=descriptor.risk,
+                    risk=effective_risk,
                     summary=ActionSummary.format_pending(
                         descriptor.name, clean_args, target_alias, ctx.locale
                     ),
@@ -817,7 +1087,7 @@ class Orchestrator:
 
                 if (
                     approval_req.scope == ApprovalScope.CONVERSATION_15M
-                    and descriptor.risk == RiskTier.R2
+                    and effective_risk == RiskTier.R2
                     and self._scope_store is not None
                 ):
                     self._scope_store.grant_scope(
@@ -1022,6 +1292,17 @@ class Orchestrator:
             except Exception:
                 status = "failed"
 
+        self._update_cu_session_after_call(
+            owner_id=ctx.owner_id,
+            host_id=host.host_id,
+            descriptor=descriptor,
+            clean_args=clean_args,
+            status=status,
+            structured_content=structured_content,
+            active_cu=active_cu,
+            now=self._clock(),
+        )
+
         audit_action = (
             AuditAction.HOST_TOOL_DENIED if status == "denied" else AuditAction.HOST_TOOL_INVOKED
         )
@@ -1034,7 +1315,7 @@ class Orchestrator:
                 request_id=ctx.request_id,
                 metadata={
                     "tool": descriptor.name,
-                    "risk": descriptor.risk.value,
+                    "risk": effective_risk.value,
                     "status": status,
                     "durationMs": max(duration_ms, 0),
                     "platform": host.platform.value,

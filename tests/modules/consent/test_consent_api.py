@@ -96,6 +96,8 @@ def test_u0_default_and_guard(client: TestClient, issuer: LocalIssuer) -> None:
         "conversationText": False,
         "conversationVoice": False,
         "ownerDocuments": False,
+        "hostNotifications": False,
+        "hostScreen": False,
         "version": 0,
         "updatedAt": None,
     }

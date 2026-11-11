@@ -24,6 +24,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -262,6 +263,7 @@ class ComputerUseSessionState:
     outside_allowlist_attempts: int = 0
     password_typed_attempts: int = 0
     injection_attempts_blocked: int = 0
+    started_at_utc: datetime | None = None
 
 
 class InMemoryComputerUseSessionStore:
@@ -282,6 +284,25 @@ class InMemoryComputerUseSessionStore:
         if state is not None and state.active:
             return state
         return None
+
+    def get_active_for_owner_and_host(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        now: datetime | None = None,
+    ) -> ComputerUseSessionState | None:
+        state = self.get_active_for_owner(owner_id)
+        if state is None or state.host_id != host_id:
+            return None
+        if now is not None and state.started_at_utc is not None:
+            elapsed_s = (now - state.started_at_utc).total_seconds()
+            if elapsed_s > state.max_minutes * 60.0:
+                self.mark_ended(state.session_id, "time_budget_exceeded")
+                return None
+        if state.steps_used >= state.max_steps:
+            self.mark_ended(state.session_id, "step_budget_exceeded")
+            return None
+        return state
 
     def put(self, state: ComputerUseSessionState) -> None:
         self._by_id[state.session_id] = state

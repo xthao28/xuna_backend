@@ -46,6 +46,7 @@ from xuna_backend.modules.cognition.domain.types import (
     ToolSpec,
 )
 from xuna_backend.modules.consent.api.routes import RequireConsent
+from xuna_backend.modules.consent.application.ports import ConsentRepository
 from xuna_backend.modules.consent.domain.consent import ConsentClass
 from xuna_backend.modules.conversation.api.websocket import router as ws_router
 from xuna_backend.modules.conversation.application.chat_turn import (
@@ -397,7 +398,17 @@ async def turn(
     board_available = bool(body.boardHid.available) if body.boardHid is not None else False
     self_host_id = body.selfHostId.strip() if body.selfHostId else None
     tools: tuple[ToolSpec, ...] = ()
+    host_screen_consent = False
     if client_caps:
+        try:
+            consent_factory: Callable[[object], ConsentRepository] = state(
+                request, "consent_repository"
+            )
+            consent_state = await consent_factory(session).current(owner.owner_id)
+            host_screen_consent = consent_state.host_screen
+        except Exception:
+            _logger.debug("Failed to read U5 consent for turn", exc_info=True)
+            host_screen_consent = False
         try:
             host_factory: Callable[[object], HostRepository] = state(request, "host_repository")
             hub: HostSessionHub = state(request, "host_session_hub")
@@ -408,6 +419,7 @@ async def turn(
                 host_repo=host_factory(session),
                 hub=hub,
                 self_host_id=self_host_id,
+                host_screen_consent=host_screen_consent,
                 audit=state(request, "audit_log")(session),
             )
         except Exception:
@@ -483,6 +495,7 @@ async def turn(
                     emit_event=emit,
                     request_id=request_id_str,
                     self_host_id=self_host_id,
+                    host_screen_consent=host_screen_consent,
                 ),
             )
 

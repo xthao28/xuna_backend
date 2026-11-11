@@ -440,9 +440,22 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
                     now = datetime.now(UTC)
                     turn_tools: tuple[ToolSpec, ...] = ()
+                    turn_host_screen_consent = False
                     try:
                         async with app.state.database.sessions() as db:
                             if turn_caps:
+                                try:
+                                    u5_consent_repo: ConsentRepository = (
+                                        app.state.consent_repository(db)
+                                    )
+                                    consent_state = await u5_consent_repo.current(owner.owner_id)
+                                    turn_host_screen_consent = consent_state.host_screen
+                                except Exception:
+                                    logger.debug(
+                                        "Failed to read U5 consent for voice turn",
+                                        exc_info=True,
+                                    )
+                                    turn_host_screen_consent = False
                                 try:
                                     turn_tools = await load_tool_catalog_for_owner(
                                         owner_id=owner.owner_id,
@@ -451,6 +464,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         host_repo=app.state.host_repository(db),
                                         hub=app.state.host_session_hub,
                                         self_host_id=turn_self_host_id,
+                                        host_screen_consent=turn_host_screen_consent,
                                         audit=app.state.audit_log(db),
                                     )
                                 except Exception:
@@ -548,6 +562,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                             _caps: frozenset[str] = frozenset(turn_caps),
                             _board: bool = turn_board_available,
                             _self_host: str | None = turn_self_host_id,
+                            _u5_consent: bool = turn_host_screen_consent,
                         ) -> Message:
                             return await _orch.handle_call(
                                 call,
@@ -560,6 +575,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                     emit_event=emit,
                                     request_id=session_id,
                                     self_host_id=_self_host,
+                                    host_screen_consent=_u5_consent,
                                 ),
                             )
 

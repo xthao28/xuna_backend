@@ -70,6 +70,13 @@ _TOOL_DISCOVERY_MODULE_EN = (
 
 _UI_AUTOMATION_TOOLS = frozenset(
     {
+        "cu__session_start",
+        "cu__session_end",
+        "ui__inspect",
+        "input__click",
+        "input__type_text",
+        "input__key",
+        "input__scroll",
         "ui__accessibility_tree",
         "ui__inspect_tree",
         "ui__tap_text",
@@ -87,15 +94,20 @@ _UI_AUTOMATION_TOOLS = frozenset(
 _UI_SKILL_MODULE_VI = (
     "\n- Quy trình tương tác giao diện động (Observe -> Act -> Verify):\n"
     "  1) Quan sát (`Observe`): Khi cần thao tác bên trong một ứng dụng, không dừng "
-    "lại ở việc chỉ mở ứng dụng; hãy đọc `compactUiTree` / `compactAriaTree` trả về "
+    "lại ở việc chỉ mở ứng dụng; hãy đọc `compactUiTree` / `compactAriaTree` / `nodes` trả về "
     "hoặc gọi công cụ inspect tương ứng để lấy danh sách phần tử thực tế kèm mã tham "
-    "chiếu (`@s<id>:e<N>` hoặc `refId`). Không đoán mò mã `refId` khi chưa có cây UI.\n"
-    "  2) Hành động (`Act`): Dùng đúng `refId` thực tế từ snapshot hiện hành để nhập "
-    "liệu, bấm điều khiển hoặc gửi phím tắt (`shortcut:<tổ_hợp_phím>`).\n"
+    "chiếu (`@s<id>:e<N>` hoặc `refId`). Không đoán mò mã phần tử khi chưa có cây UI.\n"
+    "  2) Hành động (`Act`): Dùng đúng mã tham chiếu thực tế từ snapshot hiện hành để nhập "
+    "liệu, bấm điều khiển hoặc gửi phím tắt.\n"
     "  3) Xác minh (`Verify`): Đọc lại cây giao diện mới nhất trả về sau thao tác để "
     "xác nhận kết quả hoặc thực hiện bước kế tiếp. Nếu gặp `stale_ref`, "
     '`ambiguous_target`, hoặc `disposition.retry="unsafe"`, bắt buộc inspect lại cửa '
     "sổ để lấy snapshot mới trước khi thử lại.\n"
+    "  Trên máy tính (khi có `cu__session_start`): mở phiên giới hạn bằng `cu__session_start` "
+    "(khai báo `goal`, danh sách `apps`, `domains`, `maxSteps`, `maxMinutes`), sau đó "
+    "`ui__inspect` -> `input__click` / `input__type_text` / `input__key` / `input__scroll` "
+    "(truyền `elementId` và `elementName` thực tế từ `nodes`), kiểm tra lại trạng thái "
+    "cửa sổ, và đóng phiên bằng `cu__session_end`.\n"
     "  Trên điện thoại Android: `ui__observe` trả `snapshotId` và `ref` từng phần tử; "
     "`ui__act` chỉ dùng `ref` của snapshot mới nhất. Gặp `target_stale` hoặc "
     "`package_changed` thì gọi `ui__observe` lại; `no_visible_change` nghĩa là thao tác "
@@ -106,15 +118,20 @@ _UI_SKILL_MODULE_VI = (
 _UI_SKILL_MODULE_EN = (
     "\n- Dynamic UI interaction protocol (Observe -> Act -> Verify):\n"
     "  1) Observe: When asked to perform an in-app task, do not stop after launching "
-    "the app; read the returned `compactUiTree` / `compactAriaTree` or call the "
+    "the app; read the returned `compactUiTree` / `compactAriaTree` / `nodes` or call the "
     "inspection tool to obtain live element references (`@s<id>:e<N>` or `refId`). "
     "Never guess element IDs without a live UI tree.\n"
-    "  2) Act: Pass the live `refId` from the current snapshot to set values, invoke "
-    "controls, or send keyboard shortcuts (`shortcut:<keys>`).\n"
+    "  2) Act: Pass the live reference from the current snapshot to set values, invoke "
+    "controls, or send keyboard shortcuts.\n"
     "  3) Verify: Inspect the updated UI tree returned in the tool output to confirm "
     "completion or continue. If a tool returns `stale_ref`, `ambiguous_target`, or "
     '`disposition.retry="unsafe"`, re-inspect the window to obtain fresh snapshot '
     "references before retrying.\n"
+    "  On a desktop computer (when `cu__session_start` is available): start a bounded "
+    "session with `cu__session_start` (`goal`, target `apps`, `domains`, `maxSteps`, "
+    "`maxMinutes`), then run `ui__inspect` -> `input__click` / `input__type_text` / "
+    "`input__key` / `input__scroll` using live `elementId` and `elementName` from `nodes`, "
+    "verify the updated window state, and finish with `cu__session_end`.\n"
     "  On an Android phone: `ui__observe` returns a `snapshotId` and a `ref` per element; "
     "`ui__act` accepts only refs from the latest snapshot. On `target_stale` or "
     "`package_changed`, call `ui__observe` again; `no_visible_change` means the action did "
@@ -222,6 +239,8 @@ def truncate_tool_value(
     *,
     max_str: int = 360,
     ui_tree_max: int = _UI_TREE_MAX,
+    max_list: int = 16,
+    ui_nodes_max: int = 64,
 ) -> object:
     if isinstance(val, str):
         return val[:max_str]
@@ -231,13 +250,21 @@ def truncate_tool_value(
                 v,
                 max_str=_max_str_for_key(str(k), max_str, ui_tree_max),
                 ui_tree_max=ui_tree_max,
+                max_list=ui_nodes_max if str(k) == "nodes" else max_list,
+                ui_nodes_max=ui_nodes_max,
             )
             for k, v in list(val.items())[:16]
         }
     if isinstance(val, list | tuple):
         return [
-            truncate_tool_value(item, max_str=max_str, ui_tree_max=ui_tree_max)
-            for item in list(val)[:16]
+            truncate_tool_value(
+                item,
+                max_str=max_str,
+                ui_tree_max=ui_tree_max,
+                max_list=max_list,
+                ui_nodes_max=ui_nodes_max,
+            )
+            for item in list(val)[:max_list]
         ]
     if isinstance(val, int | float | bool) or val is None:
         return val
@@ -247,8 +274,9 @@ def truncate_tool_value(
 def state_driven_hint(output: dict[str, object]) -> str | None:
     """Returns a backend-authored next-step hint for recoverable tool states, else `None`.
 
-    Recognised states: failed sandbox dry-run, stale/ambiguous/missing UI reference, and
-    `disposition.retry == "unsafe"`. Only codes and booleans are read, never free text.
+    Recognised states: failed sandbox dry-run, stale/ambiguous/missing UI reference,
+    missing computer-use session, allowlist mismatch, and `disposition.retry == "unsafe"`.
+    Only codes and booleans are read, never free text.
     """
     if output.get("dryRunOk") is False and str(output.get("stderrPreview", "")).strip():
         skill_id = str(output.get("skillId", "")).strip()[:64]
@@ -260,6 +288,20 @@ def state_driven_hint(output: dict[str, object]) -> str | None:
     err_code = str(output.get("errorCode", "")).strip()
     disp = output.get("disposition")
     retry_unsafe = isinstance(disp, dict) and disp.get("retry") == "unsafe"
+    if err_code == "cu_session_required":
+        return (
+            "Start a bounded session via cu__session_start (declaring goal, apps, domains, "
+            "maxSteps, maxMinutes) before calling ui__inspect or input__* tools."
+        )
+    if err_code in (
+        "target_outside_allowlist",
+        "app_not_in_session_allowlist",
+        "domain_not_in_session_allowlist",
+    ):
+        return (
+            "The active window or domain is outside the session's approved allowlist; bring "
+            "an approved app to the foreground or start a new cu__session_start including it."
+        )
     if err_code == "missing_ref":
         return (
             "The action needs a refId from the current UI snapshot; inspect the window "
@@ -294,6 +336,12 @@ def encode_tool_payload(
         # Vietnamese labels are up to 3 bytes per char: shrink the tree before giving up.
         for tree_max in (_UI_TREE_MAX, 2400, 1500, 800):
             body["output"] = truncate_tool_value(slim_out, ui_tree_max=tree_max)
+            slim_encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+            if len(slim_encoded.encode("utf-8")) <= MAX_TOOL_OUTPUT_BYTES:
+                return slim_encoded
+    if isinstance(output, dict) and isinstance(output.get("nodes"), list):
+        for nodes_max in (48, 32, 20, 12):
+            body["output"] = truncate_tool_value(output, ui_nodes_max=nodes_max)
             slim_encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
             if len(slim_encoded.encode("utf-8")) <= MAX_TOOL_OUTPUT_BYTES:
                 return slim_encoded

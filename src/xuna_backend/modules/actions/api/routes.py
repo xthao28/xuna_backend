@@ -319,6 +319,7 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
     code_gen = getattr(app_state, "code_text_generator", None) or getattr(
         app_state, "expert_text_generator", None
     )
+    cu_store: InMemoryComputerUseSessionStore | None = getattr(app_state, "cu_session_store", None)
     return Orchestrator(
         host_repo=_SessionPerCallHostRepository(app_state),
         hub=hub,
@@ -335,6 +336,7 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
             if getattr(app_state, "standing_approval_repository", None) is not None
             else None
         ),
+        cu_session_store=cu_store,
     )
 
 
@@ -557,6 +559,9 @@ async def emergency_stop_actions(
         request.app.state, "approval_scope_store", None
     )
 
+    cu_store: InMemoryComputerUseSessionStore | None = getattr(
+        request.app.state, "cu_session_store", None
+    )
     orch = Orchestrator(
         host_repo=host_factory(session),
         hub=hub,
@@ -566,13 +571,9 @@ async def emergency_stop_actions(
         last_target_store=last_target_store,
         audit=audit_factory(session),
         scope_store=scope_store,
+        cu_session_store=cu_store,
     )
     reason = body.reason if body is not None else "owner_app"
-    cu_store: InMemoryComputerUseSessionStore | None = getattr(
-        request.app.state, "cu_session_store", None
-    )
-    if cu_store is not None:
-        cu_store.stop_all_for_owner(owner.owner_id, reason=reason)
     summary = await orch.emergency_stop(
         owner_id=owner.owner_id,
         reason=reason,

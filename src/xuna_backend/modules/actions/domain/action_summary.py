@@ -127,6 +127,43 @@ class ActionSummary:
                 return f"Mở bảng thông báo trên {target}"[:240]
             case "ui.quick_settings":
                 return f"Mở bảng cài đặt nhanh trên {target}"[:240]
+            case "cu.session_start":
+                goal = str(arguments.get("goal", ""))[:60]
+                raw_apps = arguments.get("apps")
+                apps_label = (
+                    ", ".join(str(a)[:24] for a in raw_apps[:4])
+                    if isinstance(raw_apps, list) and raw_apps
+                    else "ứng dụng"
+                )
+                max_steps = arguments.get("maxSteps", 12)
+                max_mins = arguments.get("maxMinutes", 5)
+                return (
+                    f"Bắt đầu phiên điều khiển '{goal}' ({apps_label}, "
+                    f"tối đa {max_steps} bước/{max_mins} phút) trên {target}"
+                )[:240]
+            case "cu.session_end":
+                return f"Kết thúc phiên điều khiển màn hình trên {target}"[:240]
+            case "screen.capture":
+                return f"Chụp ảnh cửa sổ đang mở trên {target}"[:240]
+            case "ui.inspect":
+                return f"Đọc cây giao diện cửa sổ đang mở trên {target}"[:240]
+            case "input.click":
+                elem = str(arguments.get("elementName") or arguments.get("elementId") or "phần tử")[
+                    :40
+                ]
+                return f"Nhấp vào '{elem}' trên {target}"[:240]
+            case "input.type_text":
+                typed = str(arguments.get("text", ""))[:60]
+                elem = str(
+                    arguments.get("elementName") or arguments.get("elementId") or "ô nhập liệu"
+                )[:40]
+                return f"Nhập '{typed}' vào '{elem}' trên {target}"[:240]
+            case "input.key":
+                combo = str(arguments.get("combo", ""))[:24]
+                return f"Bấm phím '{combo}' trên {target}"[:240]
+            case "input.scroll":
+                direction = str(arguments.get("direction", "down"))[:12]
+                return f"Cuộn cửa sổ ({direction}) trên {target}"[:240]
             case "url.open":
                 raw_url = str(arguments.get("url", ""))
                 host = urlparse(raw_url).hostname or raw_url[:40]
@@ -370,6 +407,43 @@ class ActionSummary:
                 return f"Open notifications shade on {target}"[:240]
             case "ui.quick_settings":
                 return f"Open quick settings on {target}"[:240]
+            case "cu.session_start":
+                goal = str(arguments.get("goal", ""))[:60]
+                raw_apps = arguments.get("apps")
+                apps_label = (
+                    ", ".join(str(a)[:24] for a in raw_apps[:4])
+                    if isinstance(raw_apps, list) and raw_apps
+                    else "apps"
+                )
+                max_steps = arguments.get("maxSteps", 12)
+                max_mins = arguments.get("maxMinutes", 5)
+                return (
+                    f"Start computer-use session '{goal}' ({apps_label}, "
+                    f"max {max_steps} steps/{max_mins} min) on {target}"
+                )[:240]
+            case "cu.session_end":
+                return f"End computer-use session on {target}"[:240]
+            case "screen.capture":
+                return f"Capture active window screenshot on {target}"[:240]
+            case "ui.inspect":
+                return f"Inspect active window UI tree on {target}"[:240]
+            case "input.click":
+                elem = str(arguments.get("elementName") or arguments.get("elementId") or "element")[
+                    :40
+                ]
+                return f"Click '{elem}' on {target}"[:240]
+            case "input.type_text":
+                typed = str(arguments.get("text", ""))[:60]
+                elem = str(arguments.get("elementName") or arguments.get("elementId") or "field")[
+                    :40
+                ]
+                return f"Type '{typed}' into '{elem}' on {target}"[:240]
+            case "input.key":
+                combo = str(arguments.get("combo", ""))[:24]
+                return f"Press key '{combo}' on {target}"[:240]
+            case "input.scroll":
+                direction = str(arguments.get("direction", "down"))[:12]
+                return f"Scroll window ({direction}) on {target}"[:240]
             case "url.open":
                 raw_url = str(arguments.get("url", ""))
                 host = urlparse(raw_url).hostname or raw_url[:40]
