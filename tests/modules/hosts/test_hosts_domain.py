@@ -7,7 +7,9 @@ from pathlib import Path
 import pytest
 
 from xuna_backend.modules.hosts.application.xtp_frames import (
+    ParsedRpcResponse,
     parse_agent_frame,
+    parse_preflight_result,
     parse_tools_list_result,
 )
 from xuna_backend.modules.hosts.domain.crypto import (
@@ -204,3 +206,18 @@ def test_sample_frames_parse_cleanly() -> None:
     assert manifest.find_tool("host.status").family == ToolFamily.HOST  # type: ignore[union-attr]
     for desc in descriptors:
         assert ToolDescriptor.from_wire(desc.to_wire()) == desc
+
+    # UDC-17 S17.1: the preflight frames the Dart builder must produce parse on this side.
+    ok_frame = frames["preflightOkResponse"]
+    denied_frame = frames["preflightDeniedResponse"]
+    assert isinstance(ok_frame, dict) and isinstance(denied_frame, dict)
+    for frame in (ok_frame, denied_frame):
+        parsed_frame = parse_agent_frame(json.dumps(frame))
+        assert isinstance(parsed_frame, ParsedRpcResponse)
+    ok = parse_preflight_result(ok_frame["result"])
+    assert ok.effective_risk == RiskTier.R3
+    assert ok.element_name == "Gửi báo cáo"
+    denied = parse_preflight_result(denied_frame["result"])
+    assert denied.status == "denied"
+    assert denied.error_code == "password_field_forbidden"
+    assert denied.effective_risk is None

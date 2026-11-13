@@ -8,7 +8,7 @@ Enforces:
   treated as instructions by the planner.
 - Hard refusals for denylisted apps/processes (terminals, password managers, banking apps, system
   settings), elevated windows, out-of-scope apps/domains, and password fields (`•••`).
-- Step budget (`maxSteps <= 20`), time budget (`maxMinutes <= 10`), 3 consecutive `no_change` stop
+- Step budget (`maxSteps <= 40`), time budget (`maxMinutes <= 20`), 3 consecutive `no_change` stop
   (`no_progress`), duplicate-action stop (`duplicate_action`), and 15 s dead-man switch
   (3 missed 5 s phone heartbeats → `heartbeat_timeout`).
 - Zero retention of screenshots or accessibility trees in DB or logs.
@@ -24,11 +24,12 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-from xuna_backend.modules.actions.domain.entities import ApprovalScope
+from xuna_backend.modules.actions.domain.action_summary import ActionSummary
+from xuna_backend.modules.actions.domain.entities import ApprovalScope, ComputerUseSessionEvent
 from xuna_backend.modules.consent.application.ports import ConsentRepository
 from xuna_backend.modules.consent.application.use_cases import require_consent
 from xuna_backend.modules.consent.domain.consent import ConsentClass
@@ -36,8 +37,11 @@ from xuna_backend.modules.hosts.domain.crypto import approval_proof_message
 from xuna_backend.modules.hosts.domain.entities import HostId
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
 
-MAX_SESSION_STEPS = 20
-MAX_SESSION_MINUTES = 10
+if TYPE_CHECKING:
+    from xuna_backend.modules.actions.application.ports import ComputerUseSessionStore
+
+MAX_SESSION_STEPS = 40
+MAX_SESSION_MINUTES = 20
 MAX_GOAL_LENGTH = 200
 MAX_CONSECUTIVE_NO_CHANGE = 3
 HEARTBEAT_INTERVAL_S = 5.0
@@ -100,7 +104,9 @@ _CONSEQUENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
     re.compile(
-        r"(gửi|xác\s*nhận|thanh\s*toán|mua\s*ngay|đặt\s*hàng|chuyển\s*khoản|xóa|xoá|đăng\s*bài|xuất\s*bản|gỡ\s*cài\s*đặt|hủy\s*tài\s*khoản)",
+        # Bare "đăng" is a post/publish button; "đăng nhập" / "đăng ký" (sign in, sign up)
+        # are not commits.
+        r"(gửi|xác\s*nhận|thanh\s*toán|mua\s*ngay|đặt\s*hàng|chuyển\s*khoản|xóa|xoá|đăng(?!\s*(nhập|nhap|ký|ky)\b)|xuất\s*bản|gỡ\s*cài\s*đặt|hủy\s*tài\s*khoản)",
         re.IGNORECASE,
     ),
 )
@@ -131,6 +137,22 @@ def is_consequential_element_name(label: str) -> bool:
     return any(p.search(trimmed) is not None for p in _CONSEQUENTIAL_PATTERNS)
 
 
+_ACTIVATION_KEYS: frozenset[str] = frozenset({"enter", "return", "space"})
+
+
+def is_activation_key_combo(combo: str) -> bool:
+    """True when `combo` presses Enter/Return or Space, with or without modifiers.
+
+    These keys activate whatever control has focus (submit a form, send a message, press a
+    focused button), so `input.key` treats them as R3. The check reads only the final key of
+    the combo and never the model-declared `inForm` flag.
+    """
+    spec = combo.strip()
+    if not spec:
+        return False
+    return spec.split("+")[-1].strip().lower() in _ACTIVATION_KEYS
+
+
 def is_hard_denied_target(app_or_process: str) -> bool:
     normalized = app_or_process.strip().lower()
     if not normalized:
@@ -154,10 +176,33 @@ def is_password_ui_node(node: dict[str, Any]) -> bool:
         return True
     if "secure" in role or "secure" in subrole:
         return True
+    # The name is a weak signal: it decides only for an editable field, or for a node
+    # whose role is unknown (fail closed). A "Quên mật khẩu" button or link is not a
+    # password field (UDC-17 S17.6). Same rule as the host's `isPasswordUiNode`.
+    if role and not is_editable_field_role(role):
+        return False
     name = str(node.get("name") or "").lower()
-    return (
-        "password" in name or "mật khẩu" in name or "mat khau" in name or "passcode" in name
-    ) and ("text" in role or "edit" in role or "field" in role or "input" in role)
+    return any(
+        token in name for token in ("password", "mật khẩu", "mat khau", "passcode", "mã pin")
+    )
+
+
+# Role fragments of editable text inputs across UIA, AX and web trees. Static text
+# (`Text`, `AXStaticText`) is not editable.
+_EDITABLE_FIELD_ROLE_HINTS: tuple[str, ...] = (
+    "edit",
+    "field",
+    "input",
+    "textbox",
+    "textarea",
+    "searchbox",
+    "combobox",
+)
+
+
+def is_editable_field_role(role: str) -> bool:
+    lowered = role.lower()
+    return any(hint in lowered for hint in _EDITABLE_FIELD_ROLE_HINTS)
 
 
 def redact_ui_tree_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -243,6 +288,15 @@ class ComputerUseProgressEvent:
 
 @dataclass
 class ComputerUseSessionState:
+    """One desktop control session.
+
+    Durable fields (UDC-17 S17.6, table `cu_sessions`): ids, goal while running, scope,
+    budgets, `steps_used`, `typed_count`, UTC start and heartbeat times, `active` and
+    `stop_reason`. Process-local only, never stored: `cached_nodes` (the last UI tree) and
+    `typed_since_commit` (draft text). After a restart those are empty; `typed_count` still
+    tells the next commit card that text was typed.
+    """
+
     session_id: str
     owner_id: uuid.UUID
     host_id: HostId
@@ -251,81 +305,184 @@ class ComputerUseSessionState:
     allowed_domains: tuple[str, ...]
     max_steps: int
     max_minutes: int
-    started_at_monotonic: float
-    last_heartbeat_monotonic: float
+    started_at_utc: datetime
+    last_heartbeat_at: datetime
     steps_used: int = 0
     consecutive_no_change: int = 0
     last_action_fingerprint: str | None = None
     cached_nodes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # ADR-0015 D1: text typed since the last signed commit (drafts run unsigned), shown on
+    # the next commit card so the owner sees what will be sent. Memory only, never logged.
+    typed_since_commit: list[str] = field(default_factory=list)
+    # How many drafts were typed since the last signed commit. Content-free and durable.
+    typed_count: int = 0
+    # Owner approvals this session asked for, counting the signature that started it
+    # (UDC-17 S17.6 measurement; audited when the session ends).
+    owner_prompts: int = 1
     active: bool = True
     stop_reason: str | None = None
     unapproved_r3_attempts: int = 0
     outside_allowlist_attempts: int = 0
     password_typed_attempts: int = 0
     injection_attempts_blocked: int = 0
-    started_at_utc: datetime | None = None
+    target_alias: str = ""
+
+
+def session_expiry_reason(state: ComputerUseSessionState, now: datetime) -> str | None:
+    """Why a running session must end at `now`, or `None` while it may continue.
+
+    Checked lazily wherever the session is read: the phone heartbeat (dead-man switch,
+    3 missed 5 s heartbeats), the time budget and the step budget.
+    """
+    if (now - state.last_heartbeat_at).total_seconds() > HEARTBEAT_TIMEOUT_S:
+        return "heartbeat_timeout"
+    if (now - state.started_at_utc).total_seconds() > state.max_minutes * 60.0:
+        return "time_budget_exceeded"
+    if state.steps_used >= state.max_steps:
+        return "step_budget_exceeded"
+    return None
+
+
+# Bounds for the `cu_session` card payload (UDC-17 S17.3).
+_SESSION_EVENT_TYPED_CHARS = 500
+
+
+def build_session_event(
+    state: ComputerUseSessionState, now: datetime, summary: str
+) -> ComputerUseSessionEvent:
+    """Live state of `state` for the phone's session card."""
+    seconds_left = 0
+    if state.active:
+        elapsed = (now - state.started_at_utc).total_seconds()
+        seconds_left = max(int(state.max_minutes * 60 - elapsed), 0)
+    return ComputerUseSessionEvent(
+        session_id=state.session_id,
+        host_id=str(state.host_id),
+        target=state.target_alias,
+        goal=state.goal[:MAX_GOAL_LENGTH],
+        apps=state.allowed_apps,
+        domains=state.allowed_domains,
+        step=state.steps_used,
+        max_steps=state.max_steps,
+        max_minutes=state.max_minutes,
+        seconds_left=seconds_left,
+        status="running" if state.active else "ended",
+        summary=summary[:240] or state.goal[:240] or state.session_id,
+        typed=tuple(t[:_SESSION_EVENT_TYPED_CHARS] for t in state.typed_since_commit),
+        end_reason=None if state.active else state.stop_reason,
+        rerun_fits_card=ActionSummary.rerun_scope_fits_card(
+            state.allowed_apps,
+            state.allowed_domains,
+            state.max_steps,
+            state.max_minutes,
+            state.target_alias,
+        ),
+    )
+
+
+def session_event_payload(event: ComputerUseSessionEvent) -> dict[str, Any]:
+    """Wire form of a `cu_session` event (SSE, voice WebSocket and `GET /cu-session`)."""
+    payload: dict[str, Any] = {
+        "sessionId": event.session_id,
+        "hostId": event.host_id,
+        "target": event.target,
+        "goal": event.goal,
+        "apps": list(event.apps),
+        "domains": list(event.domains),
+        "step": event.step,
+        "maxSteps": event.max_steps,
+        "maxMinutes": event.max_minutes,
+        "secondsLeft": event.seconds_left,
+        "status": event.status,
+        "summary": event.summary,
+        "typed": list(event.typed),
+    }
+    if event.end_reason is not None:
+        payload["endReason"] = event.end_reason
+    if event.rerun_fits_card is not None:
+        payload["rerunFitsCard"] = event.rerun_fits_card
+    return payload
 
 
 class InMemoryComputerUseSessionStore:
-    """Tracks active computer-use sessions in memory only (zero DB screen/tree retention)."""
+    """`ComputerUseSessionStore` held in process memory (tests and DB-less harnesses).
+
+    Production uses the PostgreSQL store (UDC-17 S17.6); this one loses every session when
+    the process restarts.
+    """
 
     def __init__(self) -> None:
         self._by_id: dict[str, ComputerUseSessionState] = {}
-        self._by_owner: dict[uuid.UUID, str] = {}
 
-    def get(self, session_id: str) -> ComputerUseSessionState | None:
+    async def get(self, session_id: str) -> ComputerUseSessionState | None:
         return self._by_id.get(session_id)
 
-    def get_active_for_owner(self, owner_id: uuid.UUID) -> ComputerUseSessionState | None:
-        sid = self._by_owner.get(owner_id)
-        if sid is None:
-            return None
-        state = self._by_id.get(sid)
-        if state is not None and state.active:
-            return state
+    async def get_active_for_owner(self, owner_id: uuid.UUID) -> ComputerUseSessionState | None:
+        for state in self._by_id.values():
+            if state.owner_id == owner_id and state.active:
+                return state
         return None
 
-    def get_active_for_owner_and_host(
-        self,
-        owner_id: uuid.UUID,
-        host_id: HostId,
-        now: datetime | None = None,
-    ) -> ComputerUseSessionState | None:
-        state = self.get_active_for_owner(owner_id)
-        if state is None or state.host_id != host_id:
-            return None
-        if now is not None and state.started_at_utc is not None:
-            elapsed_s = (now - state.started_at_utc).total_seconds()
-            if elapsed_s > state.max_minutes * 60.0:
-                self.mark_ended(state.session_id, "time_budget_exceeded")
-                return None
-        if state.steps_used >= state.max_steps:
-            self.mark_ended(state.session_id, "step_budget_exceeded")
-            return None
-        return state
-
-    def put(self, state: ComputerUseSessionState) -> None:
+    async def start(self, state: ComputerUseSessionState, now: datetime) -> None:
+        await self.stop_all_for_owner(state.owner_id, "replaced", now)
         self._by_id[state.session_id] = state
-        self._by_owner[state.owner_id] = state.session_id
 
-    def mark_ended(self, session_id: str, reason: str) -> ComputerUseSessionState | None:
+    async def mark_ended(
+        self, session_id: str, reason: str, now: datetime
+    ) -> ComputerUseSessionState | None:
         state = self._by_id.get(session_id)
         if state is None:
             return None
-        state.active = False
-        state.stop_reason = reason
+        if state.active:
+            state.active = False
+            state.stop_reason = reason
+            state.goal = ""
         state.cached_nodes.clear()
-        if self._by_owner.get(state.owner_id) == session_id:
-            self._by_owner.pop(state.owner_id, None)
+        state.typed_since_commit.clear()
+        state.typed_count = 0
         return state
 
-    def stop_all_for_owner(self, owner_id: uuid.UUID, reason: str = "stopped") -> int:
+    async def stop_all_for_owner(self, owner_id: uuid.UUID, reason: str, now: datetime) -> int:
         stopped = 0
         for state in list(self._by_id.values()):
             if state.owner_id == owner_id and state.active:
-                self.mark_ended(state.session_id, reason)
+                await self.mark_ended(state.session_id, reason, now)
                 stopped += 1
         return stopped
+
+    async def record_step(self, session_id: str) -> int | None:
+        state = self._by_id.get(session_id)
+        if state is None or not state.active:
+            return None
+        state.steps_used += 1
+        return state.steps_used
+
+    async def set_scope(
+        self, session_id: str, apps: tuple[str, ...], domains: tuple[str, ...]
+    ) -> None:
+        state = self._by_id.get(session_id)
+        if state is not None and state.active:
+            state.allowed_apps = apps
+            state.allowed_domains = domains
+
+    async def touch_heartbeat(self, session_id: str, owner_id: uuid.UUID, now: datetime) -> bool:
+        state = self._by_id.get(session_id)
+        if state is None or state.owner_id != owner_id or not state.active:
+            return False
+        state.last_heartbeat_at = now
+        return True
+
+    async def set_typed_count(self, session_id: str, count: int) -> None:
+        state = self._by_id.get(session_id)
+        if state is not None and state.active:
+            state.typed_count = count
+
+    async def record_prompt(self, session_id: str) -> int | None:
+        state = self._by_id.get(session_id)
+        if state is None or not state.active:
+            return None
+        state.owner_prompts += 1
+        return state.owner_prompts
 
 
 HostToolCaller = Callable[[HostId, str, dict[str, Any]], Awaitable[dict[str, Any]]]
@@ -339,7 +496,7 @@ class ComputerUseSessionRunner:
         self,
         *,
         consent_repo: ConsentRepository,
-        session_store: InMemoryComputerUseSessionStore,
+        session_store: ComputerUseSessionStore,
         signature_verifier: SignatureVerifier,
         host_caller: HostToolCaller,
         clock_monotonic: Callable[[], float] = time.monotonic,
@@ -351,6 +508,9 @@ class ComputerUseSessionRunner:
         self._host_caller = host_caller
         self._clock = clock_monotonic
         self._on_progress = on_progress
+        # This runner measures its budgets on its own monotonic clock.
+        self._started_m: dict[str, float] = {}
+        self._heartbeat_m: dict[str, float] = {}
 
     def _verify_r3_proof(
         self,
@@ -422,7 +582,7 @@ class ComputerUseSessionRunner:
         )
 
         # End any previous active session for this owner
-        existing = self._store.get_active_for_owner(owner_id)
+        existing = await self._store.get_active_for_owner(owner_id)
         if existing is not None:
             await self.end_session(
                 owner_id=owner_id,
@@ -433,6 +593,7 @@ class ComputerUseSessionRunner:
         host_resp = await self._host_caller(host_id, "cu.session_start", start_args)
         session_id = str(host_resp.get("sessionId") or uuid.uuid4())
         now_m = self._clock()
+        now_utc = datetime.now(UTC)
         state = ComputerUseSessionState(
             session_id=session_id,
             owner_id=owner_id,
@@ -442,10 +603,12 @@ class ComputerUseSessionRunner:
             allowed_domains=tuple(d.strip().lower() for d in (domains or []) if d.strip()),
             max_steps=max_steps,
             max_minutes=max_minutes,
-            started_at_monotonic=now_m,
-            last_heartbeat_monotonic=now_m,
+            started_at_utc=now_utc,
+            last_heartbeat_at=now_utc,
         )
-        self._store.put(state)
+        await self._store.start(state, now_utc)
+        self._started_m[session_id] = now_m
+        self._heartbeat_m[session_id] = now_m
         if self._on_progress is not None:
             await self._on_progress(
                 ComputerUseProgressEvent(
@@ -458,27 +621,30 @@ class ComputerUseSessionRunner:
             )
         return state
 
-    def record_heartbeat(self, *, owner_id: uuid.UUID, session_id: str) -> bool:
-        state = self._store.get(session_id)
+    async def record_heartbeat(self, *, owner_id: uuid.UUID, session_id: str) -> bool:
+        state = await self._store.get(session_id)
         if state is None or state.owner_id != owner_id or not state.active:
             return False
-        state.last_heartbeat_monotonic = self._clock()
+        self._heartbeat_m[session_id] = self._clock()
         return True
 
-    def _check_liveness_and_budgets(
+    async def _check_liveness_and_budgets(
         self, state: ComputerUseSessionState, *, count_step: bool
     ) -> None:
         if not state.active:
             raise ComputerUseError(state.stop_reason or "session_inactive")
         now_m = self._clock()
-        if (now_m - state.last_heartbeat_monotonic) > HEARTBEAT_TIMEOUT_S:
-            self._store.mark_ended(state.session_id, "heartbeat_timeout")
+        now_utc = datetime.now(UTC)
+        started_m = self._started_m.get(state.session_id, now_m)
+        heartbeat_m = self._heartbeat_m.get(state.session_id, now_m)
+        if (now_m - heartbeat_m) > HEARTBEAT_TIMEOUT_S:
+            await self._store.mark_ended(state.session_id, "heartbeat_timeout", now_utc)
             raise ComputerUseError("heartbeat_timeout")
-        if (now_m - state.started_at_monotonic) > (state.max_minutes * 60.0):
-            self._store.mark_ended(state.session_id, "time_budget_exceeded")
+        if (now_m - started_m) > (state.max_minutes * 60.0):
+            await self._store.mark_ended(state.session_id, "time_budget_exceeded", now_utc)
             raise ComputerUseError("time_budget_exceeded")
         if count_step and state.steps_used >= state.max_steps:
-            self._store.mark_ended(state.session_id, "step_budget_exceeded")
+            await self._store.mark_ended(state.session_id, "step_budget_exceeded", now_utc)
             raise ComputerUseError("step_budget_exceeded")
 
     def _validate_window_target(
@@ -512,10 +678,10 @@ class ComputerUseSessionRunner:
         capture_screen: bool = False,
     ) -> dict[str, Any]:
         await require_consent(self._consent_repo, owner_id, ConsentClass.HOST_SCREEN)
-        state = self._store.get(session_id)
+        state = await self._store.get(session_id)
         if state is None or state.owner_id != owner_id:
             raise ComputerUseError("session_not_found")
-        self._check_liveness_and_budgets(state, count_step=False)
+        await self._check_liveness_and_budgets(state, count_step=False)
 
         raw_tree = await self._host_caller(
             state.host_id, "ui.inspect", {"maxNodes": min(max(max_nodes, 1), 300)}
@@ -577,10 +743,10 @@ class ComputerUseSessionRunner:
         step_summary: str | None = None,
     ) -> dict[str, Any]:
         await require_consent(self._consent_repo, owner_id, ConsentClass.HOST_SCREEN)
-        state = self._store.get(session_id)
+        state = await self._store.get(session_id)
         if state is None or state.owner_id != owner_id:
             raise ComputerUseError("session_not_found")
-        self._check_liveness_and_budgets(state, count_step=True)
+        await self._check_liveness_and_budgets(state, count_step=True)
 
         if tool_name not in ("input.click", "input.type_text", "input.key", "input.scroll"):
             raise ComputerUseError("unsupported_cu_tool", tool_name)
@@ -617,14 +783,10 @@ class ComputerUseSessionRunner:
             node_name = str((target_node or {}).get("name") or arguments.get("elementName") or "")
             if is_consequential_element_name(node_name):
                 requires_r3 = True
-        elif tool_name == "input.key":
-            combo = str(arguments.get("combo") or "")
-            in_form = arguments.get("inForm") is True or (
-                target_node is not None
-                and str(target_node.get("role") or "").lower() in ("form", "textbox", "edit")
-            )
-            if combo == "Enter" and in_form:
-                requires_r3 = True
+        elif tool_name == "input.key" and is_activation_key_combo(
+            str(arguments.get("combo") or "")
+        ):
+            requires_r3 = True
 
         if requires_r3:
             try:
@@ -641,18 +803,19 @@ class ComputerUseSessionRunner:
         # Duplicate action guard
         fingerprint = f"{tool_name}:{_canonical_args_sha256(arguments)}"
         if state.last_action_fingerprint == fingerprint:
-            self._store.mark_ended(state.session_id, "duplicate_action")
+            await self._store.mark_ended(state.session_id, "duplicate_action", datetime.now(UTC))
             raise ComputerUseError("duplicate_action")
 
         host_result = await self._host_caller(state.host_id, tool_name, arguments)
-        state.steps_used += 1
+        new_steps = await self._store.record_step(state.session_id)
+        state.steps_used = new_steps if new_steps is not None else state.steps_used + 1
         state.last_action_fingerprint = fingerprint
 
         effect = str(host_result.get("effect") or "changed")
         if effect == "no_change":
             state.consecutive_no_change += 1
             if state.consecutive_no_change >= MAX_CONSECUTIVE_NO_CHANGE:
-                self._store.mark_ended(state.session_id, "no_progress")
+                await self._store.mark_ended(state.session_id, "no_progress", datetime.now(UTC))
                 raise ComputerUseError("no_progress")
         else:
             state.consecutive_no_change = 0
@@ -683,11 +846,11 @@ class ComputerUseSessionRunner:
         session_id: str,
         reason: str = "completed",
     ) -> dict[str, Any]:
-        state = self._store.get(session_id)
+        state = await self._store.get(session_id)
         if state is None or state.owner_id != owner_id:
             raise ComputerUseError("session_not_found")
         steps_used = state.steps_used
-        self._store.mark_ended(session_id, reason)
+        await self._store.mark_ended(session_id, reason, datetime.now(UTC))
         with contextlib.suppress(Exception):
             await self._host_caller(
                 state.host_id,

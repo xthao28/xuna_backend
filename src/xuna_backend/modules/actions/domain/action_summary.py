@@ -28,8 +28,168 @@ _BOARD_KEY_LABELS_EN: dict[str, str] = {
 }
 
 
+# Longest app id or domain a `cu.session_start` / `cu.session_extend` card shows (UDC-17 S17.3,
+# S17.5). Longer items are refused before the owner is asked, never cut: a cut domain can look
+# like a different site.
+MAX_SCOPE_ITEM_DISPLAY_CHARS = 60
+_MAX_SUMMARY_CHARS = 240
+_MAX_GOAL_DISPLAY_CHARS = 60
+
+
+def _list_arg(arguments: dict[str, object], key: str) -> list[str]:
+    raw = arguments.get(key)
+    if not isinstance(raw, list):
+        return []
+    return [str(v) for v in raw if str(v).strip()]
+
+
+def _extend_items(arguments: dict[str, object]) -> list[str]:
+    return _list_arg(arguments, "apps") + _list_arg(arguments, "domains")
+
+
+def _scope_items(arguments: dict[str, object]) -> str:
+    """Apps and domains of a `cu.session_extend` call, all of them, for the approval card."""
+    return ", ".join(_extend_items(arguments)) or "?"
+
+
+def _items_fit(items: list[str]) -> bool:
+    return all(len(item) <= MAX_SCOPE_ITEM_DISPLAY_CHARS for item in items)
+
+
+def _extend_text(arguments: dict[str, object], target: str, locale: Locale) -> str:
+    """The uncut `cu.session_extend` card: every added app and domain."""
+    added = _scope_items(arguments)
+    if locale == Locale.EN:
+        return f"Add to the computer-use session: {added} on {target}"
+    return f"Thêm vào phiên điều khiển: {added} trên {target}"
+
+
+def _session_start_text(arguments: dict[str, object], target: str, locale: Locale) -> str:
+    """The uncut `cu.session_start` card (UDC-17 S17.5 follow-up).
+
+    Every app and every domain is listed, under its own label, together with both budgets and
+    the computer: that is the scope the owner signs. Only the goal, which is the model's
+    restatement and not part of the scope, is shortened (with an ellipsis) past 60 characters.
+    """
+    goal = " ".join(str(arguments.get("goal", "")).split())
+    if len(goal) > _MAX_GOAL_DISPLAY_CHARS:
+        goal = goal[: _MAX_GOAL_DISPLAY_CHARS - 1] + "…"
+    apps = ", ".join(_list_arg(arguments, "apps")) or "?"
+    domains = _list_arg(arguments, "domains")
+    max_steps = arguments.get("maxSteps", 12)
+    max_mins = arguments.get("maxMinutes", 5)
+    if locale == Locale.EN:
+        domains_label = ", ".join(domains) or "none"
+        return (
+            f"Start computer-use session '{goal}' on {target}: apps {apps}; "
+            f"domains {domains_label}; max {max_steps} steps/{max_mins} min"
+        )
+    domains_label = ", ".join(domains) or "không có"
+    return (
+        f"Bắt đầu phiên điều khiển '{goal}' trên {target}: app {apps}; "
+        f"tên miền {domains_label}; tối đa {max_steps} bước/{max_mins} phút"
+    )
+
+
 class ActionSummary:
     """Deterministic Vietnamese & English summaries for approval cards and chat chips."""
+
+    @staticmethod
+    def with_typed_text(
+        summary: str,
+        drafts: list[str],
+        locale: Locale = Locale.VI,
+        *,
+        typed_count: int = 0,
+    ) -> str:
+        """Appends the text typed since the last commit to a commit card.
+
+        ADR-0015 D1: drafts run unsigned, so the card for the next commit (Send, Enter) is
+        where the owner sees what will be committed. The result fits the 240-character
+        summary limit; the draft text is cut with an ellipsis when needed.
+
+        When `typed_count` says drafts were typed but their text is not available (the
+        backend restarted), the card says so instead of looking as if nothing was typed
+        (UDC-17 S17.6). The card is sent to the phone only; the stored approval keeps the
+        summary without draft text.
+        """
+        if not drafts:
+            if typed_count <= 0:
+                return summary[:240]
+            notice = (
+                f" · Typed {typed_count} part(s) earlier; the text can't be shown again"
+                if locale == Locale.EN
+                else f" · Đã gõ {typed_count} đoạn trước đó, không hiện lại được nội dung"
+            )
+            return summary[: 240 - len(notice)] + notice
+        label = "Typed" if locale == Locale.EN else "Đã gõ"
+        joined = " / ".join(" ".join(d.split()) for d in drafts)
+        prefix = f"{summary} · {label}: '"
+        room = 240 - len(prefix) - 1
+        if room < 8:
+            return summary[:240]
+        if len(joined) > room:
+            joined = joined[: room - 1] + "…"
+        return f"{prefix}{joined}'"
+
+    @staticmethod
+    def extend_scope_fits_card(
+        arguments: dict[str, object],
+        target_alias: str,
+        locale: Locale = Locale.VI,
+    ) -> bool:
+        """Whether the `cu.session_extend` approval card can show every added app and domain in
+        full (UDC-17 S17.3). When it cannot, the call is refused instead of asking the owner to
+        sign a scope they cannot read."""
+        if not _items_fit(_extend_items(arguments)):
+            return False
+        return len(_extend_text(arguments, target_alias, locale)) <= _MAX_SUMMARY_CHARS
+
+    @staticmethod
+    def start_scope_fits_card(
+        arguments: dict[str, object],
+        target_alias: str,
+        locale: Locale = Locale.VI,
+    ) -> bool:
+        """Whether the `cu.session_start` approval card shows every app and domain in full.
+        When it cannot, the call is refused before the owner is asked, as for
+        `cu.session_extend`: the owner never signs a scope the card cut."""
+        if not _items_fit(_extend_items(arguments)):
+            return False
+        return len(_session_start_text(arguments, target_alias, locale)) <= _MAX_SUMMARY_CHARS
+
+    @staticmethod
+    def rerun_scope_fits_card(
+        apps: tuple[str, ...],
+        domains: tuple[str, ...],
+        max_steps: int,
+        max_minutes: int,
+        target_alias: str,
+    ) -> bool:
+        """Whether a template saved from this session scope could ever be rerun: its
+        `cu.session_start` card must fit with the longest goal the card shows, in either
+        locale. Sent to the phone so it can refuse to save a template that would only be
+        refused with `start_scope_too_long` later (UDC-17 S17.5 follow-up)."""
+        arguments: dict[str, object] = {
+            "goal": "x" * _MAX_GOAL_DISPLAY_CHARS,
+            "apps": list(apps),
+            "domains": list(domains),
+            "maxSteps": max_steps,
+            "maxMinutes": max_minutes,
+        }
+        return all(
+            ActionSummary.start_scope_fits_card(arguments, target_alias, locale)
+            for locale in (Locale.VI, Locale.EN)
+        )
+
+    @staticmethod
+    def with_template_name(summary: str, name: str, locale: Locale = Locale.VI) -> str:
+        """Prefixes the card of a `cu.session_start` that reruns a saved template (UDC-17
+        S17.5) with the template's name, only when the whole card still fits: the scope the
+        owner signs is never pushed off the card by the prefix."""
+        prefix = f"Rerun template '{name}': " if locale == Locale.EN else f"Chạy lại mẫu '{name}': "
+        prefixed = prefix + summary
+        return prefixed if len(prefixed) <= _MAX_SUMMARY_CHARS else summary
 
     @staticmethod
     def format_pending(
@@ -128,25 +288,21 @@ class ActionSummary:
             case "ui.quick_settings":
                 return f"Mở bảng cài đặt nhanh trên {target}"[:240]
             case "cu.session_start":
-                goal = str(arguments.get("goal", ""))[:60]
-                raw_apps = arguments.get("apps")
-                apps_label = (
-                    ", ".join(str(a)[:24] for a in raw_apps[:4])
-                    if isinstance(raw_apps, list) and raw_apps
-                    else "ứng dụng"
-                )
-                max_steps = arguments.get("maxSteps", 12)
-                max_mins = arguments.get("maxMinutes", 5)
-                return (
-                    f"Bắt đầu phiên điều khiển '{goal}' ({apps_label}, "
-                    f"tối đa {max_steps} bước/{max_mins} phút) trên {target}"
-                )[:240]
+                # Every app and domain is listed; the orchestrator refuses a start whose card
+                # would not fit (`start_scope_fits_card`), so the cut below never bites there.
+                return _session_start_text(arguments, target, Locale.VI)[:240]
+            case "cu.session_extend":
+                # Every added app and domain is listed: the owner signs exactly this scope.
+                return _extend_text(arguments, target, Locale.VI)[:240]
             case "cu.session_end":
                 return f"Kết thúc phiên điều khiển màn hình trên {target}"[:240]
             case "screen.capture":
                 return f"Chụp ảnh cửa sổ đang mở trên {target}"[:240]
             case "ui.inspect":
                 return f"Đọc cây giao diện cửa sổ đang mở trên {target}"[:240]
+            case "ui.find":
+                # The search text is the model's: it is not shown or stored.
+                return f"Tìm phần tử trong cửa sổ đang mở trên {target}"[:240]
             case "input.click":
                 elem = str(arguments.get("elementName") or arguments.get("elementId") or "phần tử")[
                     :40
@@ -408,25 +564,17 @@ class ActionSummary:
             case "ui.quick_settings":
                 return f"Open quick settings on {target}"[:240]
             case "cu.session_start":
-                goal = str(arguments.get("goal", ""))[:60]
-                raw_apps = arguments.get("apps")
-                apps_label = (
-                    ", ".join(str(a)[:24] for a in raw_apps[:4])
-                    if isinstance(raw_apps, list) and raw_apps
-                    else "apps"
-                )
-                max_steps = arguments.get("maxSteps", 12)
-                max_mins = arguments.get("maxMinutes", 5)
-                return (
-                    f"Start computer-use session '{goal}' ({apps_label}, "
-                    f"max {max_steps} steps/{max_mins} min) on {target}"
-                )[:240]
+                return _session_start_text(arguments, target, Locale.EN)[:240]
+            case "cu.session_extend":
+                return _extend_text(arguments, target, Locale.EN)[:240]
             case "cu.session_end":
                 return f"End computer-use session on {target}"[:240]
             case "screen.capture":
                 return f"Capture active window screenshot on {target}"[:240]
             case "ui.inspect":
                 return f"Inspect active window UI tree on {target}"[:240]
+            case "ui.find":
+                return f"Find elements in the active window on {target}"[:240]
             case "input.click":
                 elem = str(arguments.get("elementName") or arguments.get("elementId") or "element")[
                     :40

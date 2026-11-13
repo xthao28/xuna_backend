@@ -22,11 +22,14 @@ from xuna_backend.modules.accounts.api.dependencies import Session, state
 from xuna_backend.modules.accounts.domain.owner import Owner
 from xuna_backend.modules.actions.api.routes import build_stream_orchestrator
 from xuna_backend.modules.actions.application.catalog import load_tool_catalog_for_owner
+from xuna_backend.modules.actions.application.computer_use import session_event_payload
+from xuna_backend.modules.actions.application.cu_template import CuTemplatePin
 from xuna_backend.modules.actions.application.orchestrator import ActionContext, EventSink
 from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
     BoardHidRequestEvent,
+    ComputerUseSessionEvent,
     HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
@@ -97,6 +100,7 @@ from xuna_backend.modules.conversation.domain.turn_mode import (
     is_code_or_tool_synthesis_request,
 )
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
+from xuna_backend.modules.hosts.domain.entities import HostId
 from xuna_backend.modules.identity.application.use_cases import IdentityError, get_owned_pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
 from xuna_backend.modules.knowledge.application.owner_context import BuildOwnerContextUseCase
@@ -159,6 +163,30 @@ class BoardHidBody(BaseModel):
     available: bool = False
 
 
+class CuTemplateBody(BaseModel):
+    """UDC-17 S17.5: the scope of a computer-use template saved on the owner's phone, sent
+    when the owner taps "Chạy lại". Never stored."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, max_length=40)
+    hostId: str = Field(min_length=1, max_length=64)
+    apps: list[str] = Field(min_length=1, max_length=8)
+    domains: list[str] = Field(default_factory=list, max_length=12)
+    maxSteps: int
+    maxMinutes: int
+
+    def to_pin(self) -> CuTemplatePin:
+        return CuTemplatePin.create(
+            name=self.name,
+            host_id=self.hostId,
+            apps=self.apps,
+            domains=self.domains,
+            max_steps=self.maxSteps,
+            max_minutes=self.maxMinutes,
+        )
+
+
 class TurnBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -187,6 +215,8 @@ class TurnBody(BaseModel):
     clientCapabilities: list[str] | None = Field(default=None, max_length=16)
     boardHid: BoardHidBody | None = None
     selfHostId: str | None = Field(default=None, max_length=64)
+    # UDC-17 S17.5: rerun of a template saved on the phone (old apps omit it).
+    cuTemplate: CuTemplateBody | None = None
 
     def base_context(self) -> TurnContext:
         pet = self.pet
@@ -397,6 +427,12 @@ async def turn(
     client_caps = tuple(body.clientCapabilities or ())
     board_available = bool(body.boardHid.available) if body.boardHid is not None else False
     self_host_id = body.selfHostId.strip() if body.selfHostId else None
+    try:
+        cu_template = body.cuTemplate.to_pin() if body.cuTemplate is not None else None
+    except ValueError as error:
+        raise AppError(
+            "validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "cuTemplate"
+        ) from error
     tools: tuple[ToolSpec, ...] = ()
     host_screen_consent = False
     if client_caps:
@@ -407,7 +443,10 @@ async def turn(
             consent_state = await consent_factory(session).current(owner.owner_id)
             host_screen_consent = consent_state.host_screen
         except Exception:
-            _logger.debug("Failed to read U5 consent for turn", exc_info=True)
+            _logger.warning(
+                "Failed to read U5 consent for turn; treating it as not granted",
+                exc_info=True,
+            )
             host_screen_consent = False
         try:
             host_factory: Callable[[object], HostRepository] = state(request, "host_repository")
@@ -425,6 +464,23 @@ async def turn(
         except Exception:
             _logger.debug("Failed to load tool catalog for turn", exc_info=True)
             tools = ()
+    turn_note: Callable[[Locale], str] | None = None
+    if cu_template is not None and tools:
+        # The computer's current alias, read for this owner only; the pin itself is by id.
+        template_alias: str | None = None
+        try:
+            host_repo: HostRepository = state(request, "host_repository")(session)
+            template_host = await host_repo.get_host(HostId(uuid.UUID(cu_template.host_id)))
+            if template_host is not None and template_host.owner_id == owner.owner_id:
+                template_alias = str(template_host.alias)
+        except Exception:
+            _logger.debug("Failed to read the template's computer", exc_info=True)
+        pin = cu_template
+
+        def _template_note(locale: Locale) -> str:
+            return pin.prompt_note(locale, template_alias)
+
+        turn_note = _template_note
 
     await session.close()  # release the DB connection before a long provider call
 
@@ -466,6 +522,7 @@ async def turn(
             mode=chosen_mode,
             budget=budget,
             tools=tools,
+            turn_note=turn_note,
         )
     except ValueError as error:
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text") from error
@@ -496,6 +553,7 @@ async def turn(
                     request_id=request_id_str,
                     self_host_id=self_host_id,
                     host_screen_consent=host_screen_consent,
+                    cu_template=cu_template,
                 ),
             )
 
@@ -571,11 +629,9 @@ async def turn(
                             pending_payload["argsSha256"] = pending.args_sha256
                         if pending.expires_at is not None:
                             pending_payload["expiresAt"] = pending.expires_at
-                        if pending.standing_tool is not None:
-                            pending_payload["standing"] = {
-                                "tool": pending.standing_tool,
-                                "arguments": pending.standing_arguments or {},
-                            }
+                        standing = pending.standing_payload()
+                        if standing is not None:
+                            pending_payload["standing"] = standing
                         yield _sse("action_pending", pending_payload)
                     case BoardHidRequestEvent() as hid_req:
                         yield _sse(
@@ -615,7 +671,13 @@ async def turn(
                         }
                         if act_res.gesture is not None:
                             act_payload["gesture"] = act_res.gesture
+                        if act_res.error_code is not None:
+                            act_payload["errorCode"] = act_res.error_code
+                        if act_res.host_id is not None:
+                            act_payload["hostId"] = act_res.host_id
                         yield _sse("action_result", act_payload)
+                    case ComputerUseSessionEvent() as cu_ev:
+                        yield _sse("cu_session", session_event_payload(cu_ev))
                     case ToolCallRequested():
                         continue
                     case ChatFinished() as done:

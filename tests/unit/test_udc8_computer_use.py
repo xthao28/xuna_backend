@@ -33,6 +33,7 @@ from xuna_backend.modules.actions.application.computer_use import (
     ComputerUseSessionRunner,
     InMemoryComputerUseSessionStore,
     SignedR3ApprovalProof,
+    is_activation_key_combo,
 )
 from xuna_backend.modules.actions.application.orchestrator import (
     ActionContext,
@@ -300,7 +301,7 @@ SCRIPTED_10_TASKS: tuple[dict[str, Any], ...] = (
         "domains": [],
         "steps": [
             {"tool": "input.click", "args": {"elementId": "s00000001:1"}, "r3": False},
-            {"tool": "input.key", "args": {"combo": "Enter", "inForm": False}, "r3": False},
+            {"tool": "input.key", "args": {"combo": "Enter", "inForm": False}, "r3": True},
         ],
     },
     {
@@ -754,6 +755,15 @@ def test_s86_stop_conditions_heartbeat_deadman_and_emergency_stop_latency() -> N
                 ),
             )
 
+        # 0. Budget bounds (ADR-0015 E1): one above 40 steps / 20 minutes is refused, and
+        # the bounds themselves are accepted.
+        for bad_steps, bad_minutes in ((41, 20), (40, 21), (0, 5)):
+            with pytest.raises(ComputerUseError) as exc_bounds:
+                await start_cu(max_steps=bad_steps, max_minutes=bad_minutes)
+            assert exc_bounds.value.code == "invalid_args"
+        s_max = await start_cu(max_steps=40, max_minutes=20)
+        assert (s_max.max_steps, s_max.max_minutes) == (40, 20)
+
         # 1. Three consecutive no_change -> stops with no_progress
         s1 = await start_cu()
         await runner.execute_step(
@@ -800,7 +810,7 @@ def test_s86_stop_conditions_heartbeat_deadman_and_emergency_stop_latency() -> N
         # 3. Dead-man switch: 3 missed 5 s heartbeats (> 15 s) -> stops with heartbeat_timeout
         s3 = await start_cu()
         fake_now += 5.0
-        assert runner.record_heartbeat(owner_id=owner_id, session_id=s3.session_id) is True
+        assert await runner.record_heartbeat(owner_id=owner_id, session_id=s3.session_id) is True
         fake_now += 15.5  # > 15.0 s without heartbeat
         with pytest.raises(ComputerUseError) as exc_hb:
             await runner.observe(owner_id=owner_id, session_id=s3.session_id)
@@ -812,7 +822,7 @@ def test_s86_stop_conditions_heartbeat_deadman_and_emergency_stop_latency() -> N
         await runner.observe(owner_id=owner_id, session_id=s4.session_id)
         assert len(s4.cached_nodes) > 0
         t0 = time.perf_counter()
-        stopped_count = store.stop_all_for_owner(owner_id, reason="owner_app")
+        stopped_count = await store.stop_all_for_owner(owner_id, "owner_app", datetime.now(UTC))
         stop_latency_s = time.perf_counter() - t0
         assert stopped_count == 1
         assert stop_latency_s <= 1.0
@@ -1145,14 +1155,35 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
         )
 
         sent_calls: list[dict[str, Any]] = []
+        host_session_gone = {"value": False}
 
         async def _send_text(raw: str) -> None:
             frame = json.loads(raw)
+            if frame.get("method") == "xuna/preflight":
+                # A host built before UDC-17 S17.1: the backend keeps its legacy estimate.
+                hub.on_error_response(
+                    str(mac_host.host_id), frame["id"], -32601, "Method not found"
+                )
+                return
             if frame.get("method") != "tools/call":
                 return
             params = frame["params"]
             sent_calls.append(params)
             tname = params["name"]
+            if host_session_gone["value"] and tname == "ui.inspect":
+                hub.on_response(
+                    str(mac_host.host_id),
+                    frame["id"],
+                    {
+                        "_meta": {
+                            "xuna/status": "denied",
+                            "xuna/errorCode": "cu_session_required",
+                            "xuna/durationMs": 1,
+                        },
+                        "structuredContent": {"errorCode": "cu_session_required"},
+                    },
+                )
+                return
             if tname == "cu.session_start":
                 sc: dict[str, Any] = {"sessionId": "cu-sess-1"}
             elif tname == "ui.inspect":
@@ -1253,7 +1284,11 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
             ),
             ctx_no_u5,
         )
-        assert json.loads(denied_u5.content)["status"] == "denied"
+        denied_u5_body = json.loads(denied_u5.content)
+        assert denied_u5_body["status"] == "denied"
+        # H4: the model is told why, so it can ask the owner instead of retrying blindly.
+        assert denied_u5_body["output"]["errorCode"] == "u5_consent_required"
+        assert "consent" in denied_u5_body["hint"]
         assert audit.events[-1].metadata["reason"] == "u5_consent_required"
         assert len(sent_calls) == 0
 
@@ -1375,6 +1410,35 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
         assert len(pending_events) == 4
         assert pending_events[-1].risk == "R3"
 
+        # 7b. A navigation key stays R2 and runs inside the session without a new approval.
+        expected_pending = 4
+        res_tab = await orch.handle_call(
+            ToolCall(id="c-tab", name="input__key", arguments={"combo": "Tab"}),
+            ctx,
+        )
+        assert json.loads(res_tab.content)["status"] == "ok"
+        assert len(pending_events) == expected_pending
+
+        # 7c. The model cannot lower Enter to R2 by omitting or negating `inForm`, and
+        # modifier variants and Space are treated the same way.
+        for idx, key_args in enumerate(
+            (
+                {"combo": "Enter"},
+                {"combo": "Enter", "inForm": False},
+                {"combo": "Cmd+Return"},
+                {"combo": "Space"},
+            )
+        ):
+            res_key = await orch.handle_call(
+                ToolCall(id=f"c-act-{idx}", name="input__key", arguments=key_args),
+                ctx,
+            )
+            expected_pending += 1
+            assert json.loads(res_key.content)["status"] == "ok", key_args
+            assert len(pending_events) == expected_pending, key_args
+            assert pending_events[-1].risk == "R3", key_args
+            assert "signature" in sent_calls[-1]["_meta"]["xuna/approval"], key_args
+
         # 8. Session end terminates R2 exemption so a subsequent ui.inspect prompts R2 approval
         res_end = await orch.handle_call(
             ToolCall(
@@ -1385,7 +1449,7 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
             ctx,
         )
         assert json.loads(res_end.content)["status"] == "ok"
-        assert cu_store.get_active_for_owner(owner_id) is None
+        assert await cu_store.get_active_for_owner(owner_id) is None
 
         res_inspect_after = await orch.handle_call(
             ToolCall(
@@ -1396,7 +1460,84 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
             ctx,
         )
         assert json.loads(res_inspect_after.content)["status"] == "ok"
-        assert len(pending_events) == 5
+        assert len(pending_events) == expected_pending + 1
+        assert pending_events[-1].risk == "R2"
+
+        # 9. When the host reports the session gone on ui.inspect, the backend drops its
+        # own copy, so the next step asks for approval again instead of staying exempt.
+        res_restart = await orch.handle_call(
+            ToolCall(
+                id="c-start-2",
+                name="cu__session_start",
+                arguments={
+                    "goal": "Ghi chú lần hai",
+                    "apps": ["notes"],
+                    "domains": [],
+                    "maxSteps": 8,
+                    "maxMinutes": 5,
+                },
+            ),
+            ctx,
+        )
+        assert json.loads(res_restart.content)["status"] == "ok"
+        assert await cu_store.get_active_for_owner(owner_id) is not None
+        pending_before_gone = len(pending_events)
+
+        host_session_gone["value"] = True
+        res_gone = await orch.handle_call(
+            ToolCall(
+                id="c-insp-gone",
+                name="ui__inspect",
+                arguments={"scope": "active_window", "maxNodes": 50},
+            ),
+            ctx,
+        )
+        gone_body = json.loads(res_gone.content)
+        assert gone_body["status"] == "denied"
+        assert gone_body["output"]["errorCode"] == "cu_session_required"
+        assert len(pending_events) == pending_before_gone
+        assert await cu_store.get_active_for_owner(owner_id) is None
+
+        host_session_gone["value"] = False
+        res_after_gone = await orch.handle_call(
+            ToolCall(
+                id="c-insp-after-gone",
+                name="ui__inspect",
+                arguments={"scope": "active_window", "maxNodes": 50},
+            ),
+            ctx,
+        )
+        assert json.loads(res_after_gone.content)["status"] == "ok"
+        assert len(pending_events) == pending_before_gone + 1
         assert pending_events[-1].risk == "R2"
 
     asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    ("combo", "expected"),
+    [
+        ("Enter", True),
+        ("enter", True),
+        ("Return", True),
+        ("Cmd+Enter", True),
+        ("ctrl + shift + return", True),
+        ("Space", True),
+        ("Tab", False),
+        ("Esc", False),
+        ("Cmd+F", False),
+        ("ArrowDown", False),
+        ("", False),
+        ("   ", False),
+    ],
+)
+def test_activation_key_combo_reads_only_the_final_key(combo: str, expected: bool) -> None:
+    assert is_activation_key_combo(combo) is expected
+
+
+def test_state_driven_hint_covers_consent_and_host_approval() -> None:
+    consent_hint = state_driven_hint({"errorCode": "u5_consent_required"})
+    assert consent_hint is not None and "consent" in consent_hint
+    approval_hint = state_driven_hint({"errorCode": "approval_required"})
+    assert approval_hint is not None and "ui__inspect" in approval_hint
+    assert state_driven_hint({"errorCode": "grant_denied"}) is None

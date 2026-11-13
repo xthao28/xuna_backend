@@ -26,6 +26,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionResultEvent,
     ActionStreamEvent,
     BoardHidRequestEvent,
+    ComputerUseSessionEvent,
     HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
@@ -428,7 +429,10 @@ def build_request(
     mode: TurnMode = TurnMode.CHAT,
     budget: ReplyBudget | None = None,
     tools: tuple[ToolSpec, ...] = (),
+    turn_note: Callable[[Locale], str] | None = None,
 ) -> ChatRequest:
+    """`turn_note`, when given, adds one line for this turn only after the tool guidance
+    (UDC-17 S17.5: the scope of a template being rerun). Ignored without tools."""
     text = user_text.strip()
     max_chars = MAX_EXPERT_INPUT_CHARS if mode == TurnMode.EXPERT else MAX_INPUT_CHARS
     if not text or len(text) > max_chars:
@@ -447,6 +451,8 @@ def build_request(
 
     if tools:
         system = f"{system}{tool_system_prompt(effective_locale, tools=tools)}"
+        if turn_note is not None:
+            system = f"{system}{turn_note(effective_locale)}"
 
     earlier = () if context is None else context.history
     max_tokens = budget.max_output_tokens if budget is not None else 400
@@ -474,6 +480,7 @@ TurnEvent = (
     | LocalActionRequestEvent
     | HostWakeRequestEvent
     | ActionResultEvent
+    | ComputerUseSessionEvent
 )
 
 ToolCallRunner = Callable[[ToolCall, EventSink], Awaitable[Message]]

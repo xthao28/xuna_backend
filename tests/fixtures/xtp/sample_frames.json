@@ -363,6 +363,43 @@
         "code": -32601,
         "message": "Method not found"
       }
+    },
+    "preflightRequest": {
+      "jsonrpc": "2.0",
+      "id": 18,
+      "method": "xuna/preflight",
+      "params": {
+        "name": "input.click",
+        "arguments": {
+          "elementId": "@s00000001:e2",
+          "elementName": "Mở"
+        }
+      }
+    },
+    "preflightOkResponse": {
+      "jsonrpc": "2.0",
+      "id": 18,
+      "result": {
+        "preflight": {
+          "status": "ok",
+          "effectiveRisk": "R3",
+          "reasonCode": "consequential_target",
+          "element": {
+            "role": "button",
+            "name": "Gửi báo cáo"
+          }
+        }
+      }
+    },
+    "preflightDeniedResponse": {
+      "jsonrpc": "2.0",
+      "id": 19,
+      "result": {
+        "preflight": {
+          "status": "denied",
+          "errorCode": "password_field_forbidden"
+        }
+      }
     }
   }
 }

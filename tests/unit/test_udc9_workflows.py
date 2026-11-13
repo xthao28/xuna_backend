@@ -45,6 +45,7 @@ from xuna_backend.modules.actions.application.catalog import (
     CAP_WORKFLOW_TEMPLATES_V1,
     build_tool_catalog,
 )
+from xuna_backend.modules.actions.application.computer_use import InMemoryComputerUseSessionStore
 from xuna_backend.modules.actions.application.orchestrator import (
     ActionContext,
     Orchestrator,
@@ -852,6 +853,8 @@ def test_s9_3_board_workflow_trigger_r1_immediate_r2_approval_and_r3_forbidden_a
         )
     )
     app.state.database = _DummyDatabase()
+    # No database here: the durable session store gets an in-memory stand-in.
+    app.state.cu_session_store = InMemoryComputerUseSessionStore()
     app.state.token_verifier = issuer.verifier()
     app.state.owner_repository = lambda _s: _FakeOwnerRepo(owner)
     app.state.host_repository = lambda _s: host_repo

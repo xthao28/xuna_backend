@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from xuna_backend.modules.actions.domain.entities import (
@@ -90,6 +90,24 @@ class SqlApprovalRepository:
             await self._session.flush()
         return len(rows)
 
+    async def count_approved(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        tool: str,
+        args_sha256: str,
+        since: datetime,
+    ) -> int:
+        stmt = select(func.count()).where(
+            ActionApprovalModel.owner_id == owner_id,
+            ActionApprovalModel.host_id == host_id.value,
+            ActionApprovalModel.tool == tool,
+            ActionApprovalModel.args_sha256 == args_sha256,
+            ActionApprovalModel.state == ApprovalState.APPROVED.value,
+            ActionApprovalModel.decided_at >= since,
+        )
+        return int((await self._session.execute(stmt)).scalar_one())
+
 
 class InMemoryApprovalRepository:
     def __init__(self) -> None:
@@ -122,3 +140,23 @@ class InMemoryApprovalRepository:
                 )
                 count += 1
         return count
+
+    async def count_approved(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        tool: str,
+        args_sha256: str,
+        since: datetime,
+    ) -> int:
+        return sum(
+            1
+            for req in self._items.values()
+            if req.owner_id == owner_id
+            and req.host_id == host_id
+            and req.tool == tool
+            and req.args_sha256 == args_sha256
+            and req.state == ApprovalState.APPROVED
+            and req.decided_at is not None
+            and req.decided_at >= since
+        )

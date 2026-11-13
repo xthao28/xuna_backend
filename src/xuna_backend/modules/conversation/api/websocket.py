@@ -30,6 +30,7 @@ from xuna_backend.modules.actions.api.routes import (
     build_stream_orchestrator,
 )
 from xuna_backend.modules.actions.application.catalog import load_tool_catalog_for_owner
+from xuna_backend.modules.actions.application.computer_use import session_event_payload
 from xuna_backend.modules.actions.application.orchestrator import (
     ActionContext,
     EventSink,
@@ -41,6 +42,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalDecision,
     ApprovalScope,
     BoardHidRequestEvent,
+    ComputerUseSessionEvent,
     HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
@@ -451,8 +453,9 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                     consent_state = await u5_consent_repo.current(owner.owner_id)
                                     turn_host_screen_consent = consent_state.host_screen
                                 except Exception:
-                                    logger.debug(
-                                        "Failed to read U5 consent for voice turn",
+                                    logger.warning(
+                                        "Failed to read U5 consent for voice turn; "
+                                        "treating it as not granted",
                                         exc_info=True,
                                     )
                                     turn_host_screen_consent = False
@@ -641,11 +644,9 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         pending_msg["argsSha256"] = event.args_sha256
                                     if event.expires_at is not None:
                                         pending_msg["expiresAt"] = event.expires_at
-                                    if event.standing_tool is not None:
-                                        pending_msg["standing"] = {
-                                            "tool": event.standing_tool,
-                                            "arguments": event.standing_arguments or {},
-                                        }
+                                    standing = event.standing_payload()
+                                    if standing is not None:
+                                        pending_msg["standing"] = standing
                                     await websocket.send_json(pending_msg)
                                 elif isinstance(event, BoardHidRequestEvent):
                                     await websocket.send_json(
@@ -688,7 +689,15 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                     }
                                     if event.gesture is not None:
                                         act_msg["gesture"] = event.gesture
+                                    if event.error_code is not None:
+                                        act_msg["errorCode"] = event.error_code
+                                    if event.host_id is not None:
+                                        act_msg["hostId"] = event.host_id
                                     await websocket.send_json(act_msg)
+                                elif isinstance(event, ComputerUseSessionEvent):
+                                    await websocket.send_json(
+                                        {"type": "cu_session"} | session_event_payload(event)
+                                    )
                                 elif isinstance(event, TextDelta):
                                     await websocket.send_json(
                                         {"type": "reply.delta", "text": event.text}

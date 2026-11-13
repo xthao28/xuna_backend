@@ -923,7 +923,11 @@ def test_orchestrator_ungranted_tool_returns_denied_and_audits() -> None:
             ),
             ctx,
         )
-        assert json.loads(msg.content) == {"status": "denied"}
+        # H4: the denial reason reaches the model, not only the audit log.
+        assert json.loads(msg.content) == {
+            "status": "denied",
+            "output": {"errorCode": "grant_denied"},
+        }
         assert hub.sent_requests == []
         assert len(emitted) == 1
         assert isinstance(emitted[0], ActionResultEvent)

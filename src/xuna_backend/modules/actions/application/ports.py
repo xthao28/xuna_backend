@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Protocol
 
+from xuna_backend.modules.actions.application.computer_use import ComputerUseSessionState
 from xuna_backend.modules.actions.domain.entities import (
     ApprovalDecision,
     ApprovalRequest,
@@ -23,6 +24,18 @@ class ApprovalRepository(Protocol):
     async def get(self, approval_id: uuid.UUID) -> ApprovalRequest | None: ...
 
     async def reject_pending_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int: ...
+
+    async def count_approved(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        tool: str,
+        args_sha256: str,
+        since: datetime,
+    ) -> int:
+        """Approved requests for exactly this call (host, tool, `args_sha256`) decided at or
+        after `since`, by any route (owner decision, 15-minute scope or standing approval)."""
+        ...
 
 
 class StandingApprovalRepository(Protocol):
@@ -137,3 +150,52 @@ class ApprovalScopeStore(Protocol):
     ) -> datetime: ...
 
     def clear_owner(self, owner_id: uuid.UUID) -> int: ...
+
+
+class ComputerUseSessionStore(Protocol):
+    """Desktop control sessions as the backend enforces them (UDC-8, UDC-17 S17.6).
+
+    One running session per owner. Writes go through these methods so a durable store
+    persists them; callers never rely on mutating a returned state. `cached_nodes` and
+    `typed_since_commit` stay in process memory in every implementation.
+    """
+
+    async def get(self, session_id: str) -> ComputerUseSessionState | None: ...
+
+    async def get_active_for_owner(self, owner_id: uuid.UUID) -> ComputerUseSessionState | None:
+        """The owner's running session, before budgets and the heartbeat are applied."""
+        ...
+
+    async def start(self, state: ComputerUseSessionState, now: datetime) -> None:
+        """Stores a new running session; any other running one of the owner ends as
+        `replaced`."""
+        ...
+
+    async def mark_ended(
+        self, session_id: str, reason: str, now: datetime
+    ) -> ComputerUseSessionState | None:
+        """Ends the session (no-op if already ended; the first reason is kept) and drops its
+        goal, cached UI tree and draft text."""
+        ...
+
+    async def stop_all_for_owner(self, owner_id: uuid.UUID, reason: str, now: datetime) -> int: ...
+
+    async def record_step(self, session_id: str) -> int | None:
+        """Atomically counts one step of a running session; returns the new count, or `None`
+        when the session is not running."""
+        ...
+
+    async def set_scope(
+        self, session_id: str, apps: tuple[str, ...], domains: tuple[str, ...]
+    ) -> None: ...
+
+    async def touch_heartbeat(self, session_id: str, owner_id: uuid.UUID, now: datetime) -> bool:
+        """Records a phone heartbeat for the owner's running session; `False` otherwise."""
+        ...
+
+    async def set_typed_count(self, session_id: str, count: int) -> None: ...
+
+    async def record_prompt(self, session_id: str) -> int | None:
+        """Counts one owner approval asked during a running session; returns the new count,
+        or `None` when the session is not running."""
+        ...

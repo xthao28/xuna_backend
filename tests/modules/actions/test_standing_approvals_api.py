@@ -21,6 +21,7 @@ from tests.helpers import LocalIssuer, MemoryAuditLog
 from xuna_backend.core.config import Environment, Settings
 from xuna_backend.main import create_app
 from xuna_backend.modules.accounts.domain.owner import Owner
+from xuna_backend.modules.actions.application.computer_use import InMemoryComputerUseSessionStore
 from xuna_backend.modules.actions.infrastructure.standing_repository import (
     InMemoryStandingApprovalRepository,
 )
@@ -118,6 +119,8 @@ class _Harness:
         self.standing = InMemoryStandingApprovalRepository()
         self.audit = MemoryAuditLog()
         app.state.database = _DummyDatabase()
+        # No database here: the durable session store gets an in-memory stand-in.
+        app.state.cu_session_store = InMemoryComputerUseSessionStore()
         app.state.owner_repository = lambda _s: _OwnerRepo(self.owner)
         app.state.host_repository = lambda _s: self.hosts
         app.state.standing_approval_repository = lambda _s: self.standing

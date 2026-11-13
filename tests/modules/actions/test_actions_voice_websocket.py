@@ -31,6 +31,7 @@ from tests.modules.actions.test_actions_api_and_turn import (
 from xuna_backend.core.config import Environment, Settings
 from xuna_backend.main import create_app
 from xuna_backend.modules.accounts.domain.owner import Owner
+from xuna_backend.modules.actions.application.computer_use import InMemoryComputerUseSessionStore
 from xuna_backend.modules.actions.infrastructure.repository import (
     InMemoryApprovalRepository,
 )
@@ -118,6 +119,8 @@ def _build_voice_harness(
         synthesizer=_FakeSynthesizer(),
     )
     app.state.database = _DummyDatabase()
+    # No database here: the durable session store gets an in-memory stand-in.
+    app.state.cu_session_store = InMemoryComputerUseSessionStore()
     owner_repo = _FakeOwnerRepo(owner)
     identity_repo = _FakeIdentityRepo(owner.owner_id, PET_HEX)
     consent_repo = _FakeConsentRepo()

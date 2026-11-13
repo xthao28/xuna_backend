@@ -23,6 +23,7 @@ from xuna_backend.modules.actions.application.catalog import (
     CAP_HOST_ACTIONS_V1,
     load_tool_catalog_for_owner,
 )
+from xuna_backend.modules.actions.application.computer_use import InMemoryComputerUseSessionStore
 from xuna_backend.modules.actions.application.orchestrator import (
     ActionContext,
     Orchestrator,
@@ -529,6 +530,8 @@ def test_http_self_enroll_and_action_result_with_output() -> None:
     host_routes.run_once = _fake_run_once  # type: ignore[assignment]
 
     app.state.database = _DummyDatabase()
+    # No database here: the durable session store gets an in-memory stand-in.
+    app.state.cu_session_store = InMemoryComputerUseSessionStore()
     app.state.owner_repository = lambda _s: _FakeOwnerRepo()
     app.state.host_repository = lambda _s: host_repo
     app.state.host_enrollment_repository = lambda _s: enroll_repo

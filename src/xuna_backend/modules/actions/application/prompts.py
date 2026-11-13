@@ -71,8 +71,10 @@ _TOOL_DISCOVERY_MODULE_EN = (
 _UI_AUTOMATION_TOOLS = frozenset(
     {
         "cu__session_start",
+        "cu__session_extend",
         "cu__session_end",
         "ui__inspect",
+        "ui__find",
         "input__click",
         "input__type_text",
         "input__key",
@@ -107,7 +109,16 @@ _UI_SKILL_MODULE_VI = (
     "(khai báo `goal`, danh sách `apps`, `domains`, `maxSteps`, `maxMinutes`), sau đó "
     "`ui__inspect` -> `input__click` / `input__type_text` / `input__key` / `input__scroll` "
     "(truyền `elementId` và `elementName` thực tế từ `nodes`), kiểm tra lại trạng thái "
-    "cửa sổ, và đóng phiên bằng `cu__session_end`.\n"
+    "cửa sổ, và đóng phiên bằng `cu__session_end`. Biết tên hoặc vai trò phần tử cần "
+    "dùng thì gọi `ui__find` (trả vài ứng viên kèm `ref`, không tự chọn hộ) thay vì đọc "
+    "cả cây; `ui__inspect` với `interactiveOnly: true` chỉ trả phần tử bấm/gõ được. Sau "
+    "mỗi thao tác, đọc `changes` trong kết quả: `added` là phần tử mới kèm `ref`, "
+    "`removed` là `ref` không còn dùng được, `changed` là phần tử đổi trạng thái; các "
+    "`ref` khác vẫn dùng tiếp. Chỉ gọi lại `ui__inspect` khi `changes.truncated` là "
+    "true, khi có `windowOutsideSession`, hoặc khi gặp `stale_ref`. Bấm lại cùng nút "
+    "được nếu lần trước làm màn hình đổi; lặp đúng thao tác vừa trả `no_change` sẽ kết "
+    "thúc phiên (`duplicate_action`). Cần thêm app hoặc "
+    "tên miền giữa chừng thì gọi `cu__session_extend`, không kết thúc rồi mở phiên mới.\n"
     "  Trên điện thoại Android: `ui__observe` trả `snapshotId` và `ref` từng phần tử; "
     "`ui__act` chỉ dùng `ref` của snapshot mới nhất. Gặp `target_stale` hoặc "
     "`package_changed` thì gọi `ui__observe` lại; `no_visible_change` nghĩa là thao tác "
@@ -131,7 +142,17 @@ _UI_SKILL_MODULE_EN = (
     "session with `cu__session_start` (`goal`, target `apps`, `domains`, `maxSteps`, "
     "`maxMinutes`), then run `ui__inspect` -> `input__click` / `input__type_text` / "
     "`input__key` / `input__scroll` using live `elementId` and `elementName` from `nodes`, "
-    "verify the updated window state, and finish with `cu__session_end`.\n"
+    "verify the updated window state, and finish with `cu__session_end`. When you know an "
+    "element's name or role, call `ui__find` (a few candidates with `ref`, never a pick) "
+    "instead of reading the whole tree; `ui__inspect` with `interactiveOnly: true` returns "
+    "only controls. After each action read `changes` in the result: `added` lists new "
+    "elements with `ref`, `removed` lists refs that no longer work, `changed` lists "
+    "elements whose state changed; other refs stay valid. Call `ui__inspect` again only "
+    "when `changes.truncated` is true, `windowOutsideSession` is present, or on "
+    "`stale_ref`. Pressing the same control again is fine after the screen changed; "
+    "repeating an action that just returned `no_change` ends the session "
+    "(`duplicate_action`). To add an app "
+    "or domain mid-task, call `cu__session_extend` instead of ending and restarting.\n"
     "  On an Android phone: `ui__observe` returns a `snapshotId` and a `ref` per element; "
     "`ui__act` accepts only refs from the latest snapshot. On `target_stale` or "
     "`package_changed`, call `ui__observe` again; `no_visible_change` means the action did "
@@ -275,7 +296,8 @@ def state_driven_hint(output: dict[str, object]) -> str | None:
     """Returns a backend-authored next-step hint for recoverable tool states, else `None`.
 
     Recognised states: failed sandbox dry-run, stale/ambiguous/missing UI reference,
-    missing computer-use session, allowlist mismatch, and `disposition.retry == "unsafe"`.
+    missing computer-use session, allowlist mismatch, missing screen-control consent, a
+    host-side approval requirement, and `disposition.retry == "unsafe"`.
     Only codes and booleans are read, never free text.
     """
     if output.get("dryRunOk") is False and str(output.get("stderrPreview", "")).strip():
@@ -295,12 +317,71 @@ def state_driven_hint(output: dict[str, object]) -> str | None:
         )
     if err_code in (
         "target_outside_allowlist",
+        "domain_outside_allowlist",
         "app_not_in_session_allowlist",
         "domain_not_in_session_allowlist",
     ):
         return (
             "The active window or domain is outside the session's approved allowlist; bring "
-            "an approved app to the foreground or start a new cu__session_start including it."
+            "an approved app to the foreground, or add it to the running session with "
+            "cu__session_extend (one owner signature) instead of ending and restarting."
+        )
+    if err_code == "session_scope_limit":
+        return (
+            "The session already holds the most apps/domains allowed. Finish this part, end "
+            "the session with cu__session_end, then start a new one for the rest."
+        )
+    if err_code == "template_mismatch":
+        return (
+            "The owner asked to rerun a saved template. Call cu__session_start on the "
+            "template's computer with exactly the apps and domains in `expected`, and "
+            "maxSteps/maxMinutes no larger than there; do not add or drop anything."
+        )
+    if err_code == "extend_scope_too_long":
+        return (
+            "The approval card could not show every app/domain of this extension in full. "
+            "Call cu__session_extend again with fewer or shorter items (each at most 60 "
+            "characters), or split them over several calls."
+        )
+    if err_code == "start_scope_too_long":
+        if output.get("templatePinned") is True:
+            return (
+                "This saved template's apps and domains are too many or too long to show in "
+                "full on one approval card, and a rerun cannot change them. Do not retry; tell "
+                "the owner the template's scope does not fit one approval and ask them to "
+                "start the task without the template."
+            )
+        return (
+            "The approval card could not show every app/domain of this session in full. Call "
+            "cu__session_start again with fewer or shorter items (each at most 60 characters) "
+            "or a shorter goal, and add the rest later with cu__session_extend."
+        )
+    if err_code == "url_not_public":
+        return (
+            "That address resolves to this computer or the local network, which url__open "
+            "never opens. Do not retry it; tell the owner the link points inside their network."
+        )
+    if err_code == "url_unresolvable":
+        return (
+            "The computer could not resolve that domain name. Check the spelling, or tell the "
+            "owner the site could not be found; do not retry the same URL."
+        )
+    if err_code == "risk_above_grant":
+        return (
+            "This step needs a higher permission level than the owner granted for this tool "
+            "family on this computer. Do not retry; tell the owner they can raise it in the "
+            "XUNA app (computer details) if they want XUNA to do this."
+        )
+    if err_code == "u5_consent_required":
+        return (
+            "The owner has not turned on screen-control consent for this account. Do not "
+            "retry; tell the owner to enable it in the XUNA app first."
+        )
+    if err_code == "approval_required":
+        return (
+            "The host requires a separate owner approval for this target. Call ui__inspect "
+            "to refresh the element list, then repeat the action with the element's live "
+            "elementId and elementName so the owner can be asked."
         )
     if err_code == "missing_ref":
         return (
@@ -309,8 +390,9 @@ def state_driven_hint(output: dict[str, object]) -> str | None:
         )
     if err_code in ("stale_ref", "ambiguous_target") or retry_unsafe:
         return (
-            "Snapshot reference is stale or unsafe to retry blindly; re-inspect the window "
-            "to obtain fresh snapshot references before acting."
+            "Snapshot reference is stale or unsafe to retry blindly; re-inspect the window, "
+            "or call ui__find for the element you need, to obtain fresh snapshot references "
+            "before acting."
         )
     return None
 

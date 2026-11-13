@@ -91,6 +91,16 @@ class _FakeApprovalRepository:
     async def get(self, approval_id: uuid.UUID) -> ApprovalRequest | None:
         return self.items.get(approval_id)
 
+    async def count_approved(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        tool: str,
+        args_sha256: str,
+        since: datetime,
+    ) -> int:
+        return 0
+
     async def reject_pending_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int:
         count = 0
         for aid, req in list(self.items.items()):

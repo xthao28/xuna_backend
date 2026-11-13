@@ -23,6 +23,12 @@ STANDING_DEFAULT_LIFETIME = timedelta(days=7)
 STANDING_MAX_LIFETIME = timedelta(days=30)
 STANDING_MAX_USES = 1000
 
+# UDC-17 S17.5: the approval card highlights "always allow" once this exact call (same host,
+# tool and arguments) was approved this many times within the window. Chosen by the
+# implementer; the owner may change them.
+STANDING_SUGGEST_MIN_APPROVALS = 3
+STANDING_SUGGEST_WINDOW = timedelta(days=30)
+
 # Screen-reading and screen-acting families are never eligible (ADR-0014 D1.2). Decided by the
 # family the host declares, not by tool names.
 _EXCLUDED_FAMILIES = frozenset({ToolFamily.UI, ToolFamily.CU, ToolFamily.INPUT, ToolFamily.SCREEN})

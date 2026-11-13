@@ -28,6 +28,7 @@ from tests.helpers import LocalIssuer, MemoryAuditLog
 from xuna_backend.core.config import Environment, Settings
 from xuna_backend.main import create_app
 from xuna_backend.modules.accounts.domain.owner import Owner
+from xuna_backend.modules.actions.application.computer_use import InMemoryComputerUseSessionStore
 from xuna_backend.modules.actions.domain.entities import (
     MAX_CALLS_PER_ROUND,
     MAX_TOOL_ROUNDS,
@@ -250,6 +251,8 @@ def _build_test_harness(
         generator=llm,
     )
     app.state.database = _DummyDatabase()
+    # No database here: the durable session store gets an in-memory stand-in.
+    app.state.cu_session_store = InMemoryComputerUseSessionStore()
     owner_repo = _FakeOwnerRepo(owner)
     identity_repo = _FakeIdentityRepo(owner.owner_id, PET_HEX)
     consent_repo = _FakeConsentRepo()
@@ -641,3 +644,65 @@ def test_chat_turn_enforces_round_cap_and_calls_per_round() -> None:
         for e in events
         if isinstance(e, ActionPendingEvent | BoardHidRequestEvent | ActionResultEvent)
     ) == len(expected)
+
+
+# ---------------------------------------------------------------------------
+# UDC-17 S17.3: session card snapshot and stopping one session over HTTP
+# ---------------------------------------------------------------------------
+
+
+def test_cu_session_snapshot_and_stop_endpoints() -> None:
+    import asyncio
+
+    from xuna_backend.modules.actions.application.computer_use import (
+        ComputerUseSessionState,
+    )
+
+    client, issuer, owner, _, _, audit_log = _build_test_harness(_ScriptedLLM([]))
+    headers = {"Authorization": f"Bearer {issuer.token('owner-1')}"}
+
+    empty = client.get("/v1/actions/cu-session", headers=headers)
+    assert empty.status_code == 200
+    assert empty.json() == {"active": False}
+
+    store = client.app.state.cu_session_store  # type: ignore[attr-defined]
+    host_id = HostId.generate()
+    now = datetime.now(UTC)
+    start = store.start(
+        ComputerUseSessionState(
+            session_id="cu-http",
+            owner_id=owner.owner_id,
+            host_id=host_id,
+            goal="Soạn ghi chú",
+            allowed_apps=("notes",),
+            allowed_domains=(),
+            max_steps=10,
+            max_minutes=20,
+            started_at_utc=now,
+            last_heartbeat_at=now,
+            target_alias="Mac",
+        ),
+        now,
+    )
+    asyncio.run(start)
+    live = client.get("/v1/actions/cu-session", headers=headers).json()
+    assert live["active"] is True
+    assert live["session"]["sessionId"] == "cu-http"
+    assert live["session"]["goal"] == "Soạn ghi chú"
+    assert live["session"]["status"] == "running"
+
+    missing = client.post("/v1/actions/cu-session/nope/stop", headers=headers)
+    assert missing.status_code == 404
+
+    # The host is offline here: the backend still ends its copy and says the host did not confirm.
+    stopped = client.post("/v1/actions/cu-session/cu-http/stop", headers=headers).json()
+    assert stopped == {
+        "sessionId": "cu-http",
+        "stopped": True,
+        "hostConfirmed": False,
+        "alreadyEnded": False,
+    }
+    assert client.get("/v1/actions/cu-session", headers=headers).json() == {"active": False}
+    again = client.post("/v1/actions/cu-session/cu-http/stop", headers=headers).json()
+    assert again["alreadyEnded"] is True
+    assert any(e.action.value == "host.cu_session_stopped" for e in audit_log.events)

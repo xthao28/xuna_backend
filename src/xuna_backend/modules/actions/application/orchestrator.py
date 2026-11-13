@@ -13,11 +13,11 @@ Executes the 8-step pipeline per tool call:
 """
 
 import base64
-import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from xuna_backend.modules.actions.application.approval_and_board_service import (
     ApprovalAndBoardService,
@@ -33,16 +33,23 @@ from xuna_backend.modules.actions.application.code_synthesizer import (
     CodeSpecialistSynthesizer,
 )
 from xuna_backend.modules.actions.application.computer_use import (
+    MAX_SESSION_MINUTES,
+    MAX_SESSION_STEPS,
     ComputerUseSessionState,
     InMemoryComputerUseSessionStore,
+    build_session_event,
+    is_activation_key_combo,
     is_consequential_element_name,
     is_password_ui_node,
     redact_ui_tree_nodes,
+    session_expiry_reason,
 )
+from xuna_backend.modules.actions.application.cu_template import CuTemplatePin
 from xuna_backend.modules.actions.application.ports import (
     ApprovalBroker,
     ApprovalRepository,
     ApprovalScopeStore,
+    ComputerUseSessionStore,
     LastTargetStore,
     LocalResultBroker,
     StandingApprovalRepository,
@@ -84,6 +91,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalRequest,
     ApprovalScope,
     ApprovalState,
+    ComputerUseSessionEvent,
     EmergencyStopSummary,
     LocalActionRequestEvent,
     gesture_for_action_status,
@@ -97,7 +105,11 @@ from xuna_backend.modules.actions.domain.schema_validator import (
     SchemaDefinitionError,
     SchemaValidator,
 )
-from xuna_backend.modules.actions.domain.standing_approval import is_standing_eligible
+from xuna_backend.modules.actions.domain.standing_approval import (
+    STANDING_SUGGEST_MIN_APPROVALS,
+    STANDING_SUGGEST_WINDOW,
+    is_standing_eligible,
+)
 from xuna_backend.modules.actions.domain.target_resolver import (
     TargetResolutionStatus,
     TargetResolver,
@@ -113,11 +125,16 @@ from xuna_backend.modules.audit.domain.event import AuditAction, AuditEvent
 from xuna_backend.modules.cognition.application.ports import TextGenerator
 from xuna_backend.modules.cognition.domain.types import Locale, Message, Role, ToolCall
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
+from xuna_backend.modules.hosts.application.xtp_frames import (
+    HostPreflight,
+    parse_preflight_result,
+)
 from xuna_backend.modules.hosts.domain.crypto import args_sha256
 from xuna_backend.modules.hosts.domain.entities import (
     Grant,
     Host,
     HostId,
+    HostPlatform,
     HostStatus,
     Manifest,
     RiskTier,
@@ -147,6 +164,32 @@ EventSink = Callable[[ActionStreamEvent], Awaitable[None]]
 _truncate_value = truncate_tool_value
 _encode_tool_payload = encode_tool_payload
 
+# Host error codes that mean the computer-use session no longer exists on the host.
+_CU_SESSION_ENDING_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "cu_session_required",
+        "step_budget_exceeded",
+        "time_budget_exceeded",
+        "duplicate_action",
+        "no_progress",
+        "stopped",
+    }
+)
+
+# UDC-17 S17.1: tools whose risk the host decides from the live screen via `xuna/preflight`.
+_PREFLIGHT_TOOLS: frozenset[str] = frozenset({"input.click", "input.type_text", "input.key"})
+# Desktop agents only; other host kinds keep the legacy estimate until they implement it.
+_PREFLIGHT_PLATFORMS: frozenset[HostPlatform] = frozenset(
+    {HostPlatform.WINDOWS, HostPlatform.MACOS}
+)
+# Preflight reads the live window; a slow answer is treated as no answer (R3).
+PREFLIGHT_TIMEOUT_SECONDS = 2.0
+_METHOD_NOT_FOUND_PREFIX = "rpc_error:-32601:"
+# ADR-0015 D1: text typed since the last commit, kept per session for the next commit card.
+_MAX_REMEMBERED_DRAFTS = 5
+# Input steps that can commit typed text (send, submit), so their cards show it.
+_COMMIT_INPUT_TOOLS: frozenset[str] = frozenset({"input.click", "input.key"})
+
 # Host agents built before `xuna/policy.idempotent` existed do not declare it. Only for
 # those undeclared descriptors, these known toggles keep repeat protection; a host's own
 # declaration always wins. Remove once every shipped host agent declares the flag.
@@ -158,6 +201,62 @@ def is_repeat_safe(descriptor: ToolDescriptor) -> bool:
     if descriptor.idempotent is not None:
         return descriptor.idempotent
     return descriptor.name not in _LEGACY_UNDECLARED_TOGGLES
+
+
+def _cache_ui_nodes(
+    state: ComputerUseSessionState,
+    originals: list[dict[str, Any]],
+    redacted: list[dict[str, Any]],
+) -> None:
+    """Indexes UI nodes the host returned by raw id and snapshot ref (with and without `@`)."""
+    for orig, red in zip(originals, redacted, strict=False):
+        raw_id = str(red.get("id") or "").strip()
+        qual_ref = str(red.get("ref") or raw_id).strip()
+        if raw_id:
+            state.cached_nodes[raw_id] = orig
+        if qual_ref:
+            state.cached_nodes[qual_ref] = orig
+            if qual_ref.startswith("@"):
+                state.cached_nodes[qual_ref[1:]] = orig
+
+
+def _apply_ui_changes(
+    structured_content: dict[str, object], state: ComputerUseSessionState | None
+) -> None:
+    """Redacts the elements an `input.*` result reports as new (`changes.added`, UDC-17
+    S17.4) and keeps the session's node cache in step: new refs are added, dropped refs
+    removed. The host already redacts; this is the backend's own check."""
+    changes = structured_content.get("changes")
+    if not isinstance(changes, dict):
+        return
+    raw_added = changes.get("added")
+    if isinstance(raw_added, list):
+        dict_added = [n for n in raw_added if isinstance(n, dict)]
+        redacted = redact_ui_tree_nodes(dict_added)
+        changes["added"] = redacted
+        if state is not None:
+            _cache_ui_nodes(state, dict_added, redacted)
+    raw_removed = changes.get("removed")
+    if state is not None and isinstance(raw_removed, list):
+        for ref in raw_removed:
+            if isinstance(ref, str) and ref.strip():
+                key = ref.strip()
+                state.cached_nodes.pop(key, None)
+                if key.startswith("@"):
+                    state.cached_nodes.pop(key[1:], None)
+
+
+@dataclass(frozen=True, slots=True)
+class CuSessionStopResult:
+    """Outcome of stopping one control session from the phone (UDC-17 S17.3)."""
+
+    stopped: bool
+    host_confirmed: bool
+    already_ended: bool
+
+
+# Best-effort `cu.session_end` sent to the host when the owner stops a session.
+_CU_STOP_DEADLINE_MS = 5000
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +273,9 @@ class ActionContext:
     self_host_id: str | None = None
     host_defaults: dict[str, str] | None = None
     host_screen_consent: bool = True
+    # UDC-17 S17.5: the owner tapped "Chạy lại" on a template saved on their phone; this
+    # turn's `cu.session_start` must match its scope. `None` for every other turn.
+    cu_template: CuTemplatePin | None = None
 
 
 class Orchestrator:
@@ -196,10 +298,10 @@ class Orchestrator:
         clock: Callable[[], datetime] | None = None,
         code_generator: TextGenerator | None = None,
         standing_repo: StandingApprovalRepository | None = None,
-        cu_session_store: InMemoryComputerUseSessionStore | None = None,
+        cu_session_store: ComputerUseSessionStore | None = None,
     ) -> None:
         self._standing_repo = standing_repo
-        self._cu_session_store = (
+        self._cu_session_store: ComputerUseSessionStore = (
             cu_session_store if cu_session_store is not None else InMemoryComputerUseSessionStore()
         )
         self._host_repo = host_repo
@@ -249,12 +351,176 @@ class Orchestrator:
     ) -> EmergencyStopSummary:
         """Cancels all active invocations, rejects pending approvals, sends `xuna/stop`
         to every live host, suspends R2+ grants, and audits `host.stopped` (`UDC-7` S7.3)."""
-        self._cu_session_store.stop_all_for_owner(owner_id, reason=reason)
+        now = self._clock()
+        running = await self._cu_session_store.get_active_for_owner(owner_id)
+        if running is not None:
+            await self._end_cu_state(running, reason, now, request_id)
+        await self._cu_session_store.stop_all_for_owner(owner_id, reason, now)
         return await self._approval_and_board.emergency_stop(
             owner_id=owner_id,
             reason=reason,
             request_id=request_id,
         )
+
+    async def active_cu_session_event(
+        self, owner_id: uuid.UUID, request_id: str = ""
+    ) -> ComputerUseSessionEvent | None:
+        """The owner's running session for the phone's session card, after the heartbeat,
+        time and step budgets are applied (UDC-17 S17.3, S17.6), or `None`."""
+        now = self._clock()
+        state = await self._live_cu_session(owner_id, None, now, request_id)
+        return build_session_event(state, now, "") if state is not None else None
+
+    async def _live_cu_session(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId | None,
+        now: datetime,
+        request_id: str,
+    ) -> ComputerUseSessionState | None:
+        """The owner's running session (on `host_id` when given), or `None`.
+
+        Applies the stop rules lazily: a session whose phone heartbeat is older than
+        `HEARTBEAT_TIMEOUT_S` (UDC-8 dead-man switch) or whose time or step budget ran out
+        ends here. On a lost heartbeat the host is also told to end its session, since the
+        host does not see the phone.
+        """
+        state = await self._cu_session_store.get_active_for_owner(owner_id)
+        if state is None:
+            return None
+        reason = session_expiry_reason(state, now)
+        if reason is not None:
+            await self._end_cu_state(state, reason, now)
+            if reason == "heartbeat_timeout":
+                confirmed = await self._end_cu_session_on_host(state, "stopped")
+                await self._audit_cu_session_stop(
+                    owner_id, state.host_id, reason, confirmed, request_id
+                )
+            return None
+        if host_id is not None and state.host_id != host_id:
+            return None
+        return state
+
+    async def _end_cu_state(
+        self,
+        state: ComputerUseSessionState,
+        reason: str,
+        now: datetime,
+        request_id: str = "",
+    ) -> None:
+        """Ends `state` in the store and on the object this turn holds.
+
+        The first end of a running session is audited with counts only (UDC-17 S17.6
+        measurement): why it ended, steps used, owner approvals asked and minutes run.
+        """
+        was_active = state.active
+        await self._cu_session_store.mark_ended(state.session_id, reason, now)
+        if state.active:
+            state.active = False
+            state.stop_reason = reason
+        state.cached_nodes.clear()
+        state.typed_since_commit.clear()
+        state.typed_count = 0
+        if was_active:
+            minutes = max(int((now - state.started_at_utc).total_seconds() // 60), 0)
+            await self._audit.record(
+                AuditEvent(
+                    owner_id=state.owner_id,
+                    action=AuditAction.HOST_CU_SESSION_ENDED,
+                    occurred_at=now,
+                    subject=str(state.host_id),
+                    request_id=request_id,
+                    metadata={
+                        "reason": reason[:64],
+                        "steps": state.steps_used,
+                        "prompts": state.owner_prompts,
+                        "minutes": minutes,
+                    },
+                )
+            )
+
+    async def _end_cu_session_on_host(self, state: ComputerUseSessionState, outcome: str) -> bool:
+        """Best-effort `cu.session_end` to the host; whether the host confirmed it."""
+        try:
+            raw = await self._hub.send_request(
+                str(state.host_id),
+                "tools/call",
+                {
+                    "name": "cu.session_end",
+                    "arguments": {"sessionId": state.session_id, "outcome": outcome},
+                    "_meta": {
+                        "xuna/invocationId": str(uuid.uuid4()),
+                        "xuna/deadlineMs": _CU_STOP_DEADLINE_MS,
+                    },
+                },
+                timeout_s=_CU_STOP_DEADLINE_MS / 1000,
+            )
+        except Exception:
+            return False
+        meta = raw.get("_meta")
+        return isinstance(meta, dict) and meta.get("xuna/status") == "ok"
+
+    async def _audit_cu_session_stop(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        reason: str,
+        host_confirmed: bool,
+        request_id: str,
+    ) -> None:
+        await self._audit.record(
+            AuditEvent(
+                owner_id=owner_id,
+                action=AuditAction.HOST_CU_SESSION_STOPPED,
+                occurred_at=self._clock(),
+                subject=str(host_id),
+                request_id=request_id,
+                metadata={"hostConfirmed": host_confirmed, "reason": reason},
+            )
+        )
+
+    async def stop_cu_session(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        session_id: str,
+        request_id: str = "",
+    ) -> CuSessionStopResult | None:
+        """Ends one control session from the phone's session card (UDC-17 S17.3).
+
+        Owner-scoped and idempotent. The backend copy ends first, so the R2 exemption and
+        the typed text are gone at once; then the host is asked, best effort, to end its
+        session too. E-Stop stays the stronger control. Returns `None` when the owner has
+        no such session.
+        """
+        state = await self._cu_session_store.get(session_id)
+        if state is None or state.owner_id != owner_id:
+            return None
+        if not state.active:
+            return CuSessionStopResult(stopped=True, host_confirmed=False, already_ended=True)
+        await self._end_cu_state(state, "owner_stopped", self._clock())
+        host_confirmed = await self._end_cu_session_on_host(state, "stopped")
+        await self._audit_cu_session_stop(
+            owner_id, state.host_id, "owner_stopped", host_confirmed, request_id
+        )
+        return CuSessionStopResult(stopped=True, host_confirmed=host_confirmed, already_ended=False)
+
+    async def record_cu_heartbeat(
+        self, *, owner_id: uuid.UUID, session_id: str, request_id: str = ""
+    ) -> ComputerUseSessionState | None:
+        """Phone heartbeat for the owner's running session (UDC-8 dead-man switch).
+
+        The stop rules run first, so a heartbeat that arrives after the session already
+        timed out does not revive it. Returns the running session, or `None`.
+        """
+        now = self._clock()
+        state = await self._live_cu_session(owner_id, None, now, request_id)
+        if state is None or state.session_id != session_id:
+            return None
+        if not await self._cu_session_store.touch_heartbeat(session_id, owner_id, now):
+            return None
+        state.last_heartbeat_at = now
+        return state
 
     @staticmethod
     def _lookup_cached_cu_node(
@@ -288,15 +554,62 @@ class Orchestrator:
                 cached_name = cached_node.get("name")
                 if isinstance(cached_name, str) and is_consequential_element_name(cached_name):
                     return RiskTier.R3
-        elif (
-            descriptor.name == "input.key"
-            and clean_args.get("combo") == "Enter"
-            and clean_args.get("inForm") is True
-        ):
-            return RiskTier.R3
+            elif active_cu is not None:
+                # No tree read in this process (not inspected yet, or the backend restarted):
+                # the real label is unknown, so the click may be a commit.
+                return RiskTier.R3
+        elif descriptor.name == "input.key":
+            combo = clean_args.get("combo")
+            if isinstance(combo, str) and is_activation_key_combo(combo):
+                return RiskTier.R3
         return descriptor.risk
 
-    def _update_cu_session_after_call(
+    @staticmethod
+    def _declared_risk_floor(descriptor: ToolDescriptor, clean_args: dict[str, object]) -> RiskTier:
+        """Risk implied by the call's own arguments.
+
+        Used together with a host preflight answer: it can raise that answer (a model that
+        names its target "Send" gets R3), never lower it. Activation keys are not raised
+        here: whether Enter/Space is safe depends on the live focus, which only the host
+        sees (ADR-0015 D2). The legacy estimate for hosts without preflight still treats
+        them as R3.
+        """
+        if descriptor.name == "input.click":
+            name = clean_args.get("elementName")
+            if isinstance(name, str) and is_consequential_element_name(name):
+                return RiskTier.R3
+        return descriptor.risk
+
+    async def _host_preflight(
+        self, host_id: HostId, tool_name: str, clean_args: dict[str, object]
+    ) -> HostPreflight | None:
+        """Asks the host which risk it would enforce (`xuna/preflight`, UDC-17 S17.1).
+
+        Returns `None` only when the host answers "method not found", i.e. it predates
+        preflight, so the legacy estimate applies. Any other failure (timeout, offline,
+        malformed answer) is fail-closed: R3 with no element label.
+        """
+        try:
+            raw = await self._hub.send_request(
+                str(host_id),
+                "xuna/preflight",
+                {"name": tool_name, "arguments": dict(clean_args)},
+                timeout_s=PREFLIGHT_TIMEOUT_SECONDS,
+            )
+            return parse_preflight_result(raw)
+        except Exception as error:
+            if isinstance(error, RuntimeError) and str(error).startswith(_METHOD_NOT_FOUND_PREFIX):
+                return None
+            return HostPreflight(
+                status="ok",
+                effective_risk=RiskTier.R3,
+                reason_code="preflight_unavailable",
+                error_code=None,
+                element_role=None,
+                element_name=None,
+            )
+
+    async def _update_cu_session_after_call(
         self,
         *,
         owner_id: uuid.UUID,
@@ -307,11 +620,28 @@ class Orchestrator:
         structured_content: dict[str, object],
         active_cu: ComputerUseSessionState | None,
         now: datetime,
+        target_alias: str = "",
     ) -> None:
+        if descriptor.name == "cu.session_extend" and status == "ok" and active_cu is not None:
+            # UDC-17 S17.3: take the full lists the host now enforces, not the call's arguments.
+            host_apps = structured_content.get("apps")
+            host_domains = structured_content.get("domains")
+            if isinstance(host_apps, list) and isinstance(host_domains, list):
+                active_cu.allowed_apps = tuple(
+                    str(a).strip().lower() for a in host_apps if str(a).strip()
+                )
+                active_cu.allowed_domains = tuple(
+                    str(d).strip().lower() for d in host_domains if str(d).strip()
+                )
+                await self._cu_session_store.set_scope(
+                    active_cu.session_id, active_cu.allowed_apps, active_cu.allowed_domains
+                )
+            return
+
         if descriptor.name == "cu.session_start" and status == "ok":
-            existing = self._cu_session_store.get_active_for_owner(owner_id)
-            if existing is not None:
-                self._cu_session_store.mark_ended(existing.session_id, "replaced")
+            previous = await self._cu_session_store.get_active_for_owner(owner_id)
+            if previous is not None:
+                await self._end_cu_state(previous, "replaced", now)
             raw_sid = structured_content.get("sessionId")
             session_id = (
                 raw_sid.strip()
@@ -330,12 +660,14 @@ class Orchestrator:
                 if isinstance(raw_domains, list)
                 else ()
             )
+            # The host validated and accepted these arguments; the clamp only keeps the
+            # backend's own budget inside the same bounds if a host ever accepts more.
             raw_steps = clean_args.get("maxSteps")
-            max_steps = raw_steps if type(raw_steps) is int else 12
+            max_steps = min(max(raw_steps if type(raw_steps) is int else 12, 1), MAX_SESSION_STEPS)
             raw_mins = clean_args.get("maxMinutes")
-            max_mins = raw_mins if type(raw_mins) is int else 5
-            now_m = time.monotonic()
-            self._cu_session_store.put(
+            max_mins = min(max(raw_mins if type(raw_mins) is int else 5, 1), MAX_SESSION_MINUTES)
+            # `start` ends any other running session of the owner as `replaced`.
+            await self._cu_session_store.start(
                 ComputerUseSessionState(
                     session_id=session_id,
                     owner_id=owner_id,
@@ -345,10 +677,11 @@ class Orchestrator:
                     allowed_domains=domains,
                     max_steps=max_steps,
                     max_minutes=max_mins,
-                    started_at_monotonic=now_m,
-                    last_heartbeat_monotonic=now_m,
                     started_at_utc=now,
-                )
+                    last_heartbeat_at=now,
+                    target_alias=target_alias,
+                ),
+                now,
             )
             return
 
@@ -356,9 +689,23 @@ class Orchestrator:
             outcome = str(clean_args.get("outcome") or "completed")
             raw_sid = clean_args.get("sessionId")
             if isinstance(raw_sid, str) and raw_sid.strip():
-                self._cu_session_store.mark_ended(raw_sid.strip(), outcome)
+                named = await self._cu_session_store.get(raw_sid.strip())
+                if named is not None and named.owner_id == owner_id:
+                    await self._end_cu_state(named, outcome, now)
             if active_cu is not None:
-                self._cu_session_store.mark_ended(active_cu.session_id, outcome)
+                await self._end_cu_state(active_cu, outcome, now)
+            return
+
+        if (
+            active_cu is not None
+            and status != "ok"
+            and descriptor.family in (ToolFamily.SCREEN, ToolFamily.UI, ToolFamily.INPUT)
+        ):
+            # The host is the authority on the session: once it reports the session gone or
+            # out of budget, stop exempting R2 steps from approval here too.
+            err_code = str(structured_content.get("errorCode") or "")
+            if err_code in _CU_SESSION_ENDING_ERROR_CODES:
+                await self._end_cu_state(active_cu, err_code, now)
             return
 
         if descriptor.name == "ui.inspect" and status == "ok":
@@ -369,33 +716,31 @@ class Orchestrator:
                 structured_content["nodes"] = redacted
                 if active_cu is not None:
                     active_cu.cached_nodes.clear()
-                    for orig, red in zip(dict_nodes, redacted, strict=False):
-                        raw_id = str(red.get("id") or "").strip()
-                        qual_ref = str(red.get("ref") or raw_id).strip()
-                        if raw_id:
-                            active_cu.cached_nodes[raw_id] = orig
-                        if qual_ref:
-                            active_cu.cached_nodes[qual_ref] = orig
-                            if qual_ref.startswith("@"):
-                                active_cu.cached_nodes[qual_ref[1:]] = orig
+                    _cache_ui_nodes(active_cu, dict_nodes, redacted)
             return
 
-        if descriptor.family == ToolFamily.INPUT and active_cu is not None:
-            if status == "ok":
-                active_cu.steps_used += 1
-                if active_cu.steps_used >= active_cu.max_steps:
-                    self._cu_session_store.mark_ended(active_cu.session_id, "step_budget_exceeded")
-            else:
-                err_code = str(structured_content.get("errorCode") or "")
-                if err_code in (
-                    "cu_session_required",
-                    "step_budget_exceeded",
-                    "time_budget_exceeded",
-                    "duplicate_action",
-                    "no_progress",
-                    "stopped",
-                ):
-                    self._cu_session_store.mark_ended(active_cu.session_id, err_code)
+        if descriptor.name == "ui.find" and status == "ok":
+            # UDC-17 S17.4: candidates join the host's current snapshot, so the cache grows
+            # instead of being replaced.
+            raw_matches = structured_content.get("matches")
+            if isinstance(raw_matches, list):
+                dict_matches = [n for n in raw_matches if isinstance(n, dict)]
+                redacted = redact_ui_tree_nodes(dict_matches)
+                structured_content["matches"] = redacted
+                if active_cu is not None:
+                    _cache_ui_nodes(active_cu, dict_matches, redacted)
+            return
+
+        if descriptor.family == ToolFamily.INPUT and status == "ok":
+            _apply_ui_changes(structured_content, active_cu)
+
+        if descriptor.family == ToolFamily.INPUT and active_cu is not None and status == "ok":
+            steps = await self._cu_session_store.record_step(active_cu.session_id)
+            if steps is None:
+                return
+            active_cu.steps_used = steps
+            if steps >= active_cu.max_steps:
+                await self._end_cu_state(active_cu, "step_budget_exceeded", now)
 
     async def decide_approval(
         self,
@@ -804,18 +1149,86 @@ class Orchestrator:
                     ),
                     status="denied",
                     gesture=gesture_for_action_status("denied"),
+                    error_code=deny_reason,
+                    host_id=str(host.host_id),
                 )
             )
             return Message(
                 role=Role.TOOL,
-                content=_encode_tool_payload("denied"),
+                content=_encode_tool_payload("denied", {"errorCode": deny_reason}),
                 tool_call_id=call.id,
             )
 
-        active_cu = self._cu_session_store.get_active_for_owner_and_host(
-            ctx.owner_id, host.host_id, now
+        active_cu = await self._live_cu_session(ctx.owner_id, host.host_id, now, ctx.request_id)
+        # UDC-17 S17.1: the host decides the risk of an input step from the live screen. The
+        # backend only ever raises that answer. Hosts that predate preflight keep the legacy
+        # estimate; the local self-host path has no preflight round trip.
+        is_self_host = ctx.self_host_id is not None and str(host.host_id) == ctx.self_host_id
+        preflight: HostPreflight | None = None
+        if (
+            descriptor.name in _PREFLIGHT_TOOLS
+            and not is_self_host
+            and host.platform in _PREFLIGHT_PLATFORMS
+        ):
+            preflight = await self._host_preflight(host.host_id, descriptor.name, clean_args)
+        live_label: str | None = None
+        if preflight is None:
+            effective_risk = self._effective_tool_risk(descriptor, clean_args, active_cu)
+        elif preflight.status != "ok":
+            # The host would refuse this call: tell the model why, do not ask the owner.
+            refusal_code = preflight.error_code or "policy_blocked"
+            if active_cu is not None and refusal_code in _CU_SESSION_ENDING_ERROR_CODES:
+                await self._end_cu_state(active_cu, refusal_code, now)
+            await self._audit.record(
+                AuditEvent(
+                    owner_id=ctx.owner_id,
+                    action=AuditAction.HOST_TOOL_DENIED,
+                    occurred_at=now,
+                    subject=str(host.host_id),
+                    request_id=ctx.request_id,
+                    metadata={
+                        "tool": descriptor.name,
+                        "risk": descriptor.risk.value,
+                        "status": preflight.status,
+                        "reason": refusal_code,
+                        "platform": host.platform.value,
+                    },
+                )
+            )
+            await ctx.emit_event(
+                ActionResultEvent(
+                    invocation_id=invocation_id,
+                    target=target_alias,
+                    summary=ActionSummary.format_result(
+                        descriptor.name, clean_args, target_alias, preflight.status, ctx.locale
+                    ),
+                    status=preflight.status,
+                    gesture=gesture_for_action_status(preflight.status),
+                    error_code=refusal_code,
+                    host_id=str(host.host_id),
+                )
+            )
+            if active_cu is not None and not active_cu.active:
+                await ctx.emit_event(build_session_event(active_cu, now, ""))
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload(preflight.status, {"errorCode": refusal_code}),
+                tool_call_id=call.id,
+            )
+        else:
+            effective_risk = max(
+                (
+                    descriptor.risk,
+                    preflight.effective_risk or RiskTier.R3,
+                    self._declared_risk_floor(descriptor, clean_args),
+                ),
+                key=lambda tier: tier.level,
+            )
+            live_label = preflight.element_name
+        # The approval card names the element the host found on screen, not the model's label.
+        summary_args: dict[str, object] = (
+            clean_args if live_label is None else {**clean_args, "elementName": live_label}
         )
-        effective_risk = self._effective_tool_risk(descriptor, clean_args, active_cu)
 
         if effective_risk != descriptor.risk and not any(
             g.family == descriptor.family and g.is_active(now) and g.max_risk.allows(effective_risk)
@@ -832,7 +1245,7 @@ class Orchestrator:
                         "tool": descriptor.name,
                         "risk": effective_risk.value,
                         "status": "denied",
-                        "reason": "grant_denied",
+                        "reason": "risk_above_grant",
                         "platform": host.platform.value,
                     },
                 )
@@ -842,24 +1255,31 @@ class Orchestrator:
                     invocation_id=invocation_id,
                     target=target_alias,
                     summary=ActionSummary.format_result(
-                        descriptor.name, clean_args, target_alias, "denied", ctx.locale
+                        descriptor.name, summary_args, target_alias, "denied", ctx.locale
                     ),
                     status="denied",
                     gesture=gesture_for_action_status("denied"),
+                    error_code="risk_above_grant",
+                    host_id=str(host.host_id),
                 )
             )
+            # The step needs a higher risk than any active grant allows (for example the
+            # host raised it to R3 and the family grant stops at R2): say so, with a code
+            # the app can turn into a button to that host's grants.
             return Message(
                 role=Role.TOOL,
-                content=_encode_tool_payload("denied"),
+                content=_encode_tool_payload("denied", {"errorCode": "risk_above_grant"}),
                 tool_call_id=call.id,
             )
 
         if descriptor.name in ("input.click", "input.type_text", "input.key"):
             cached_node = self._lookup_cached_cu_node(active_cu, clean_args)
+            # The model's declared name counts only when it types: a click on "Quên mật
+            # khẩu" is not typing into a password field (UDC-17 S17.6).
             explicit_elem_name = clean_args.get("elementName")
             synthetic_node: dict[str, object] = (
                 {"name": explicit_elem_name, "role": "textfield"}
-                if isinstance(explicit_elem_name, str)
+                if isinstance(explicit_elem_name, str) and descriptor.name != "input.click"
                 else {}
             )
             if (cached_node is not None and is_password_ui_node(cached_node)) or (
@@ -886,10 +1306,12 @@ class Orchestrator:
                         invocation_id=invocation_id,
                         target=target_alias,
                         summary=ActionSummary.format_result(
-                            descriptor.name, clean_args, target_alias, "denied", ctx.locale
+                            descriptor.name, summary_args, target_alias, "denied", ctx.locale
                         ),
                         status="denied",
                         gesture=gesture_for_action_status("denied"),
+                        error_code="password_field_forbidden",
+                        host_id=str(host.host_id),
                     )
                 )
                 return Message(
@@ -899,6 +1321,78 @@ class Orchestrator:
                     ),
                     tool_call_id=call.id,
                 )
+
+        template = ctx.cu_template
+        if template is not None and descriptor.name == "cu.session_start":
+            mismatch = template.mismatch(str(host.host_id), clean_args)
+            if mismatch is not None:
+                # Refused before anyone is asked: the owner chose to rerun exactly this scope.
+                await self._audit.record(
+                    AuditEvent(
+                        owner_id=ctx.owner_id,
+                        action=AuditAction.HOST_TOOL_DENIED,
+                        occurred_at=now,
+                        subject=str(host.host_id),
+                        request_id=ctx.request_id,
+                        metadata={
+                            "tool": descriptor.name,
+                            "risk": effective_risk.value,
+                            "status": "denied",
+                            "reason": "template_mismatch",
+                            "platform": host.platform.value,
+                        },
+                    )
+                )
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_tool_payload(
+                        "denied",
+                        {
+                            "errorCode": "template_mismatch",
+                            "mismatch": mismatch,
+                            "expected": template.expected(),
+                        },
+                    ),
+                    tool_call_id=call.id,
+                )
+
+        # UDC-17 S17.3 (extend) and the S17.5 follow-up (start): the owner signs exactly the
+        # scope on the card, so a scope the card cannot show in full is refused before anyone
+        # is asked. A rerun's scope is pinned by its template, so the model is told it cannot
+        # trim it (`templatePinned`) instead of being sent into `template_mismatch`.
+        scope_too_long: dict[str, object] | None = None
+        if descriptor.name == "cu.session_extend" and not ActionSummary.extend_scope_fits_card(
+            summary_args, target_alias, ctx.locale
+        ):
+            scope_too_long = {"errorCode": "extend_scope_too_long"}
+        elif descriptor.name == "cu.session_start" and not ActionSummary.start_scope_fits_card(
+            summary_args, target_alias, ctx.locale
+        ):
+            scope_too_long = {"errorCode": "start_scope_too_long"}
+            if template is not None:
+                scope_too_long["templatePinned"] = True
+        if scope_too_long is not None:
+            await self._audit.record(
+                AuditEvent(
+                    owner_id=ctx.owner_id,
+                    action=AuditAction.HOST_TOOL_DENIED,
+                    occurred_at=now,
+                    subject=str(host.host_id),
+                    request_id=ctx.request_id,
+                    metadata={
+                        "tool": descriptor.name,
+                        "risk": effective_risk.value,
+                        "status": "denied",
+                        "reason": str(scope_too_long["errorCode"]),
+                        "platform": host.platform.value,
+                    },
+                )
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload("denied", scope_too_long),
+                tool_call_id=call.id,
+            )
 
         self._last_target_store.set_last_target(ctx.owner_id, ctx.pet_id, target_alias, now)
 
@@ -945,7 +1439,7 @@ class Orchestrator:
                     args_sha256=args_sha256(clean_args),
                     risk=effective_risk,
                     summary=ActionSummary.format_pending(
-                        descriptor.name, clean_args, target_alias, ctx.locale
+                        descriptor.name, summary_args, target_alias, ctx.locale
                     ),
                     created_at=now,
                     expires_at=expires_at,
@@ -979,7 +1473,7 @@ class Orchestrator:
                     args_sha256=args_sha256(clean_args),
                     risk=effective_risk,
                     summary=ActionSummary.format_pending(
-                        descriptor.name, clean_args, target_alias, ctx.locale
+                        descriptor.name, summary_args, target_alias, ctx.locale
                     ),
                     created_at=now,
                     expires_at=expires_at,
@@ -1012,6 +1506,39 @@ class Orchestrator:
                 )
                 standing_offer_tool = descriptor.name if offer else None
                 standing_offer_args = dict(clean_args) if offer else None
+                # UDC-17 S17.5: only a count travels; nothing is switched on for the owner.
+                standing_approved_count: int | None = None
+                if offer:
+                    approved = await self._approval_repo.count_approved(
+                        ctx.owner_id,
+                        host.host_id,
+                        descriptor.name,
+                        args_sha256(clean_args),
+                        now - STANDING_SUGGEST_WINDOW,
+                    )
+                    if approved >= STANDING_SUGGEST_MIN_APPROVALS:
+                        standing_approved_count = approved
+                pending_summary = ActionSummary.format_pending(
+                    descriptor.name, summary_args, target_alias, ctx.locale
+                )
+                # The card may carry draft text; the stored approval row never does.
+                card_summary = pending_summary
+                if template is not None and descriptor.name == "cu.session_start":
+                    card_summary = ActionSummary.with_template_name(
+                        pending_summary, template.name, ctx.locale
+                    )
+                if (
+                    effective_risk == RiskTier.R3
+                    and descriptor.name in _COMMIT_INPUT_TOOLS
+                    and active_cu is not None
+                    and (active_cu.typed_since_commit or active_cu.typed_count > 0)
+                ):
+                    card_summary = ActionSummary.with_typed_text(
+                        pending_summary,
+                        active_cu.typed_since_commit,
+                        ctx.locale,
+                        typed_count=active_cu.typed_count,
+                    )
                 approval_req = ApprovalRequest(
                     approval_id=uuid.uuid4(),
                     owner_id=ctx.owner_id,
@@ -1020,20 +1547,22 @@ class Orchestrator:
                     tool=descriptor.name,
                     args_sha256=args_sha256(clean_args),
                     risk=effective_risk,
-                    summary=ActionSummary.format_pending(
-                        descriptor.name, clean_args, target_alias, ctx.locale
-                    ),
+                    summary=pending_summary,
                     created_at=now,
                     expires_at=expires_at,
                 )
                 await self._approval_repo.save(approval_req)
                 await self._approval_broker.create(approval_req)
+                if active_cu is not None:
+                    prompts = await self._cu_session_store.record_prompt(active_cu.session_id)
+                    if prompts is not None:
+                        active_cu.owner_prompts = prompts
 
                 await ctx.emit_event(
                     ActionPendingEvent(
                         approval_id=str(approval_req.approval_id),
                         target=target_alias,
-                        summary=approval_req.summary,
+                        summary=card_summary,
                         risk=approval_req.risk.value,
                         expires_in=APPROVAL_TTL_SECONDS,
                         host_id=str(host.host_id),
@@ -1041,6 +1570,7 @@ class Orchestrator:
                         expires_at=expires_at.astimezone(UTC).isoformat(),
                         standing_tool=standing_offer_tool,
                         standing_arguments=standing_offer_args,
+                        standing_approved_count=standing_approved_count,
                     )
                 )
 
@@ -1062,7 +1592,7 @@ class Orchestrator:
                             target=target_alias,
                             summary=ActionSummary.format_result(
                                 descriptor.name,
-                                clean_args,
+                                summary_args,
                                 target_alias,
                                 final_status,
                                 ctx.locale,
@@ -1105,7 +1635,7 @@ class Orchestrator:
                         target=target_alias,
                         summary=ActionSummary.format_result(
                             descriptor.name,
-                            clean_args,
+                            summary_args,
                             target_alias,
                             "denied",
                             ctx.locale,
@@ -1292,7 +1822,7 @@ class Orchestrator:
             except Exception:
                 status = "failed"
 
-        self._update_cu_session_after_call(
+        await self._update_cu_session_after_call(
             owner_id=ctx.owner_id,
             host_id=host.host_id,
             descriptor=descriptor,
@@ -1301,7 +1831,29 @@ class Orchestrator:
             structured_content=structured_content,
             active_cu=active_cu,
             now=self._clock(),
+            target_alias=target_alias,
         )
+        # A timed-out call may still have typed on the host, so its text is kept too.
+        if active_cu is not None and active_cu.active and status in ("ok", "timeout"):
+            if descriptor.name == "input.type_text":
+                # Remembered for the next commit card (ADR-0015 D1), signed or not.
+                text = clean_args.get("text")
+                if isinstance(text, str) and text.strip():
+                    active_cu.typed_since_commit.append(text)
+                    del active_cu.typed_since_commit[:-_MAX_REMEMBERED_DRAFTS]
+                    active_cu.typed_count += 1
+                    await self._cu_session_store.set_typed_count(
+                        active_cu.session_id, active_cu.typed_count
+                    )
+            elif (
+                status == "ok"
+                and effective_risk == RiskTier.R3
+                and descriptor.name in _COMMIT_INPUT_TOOLS
+            ):
+                # The owner signed a commit whose card showed the typed text.
+                active_cu.typed_since_commit.clear()
+                active_cu.typed_count = 0
+                await self._cu_session_store.set_typed_count(active_cu.session_id, 0)
 
         audit_action = (
             AuditAction.HOST_TOOL_DENIED if status == "denied" else AuditAction.HOST_TOOL_INVOKED
@@ -1323,17 +1875,42 @@ class Orchestrator:
             )
         )
 
+        result_summary = ActionSummary.format_result(
+            descriptor.name,
+            summary_args if live_label is not None else clean_args,
+            target_alias,
+            status,
+            ctx.locale,
+        )
+        raw_error = structured_content.get("errorCode")
         await ctx.emit_event(
             ActionResultEvent(
                 invocation_id=invocation_id,
                 target=target_alias,
-                summary=ActionSummary.format_result(
-                    descriptor.name, clean_args, target_alias, status, ctx.locale
-                ),
+                summary=result_summary,
                 status=status,
                 gesture=gesture_for_action_status(status),
+                error_code=raw_error[:64]
+                if status != "ok" and isinstance(raw_error, str)
+                else None,
+                host_id=str(host.host_id) if status != "ok" else None,
             )
         )
+        if descriptor.family in (
+            ToolFamily.CU,
+            ToolFamily.SCREEN,
+            ToolFamily.UI,
+            ToolFamily.INPUT,
+        ):
+            # UDC-17 S17.3: the phone's session card follows every step of the session.
+            card_now = self._clock()
+            card_state = await self._live_cu_session(
+                ctx.owner_id, host.host_id, card_now, ctx.request_id
+            )
+            if card_state is None and active_cu is not None:
+                card_state = active_cu
+            if card_state is not None:
+                await ctx.emit_event(build_session_event(card_state, card_now, result_summary))
         if status == "ok" and not is_repeat_safe(descriptor):
             content = _encode_tool_payload(status, structured_content, repeatSafe=False)
         else:

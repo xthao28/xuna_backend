@@ -30,6 +30,7 @@ from tests.modules.hosts.test_hosts_use_cases import (
 
 from xuna_backend.core.config import Environment, Settings
 from xuna_backend.main import create_app
+from xuna_backend.modules.actions.application.computer_use import InMemoryComputerUseSessionStore
 from xuna_backend.modules.hosts.domain.crypto import (
     HostProofPurpose,
     host_proof_message,
@@ -136,6 +137,8 @@ def test_websocket_handshake_to_ready_and_tools_list_with_fake_agent() -> None:
 
     with TestClient(app) as client:
         app.state.database = _DummyDatabase()
+        # No database here: the durable session store gets an in-memory stand-in.
+        app.state.cu_session_store = InMemoryComputerUseSessionStore()
         app.state.host_repository = lambda _db: host_repo
         app.state.host_enrollment_repository = lambda _db: enroll_repo
         app.state.audit_log = lambda _db: audit_log

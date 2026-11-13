@@ -19,6 +19,7 @@ from xuna_backend.modules.hosts.domain.crypto import (
 from xuna_backend.modules.hosts.domain.entities import (
     HostId,
     HostPlatform,
+    RiskTier,
     ToolDescriptor,
 )
 from xuna_backend.modules.hosts.domain.session import (
@@ -296,6 +297,74 @@ def _parse_agent_notification(method: str, params: dict[str, object]) -> Inbound
     except (ValidationError, ValueError) as error:
         raise HostSessionRejected(UNSUPPORTED_PROTOCOL) from error
     raise HostSessionRejected(UNSUPPORTED_PROTOCOL)
+
+
+_SHORT_CODE = r"^[a-z0-9_.-]{1,64}$"
+_PREFLIGHT_STATUSES = Literal[
+    "ok",
+    "denied",
+    "needs_permission",
+    "invalid_args",
+    "unsupported",
+    "failed",
+    "timeout",
+    "cancelled",
+]
+
+
+class PreflightElementModel(_StrictModel):
+    role: str = Field(pattern=_SHORT_CODE)
+    name: str = Field(min_length=1, max_length=80, pattern=r"^[^\x00-\x1f\x7f]*$")
+
+
+class PreflightResultModel(_StrictModel):
+    """`xuna/preflight` result body (`XUNA_XTP_V1_CONTRACT.md` §4.2.8)."""
+
+    status: _PREFLIGHT_STATUSES
+    effectiveRisk: Literal["R0", "R1", "R2", "R3"] | None = None
+    reasonCode: str | None = Field(default=None, pattern=_SHORT_CODE)
+    errorCode: str | None = Field(default=None, pattern=_SHORT_CODE)
+    element: PreflightElementModel | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HostPreflight:
+    """What the host would enforce for a call (UDC-17 S17.1).
+
+    `status == "ok"` carries `effective_risk`; any other status is a refusal with
+    `error_code`. `element_name` is the live label of the target; it is screen
+    content, so it may be shown to the owner but never logged or audited.
+    """
+
+    status: str
+    effective_risk: RiskTier | None
+    reason_code: str | None
+    error_code: str | None
+    element_role: str | None
+    element_name: str | None
+
+
+def parse_preflight_result(result: dict[str, object]) -> HostPreflight:
+    """Strictly parses an `xuna/preflight` result; raises `ValueError` on any deviation."""
+    if set(result.keys()) != {"preflight"} or not isinstance(result["preflight"], dict):
+        raise ValueError("xuna/preflight result must contain only a 'preflight' object")
+    try:
+        body = PreflightResultModel.model_validate(result["preflight"])
+    except ValidationError as error:
+        raise ValueError("invalid xuna/preflight result") from error
+    if body.status == "ok":
+        if body.effectiveRisk is None or body.errorCode is not None:
+            raise ValueError("an ok preflight carries a risk and no error code")
+    elif body.errorCode is None or body.effectiveRisk is not None or body.element is not None:
+        raise ValueError("a refused preflight carries an error code and nothing else")
+    return HostPreflight(
+        status=body.status,
+        effective_risk=RiskTier(body.effectiveRisk) if body.effectiveRisk else None,
+        reason_code=body.reasonCode,
+        error_code=body.errorCode,
+        element_role=body.element.role if body.element else None,
+        element_name=body.element.name if body.element else None,
+    )
 
 
 def parse_tools_list_result(result: dict[str, object]) -> list[ToolDescriptor]:

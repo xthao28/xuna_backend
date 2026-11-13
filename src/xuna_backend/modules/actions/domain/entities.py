@@ -139,6 +139,22 @@ class ActionPendingEvent:
     # the validated arguments, so the owner's phone can sign a standing approval for them.
     standing_tool: str | None = None
     standing_arguments: dict[str, object] | None = None
+    # UDC-17 S17.5: set with the standing offer when this exact call was approved at least
+    # `STANDING_SUGGEST_MIN_APPROVALS` times in the window, so the phone can suggest it.
+    standing_approved_count: int | None = None
+
+    def standing_payload(self) -> dict[str, object] | None:
+        """The `standing` object of `action_pending` on SSE and the voice WebSocket, or
+        `None` when this call cannot be pre-approved."""
+        if self.standing_tool is None:
+            return None
+        payload: dict[str, object] = {
+            "tool": self.standing_tool,
+            "arguments": self.standing_arguments or {},
+        }
+        if self.standing_approved_count is not None:
+            payload["approvedCount"] = self.standing_approved_count
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,13 +200,46 @@ class HostWakeRequestEvent:
 
 @dataclass(frozen=True, slots=True)
 class ActionResultEvent:
-    """SSE / WebSocket event emitted when a tool invocation completes."""
+    """SSE / WebSocket event emitted when a tool invocation completes.
+
+    `error_code` and `host_id` are set when the call did not run, so the app can offer the
+    owner the place to fix it (UDC-17 S17.3, P7).
+    """
 
     invocation_id: str
     target: str
     summary: str
     status: str
     gesture: str | None = None
+    error_code: str | None = None
+    host_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ComputerUseSessionEvent:
+    """SSE / WebSocket `cu_session` event: the live state of a desktop control session for the
+    phone's session card (UDC-17 S17.3).
+
+    Carries the owner's own goal and the text typed since the last commit; it is streamed to
+    the owner only and never persisted, logged or audited.
+    """
+
+    session_id: str
+    host_id: str
+    target: str
+    goal: str
+    apps: tuple[str, ...]
+    domains: tuple[str, ...]
+    step: int
+    max_steps: int
+    max_minutes: int
+    seconds_left: int
+    status: str  # "running" | "ended"
+    summary: str
+    typed: tuple[str, ...] = ()
+    end_reason: str | None = None
+    # Whether a rerun of this scope would fit its approval card (UDC-17 S17.5 follow-up).
+    rerun_fits_card: bool | None = None
 
 
 ActionStreamEvent = (
@@ -199,4 +248,5 @@ ActionStreamEvent = (
     | LocalActionRequestEvent
     | HostWakeRequestEvent
     | ActionResultEvent
+    | ComputerUseSessionEvent
 )

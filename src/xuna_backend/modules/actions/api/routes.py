@@ -2,7 +2,6 @@
 
 import base64
 import binascii
-import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -15,14 +14,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.accounts.api.dependencies import CurrentOwner, Session, state
-from xuna_backend.modules.actions.application.computer_use import (
-    InMemoryComputerUseSessionStore,
-)
+from xuna_backend.modules.actions.application.computer_use import session_event_payload
 from xuna_backend.modules.actions.application.orchestrator import Orchestrator
 from xuna_backend.modules.actions.application.ports import (
     ApprovalBroker,
     ApprovalRepository,
     ApprovalScopeStore,
+    ComputerUseSessionStore,
     LastTargetStore,
     LocalResultBroker,
     StandingApprovalRepository,
@@ -240,6 +238,17 @@ class _SessionPerCallApprovalRepository:
                 await s.commit()
             return count
 
+    async def count_approved(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        tool: str,
+        args_sha256: str,
+        since: datetime,
+    ) -> int:
+        async with _open_short_session(self._state) as s:
+            return await self._repo(s).count_approved(owner_id, host_id, tool, args_sha256, since)
+
 
 class _SessionPerCallStandingRepository:
     """Opens a short-lived DB session per call so a long-lived stream never holds one."""
@@ -319,7 +328,7 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
     code_gen = getattr(app_state, "code_text_generator", None) or getattr(
         app_state, "expert_text_generator", None
     )
-    cu_store: InMemoryComputerUseSessionStore | None = getattr(app_state, "cu_session_store", None)
+    cu_store: ComputerUseSessionStore | None = getattr(app_state, "cu_session_store", None)
     return Orchestrator(
         host_repo=_SessionPerCallHostRepository(app_state),
         hub=hub,
@@ -559,9 +568,7 @@ async def emergency_stop_actions(
         request.app.state, "approval_scope_store", None
     )
 
-    cu_store: InMemoryComputerUseSessionStore | None = getattr(
-        request.app.state, "cu_session_store", None
-    )
+    cu_store: ComputerUseSessionStore | None = getattr(request.app.state, "cu_session_store", None)
     orch = Orchestrator(
         host_repo=host_factory(session),
         hub=hub,
@@ -588,6 +595,44 @@ async def emergency_stop_actions(
     }
 
 
+@router.get("/cu-session")
+async def get_active_cu_session(request: Request, owner: CurrentOwner) -> dict[str, Any]:
+    """The owner's running desktop control session for the phone's session card
+    (UDC-17 S17.3), with the time and step budgets applied, or `{"active": false}`.
+
+    Streams only reach the phone during a turn; the card calls this when it opens, when
+    the app resumes and after each event, so it never shows a session that already ended."""
+    event = await build_stream_orchestrator(request.app.state).active_cu_session_event(
+        owner.owner_id, _request_id(request)
+    )
+    if event is None:
+        return {"active": False}
+    return {"active": True, "session": session_event_payload(event)}
+
+
+@router.post("/cu-session/{session_id}/stop")
+async def stop_cu_session(
+    session_id: str,
+    request: Request,
+    owner: CurrentOwner,
+) -> dict[str, Any]:
+    """Stops one desktop control session from the session card (UDC-17 S17.3). Idempotent;
+    E-Stop (`POST /v1/actions/stop`) stays the stronger control."""
+    result = await build_stream_orchestrator(request.app.state).stop_cu_session(
+        owner_id=owner.owner_id,
+        session_id=session_id,
+        request_id=_request_id(request),
+    )
+    if result is None:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND)
+    return {
+        "sessionId": session_id,
+        "stopped": result.stopped,
+        "hostConfirmed": result.host_confirmed,
+        "alreadyEnded": result.already_ended,
+    }
+
+
 @router.post("/sessions/{session_id}/heartbeat")
 async def heartbeat_computer_use_session(
     session_id: str,
@@ -595,16 +640,15 @@ async def heartbeat_computer_use_session(
     owner: CurrentOwner,
 ) -> dict[str, Any]:
     """UDC-8 S8.3 / S8.4: 5 s phone heartbeat for an active computer-use session.
-    Missing 3 heartbeats (15 s) trips the dead-man switch and terminates the session."""
-    cu_store: InMemoryComputerUseSessionStore | None = getattr(
-        request.app.state, "cu_session_store", None
+
+    Missing 3 heartbeats (15 s) trips the dead-man switch: the next read of the session
+    ends it and tells the computer (UDC-17 S17.6). A heartbeat for a session that already
+    timed out, ended, or belongs to another owner is `404 not_found` and revives nothing."""
+    state_obj = await build_stream_orchestrator(request.app.state).record_cu_heartbeat(
+        owner_id=owner.owner_id, session_id=session_id, request_id=_request_id(request)
     )
-    if cu_store is None:
+    if state_obj is None:
         raise AppError("not_found", HTTPStatus.NOT_FOUND)
-    state_obj = cu_store.get(session_id)
-    if state_obj is None or state_obj.owner_id != owner.owner_id or not state_obj.active:
-        raise AppError("not_found", HTTPStatus.NOT_FOUND)
-    state_obj.last_heartbeat_monotonic = time.monotonic()
     return {
         "sessionId": session_id,
         "active": True,
