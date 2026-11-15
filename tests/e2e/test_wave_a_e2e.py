@@ -757,7 +757,8 @@ class TestTier1F2QuotaAndRedaction:
         raw_error = (
             "Error for key AIzaSyAbc123Def456Ghi789Jkl012Mno345Pqr "
             "and sk-proj-123456789012345678901234 "
-            "with Bearer test_bearer_token_1234567890 and raw Groq key gsk_raw_groq_key_0123456789abcdef "
+            "with Bearer test_bearer_token_1234567890 "
+            "and raw Groq key gsk_raw_groq_key_0123456789abcdef "
             "and explicit_secret_pass"
         )
         secrets = ["explicit_secret_pass"]
@@ -2031,8 +2032,12 @@ class TestTier4RealWorldScenariosAndAudits:
             ), f"Security Audit Failed: {target} is not hard-denied!"
 
         # Fail-closed security audit: empty strings, whitespace, and None
-        assert is_hard_denied_target("") is True, "Security Audit Failed: empty string must fail closed"
-        assert is_hard_denied_target("   ") is True, "Security Audit Failed: whitespace must fail closed"
+        assert (
+            is_hard_denied_target("") is True
+        ), "Security Audit Failed: empty string must fail closed"
+        assert (
+            is_hard_denied_target("   ") is True
+        ), "Security Audit Failed: whitespace must fail closed"
         assert is_hard_denied_target(None) is True, "Security Audit Failed: None must fail closed"
 
     def test_t4_03_zero_secret_leakage_audit(self) -> None:

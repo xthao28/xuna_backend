@@ -285,14 +285,18 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
     if not _TOOL_NAME_RE.match(name):
         raise ValueError(f"invalid tool name format: {name}")
     family_str = name.split(".", 1)[0]
-    if family_str == "browser" or name == "tv.cast_media":
+    if family_str in ("browser", "web") or name == "tv.cast_media":
         family = ToolFamily.URL
     elif name in ("tv.list_devices", "tv.control") or family_str in ("meeting", "acoustic"):
         family = ToolFamily.MEDIA
     elif family_str in ("system", "notifications", "device"):
         family = ToolFamily.HOST
-    elif family_str == "habit":
+    elif family_str == "habit" or (
+        family_str == "shortcuts" and expected_family == ToolFamily.WORKFLOW
+    ):
         family = ToolFamily.WORKFLOW
+    elif family_str == "finder":
+        family = ToolFamily.FILES
     elif name in ("tv.launch_app", "ui.accessibility_tree") or family_str in (
         "display",
         "workspace",
@@ -318,6 +322,11 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
         "schedule",
         "companion",
         "ritual",
+        "notes",
+        "reminders",
+        "calendar",
+        "shortcuts",
+        "mail",
     ):
         family = ToolFamily.APP
     else:

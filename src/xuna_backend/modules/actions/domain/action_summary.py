@@ -477,6 +477,54 @@ class ActionSummary:
             case "pipeline.execute_universal":
                 goal = str(arguments.get("goal", "pipeline đa năng"))[:40]
                 return f"Chạy pipeline nguyên tử vạn năng ({goal}) trên {target}"[:240]
+            case "notes.create":
+                title = str(arguments.get("title", ""))[:40]
+                return f"Tạo ghi chú '{title}' trên {target}"[:240]
+            case "notes.append":
+                t = str(arguments.get("title") or arguments.get("id") or "")[:40]
+                return f"Thêm nội dung vào ghi chú '{t}' trên {target}"[:240]
+            case "notes.search":
+                q = str(arguments.get("query", ""))[:40]
+                return f"Tìm kiếm ghi chú '{q}' trên {target}"[:240]
+            case "reminders.create":
+                title = str(arguments.get("title", ""))[:40]
+                return f"Tạo lời nhắc '{title}' trên {target}"[:240]
+            case "calendar.list_events":
+                return f"Xem danh sách sự kiện lịch trên {target}"[:240]
+            case "calendar.create_event":
+                title = str(arguments.get("title", ""))[:40]
+                return f"Tạo sự kiện lịch '{title}' trên {target}"[:240]
+            case "finder.reveal":
+                p = str(arguments.get("path", ""))[:40]
+                return f"Hiển thị tệp '{p}' trong trình quản lý tệp trên {target}"[:240]
+            case "shortcuts.run":
+                s = str(arguments.get("shortcutName", ""))[:40]
+                return f"Chạy phím tắt '{s}' trên {target}"[:240]
+            case "mail.create_draft":
+                subj = str(arguments.get("subject", ""))[:40]
+                return f"Tạo thư nháp '{subj}' trên {target}"[:240]
+            case "mail.send":
+                subj = str(arguments.get("subject", ""))[:40]
+                return f"Gửi email '{subj}' trên {target}"[:240]
+            case "web.navigate":
+                url = str(arguments.get("url", ""))[:60]
+                return f"Điều hướng trình duyệt tới '{url}' trên {target}"[:240]
+            case "web.snapshot":
+                return f"Chụp cấu trúc trang web trên {target}"[:240]
+            case "web.click":
+                ref = str(arguments.get("ref") or arguments.get("selector") or "")[:40]
+                return f"Bấm phần tử web '{ref}' trên {target}"[:240]
+            case "web.fill":
+                ref = str(arguments.get("ref") or arguments.get("selector") or "")[:40]
+                return f"Nhập dữ liệu vào phần tử web '{ref}' trên {target}"[:240]
+            case "web.select":
+                ref = str(arguments.get("ref") or arguments.get("selector") or "")[:40]
+                return f"Chọn mục trong menu web '{ref}' trên {target}"[:240]
+            case "web.extract":
+                return f"Trích xuất dữ liệu từ trang web trên {target}"[:240]
+            case "web.wait_for":
+                sel = str(arguments.get("selector", ""))[:40]
+                return f"Chờ phần tử web '{sel}' trên {target}"[:240]
             case _:
                 return f"Thực hiện {tool} trên {target}"[:240]
 
@@ -747,6 +795,54 @@ class ActionSummary:
             case "pipeline.execute_universal":
                 goal = str(arguments.get("goal", "universal pipeline"))[:40]
                 return f"Execute universal composable pipeline ({goal}) on {target}"[:240]
+            case "notes.create":
+                title = str(arguments.get("title", ""))[:40]
+                return f"Create note '{title}' on {target}"[:240]
+            case "notes.append":
+                t = str(arguments.get("title") or arguments.get("id") or "")[:40]
+                return f"Append to note '{t}' on {target}"[:240]
+            case "notes.search":
+                q = str(arguments.get("query", ""))[:40]
+                return f"Search notes '{q}' on {target}"[:240]
+            case "reminders.create":
+                title = str(arguments.get("title", ""))[:40]
+                return f"Create reminder '{title}' on {target}"[:240]
+            case "calendar.list_events":
+                return f"List calendar events on {target}"[:240]
+            case "calendar.create_event":
+                title = str(arguments.get("title", ""))[:40]
+                return f"Create calendar event '{title}' on {target}"[:240]
+            case "finder.reveal":
+                p = str(arguments.get("path", ""))[:40]
+                return f"Reveal file '{p}' in file manager on {target}"[:240]
+            case "shortcuts.run":
+                s = str(arguments.get("shortcutName", ""))[:40]
+                return f"Run shortcut '{s}' on {target}"[:240]
+            case "mail.create_draft":
+                subj = str(arguments.get("subject", ""))[:40]
+                return f"Create draft email '{subj}' on {target}"[:240]
+            case "mail.send":
+                subj = str(arguments.get("subject", ""))[:40]
+                return f"Send email '{subj}' on {target}"[:240]
+            case "web.navigate":
+                url = str(arguments.get("url", ""))[:60]
+                return f"Navigate browser to '{url}' on {target}"[:240]
+            case "web.snapshot":
+                return f"Capture web page snapshot on {target}"[:240]
+            case "web.click":
+                ref = str(arguments.get("ref") or arguments.get("selector") or "")[:40]
+                return f"Click web element '{ref}' on {target}"[:240]
+            case "web.fill":
+                ref = str(arguments.get("ref") or arguments.get("selector") or "")[:40]
+                return f"Fill web element '{ref}' on {target}"[:240]
+            case "web.select":
+                ref = str(arguments.get("ref") or arguments.get("selector") or "")[:40]
+                return f"Select option in web element '{ref}' on {target}"[:240]
+            case "web.extract":
+                return f"Extract web data on {target}"[:240]
+            case "web.wait_for":
+                sel = str(arguments.get("selector", ""))[:40]
+                return f"Wait for web element '{sel}' on {target}"[:240]
             case _:
                 return f"Run {tool} on {target}"[:240]
 

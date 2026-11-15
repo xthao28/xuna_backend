@@ -108,13 +108,13 @@ HARD_DENIED_PROCESS_TOKENS: frozenset[str] = frozenset(
 
 _CONSEQUENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
-        r"\b(send|submit|delete|remove|erase|buy|purchase|pay|checkout|order|post|publish|transfer|confirm|authorize|sign\s*out|uninstall|format)\b",
+        r"\b(send|submit|delete|remove|erase|buy|purchase|pay|checkout|check\s*out|order|post|publish|transfer|wire|confirm|authorize|sign\s*out|uninstall|format)\b",
         re.IGNORECASE,
     ),
     re.compile(
         # Bare "đăng" is a post/publish button; "đăng nhập" / "đăng ký" (sign in, sign up)
         # are not commits.
-        r"(gửi|xác\s*nhận|thanh\s*toán|mua\s*ngay|đặt\s*hàng|chuyển\s*khoản|xóa|xoá|đăng(?!\s*(nhập|nhap|ký|ky)\b)|xuất\s*bản|gỡ\s*cài\s*đặt|hủy\s*tài\s*khoản)",
+        r"(gửi|nộp|xác\s*nhận|thanh\s*toán|mua\s*ngay|đặt\s*hàng|chuyển\s*khoản|xóa|xoá|đăng(?!\s*(nhập|nhap|ký|ky)\b)|xuất\s*bản|gỡ\s*cài\s*đặt|gỡ\s*bỏ|hủy(?!\s*(bỏ\s*phiếu)\b))",
         re.IGNORECASE,
     ),
 )

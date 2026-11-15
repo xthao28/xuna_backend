@@ -90,6 +90,13 @@ _UI_AUTOMATION_TOOLS = frozenset(
         "ui__act",
         "ui__wait_for",
         "browser__semantic_snapshot",
+        "web__navigate",
+        "web__snapshot",
+        "web__click",
+        "web__fill",
+        "web__select",
+        "web__extract",
+        "web__wait_for",
     }
 )
 
@@ -242,7 +249,7 @@ def tool_system_prompt(
 
 _LONG_TEXT_KEYS = frozenset({"summaryVi", "stdoutPreview"})
 # UI snapshots are what the model acts on; a larger window lets it see 60-80 controls.
-_UI_TREE_KEYS = frozenset({"compactUiTree", "compactAriaTree"})
+_UI_TREE_KEYS = frozenset({"compactUiTree", "compactAriaTree", "snapshot"})
 _LONG_TEXT_MAX = 1100
 _UI_TREE_MAX = 3600
 
@@ -413,7 +420,11 @@ def encode_tool_payload(
     encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
     if len(encoded.encode("utf-8")) <= MAX_TOOL_OUTPUT_BYTES:
         return encoded
-    if isinstance(output, dict) and ("compactUiTree" in output or "compactAriaTree" in output):
+    if isinstance(output, dict) and (
+        "compactUiTree" in output
+        or "compactAriaTree" in output
+        or "snapshot" in output
+    ):
         slim_out = {k: v for k, v in output.items() if k not in ("nodes", "elements", "rows")}
         # Vietnamese labels are up to 3 bytes per char: shrink the tree before giving up.
         for tree_max in (_UI_TREE_MAX, 2400, 1500, 800):

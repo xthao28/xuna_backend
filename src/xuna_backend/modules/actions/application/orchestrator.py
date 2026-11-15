@@ -14,6 +14,7 @@ Executes the 8-step pipeline per tool call:
 
 import base64
 import inspect
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
@@ -81,6 +82,7 @@ from xuna_backend.modules.actions.application.workflows import (
     CompositeWorkflowRunner,
     InMemoryBoardWorkflowSlotStore,
     WorkflowSlotAssignment,
+    validate_https_public_url,
 )
 from xuna_backend.modules.actions.domain.entities import (
     APPROVAL_TTL_SECONDS,
@@ -539,6 +541,57 @@ class Orchestrator:
             node = active_cu.cached_nodes.get(key[1:])
         return node
 
+    @staticmethod
+    def _is_consequential_web_action(args: dict[str, object]) -> bool:
+        """Checks whether a browser action targets a consequential or sensitive element."""
+        for key in ("ref", "selector", "targetText", "elementName", "text", "value"):
+            val = args.get(key)
+            if isinstance(val, str) and val.strip():
+                # Split camelCase identifiers (e.g. payNow -> pay Now, deleteItem -> delete Item)
+                decomposed = re.sub(r"([a-z])([A-Z])", r"\1 \2", val)
+                if is_consequential_element_name(val) or is_consequential_element_name(decomposed):
+                    return True
+                normalized = decomposed.replace("_", " ").replace("-", " ").lower()
+                if is_consequential_element_name(normalized):
+                    return True
+                words = set(re.findall(r"[\w]+", normalized))
+                # Word-boundary sensitive matches (prevent false positives on
+                # spin, opinion, wildcard, cardigan)
+                sensitive_tokens = ("pin", "card", "credit", "token", "secret", "wire", "thẻ")
+                if any(w in words for w in sensitive_tokens):
+                    return True
+                if (
+                    "checkout" in normalized
+                    or "check out" in normalized
+                    or any(
+                        tok in normalized
+                        for tok in (
+                            "password",
+                            "passwd",
+                            "cvv",
+                            "cvc",
+                            "payment",
+                            "checkout",
+                            "check out",
+                            "transfer",
+                            "chuyen khoan",
+                            "thanh toan",
+                            "dat hang",
+                            "xoa",
+                            "mua ngay",
+                            "xac nhan",
+                            "mật khẩu",
+                            "mat khau",
+                            "the tin dung",
+                            "the visa",
+                            "the mastercard",
+                            "the atm",
+                        )
+                    )
+                ):
+                    return True
+        return False
+
     @classmethod
     def _effective_tool_risk(
         cls,
@@ -546,6 +599,14 @@ class Orchestrator:
         clean_args: dict[str, object],
         active_cu: ComputerUseSessionState | None,
     ) -> RiskTier:
+        if descriptor.name == "mail.send":
+            return RiskTier.R3
+        if descriptor.name == "mail.create_draft":
+            return RiskTier.R2
+        if descriptor.name in ("web.click", "web.fill"):
+            if cls._is_consequential_web_action(clean_args):
+                return RiskTier.R3
+            return descriptor.risk
         if descriptor.name == "input.click":
             explicit_name = clean_args.get("elementName")
             if isinstance(explicit_name, str) and is_consequential_element_name(explicit_name):
@@ -609,6 +670,14 @@ class Orchestrator:
         sees (ADR-0015 D2). The legacy estimate for hosts without preflight still treats
         them as R3.
         """
+        if descriptor.name == "mail.send":
+            return RiskTier.R3
+        if descriptor.name == "mail.create_draft":
+            return RiskTier.R2
+        if descriptor.name in ("web.click", "web.fill"):
+            if Orchestrator._is_consequential_web_action(clean_args):
+                return RiskTier.R3
+            return descriptor.risk
         if descriptor.name == "input.click":
             name = clean_args.get("elementName")
             if isinstance(name, str) and is_consequential_element_name(name):
@@ -1039,6 +1108,17 @@ class Orchestrator:
                 content=_encode_tool_payload("invalid_args"),
                 tool_call_id=call.id,
             )
+
+        if tool_name == "web.navigate":
+            raw_url = str(clean_args.get("url", ""))
+            try:
+                validate_https_public_url(raw_url)
+            except ValueError:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_tool_payload("invalid_args", {"errorCode": "url_invalid"}),
+                    tool_call_id=call.id,
+                )
 
         last_target = self._last_target_store.get_last_target(ctx.owner_id, ctx.pet_id, now)
         last_alias = last_target[0] if last_target is not None else None

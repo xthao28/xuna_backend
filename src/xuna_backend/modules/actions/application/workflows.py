@@ -135,9 +135,13 @@ def is_hard_denied_smarthome_entity(entity_id: str) -> bool:
     return domain in HARD_DENIED_SMARTHOME_DOMAINS
 
 
+_HEX_OR_DEC_PART_RE = re.compile(r"^(?:0x[0-9a-fA-F]+|\d+)$")
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+
+
 def validate_https_public_url(raw_url: str) -> str:
     """Validates that `raw_url` is a public `https://` URL (`<= 2048` chars, no userinfo,
-    no IP literals, no `localhost` / `.local` / `.localhost`) and returns its ASCII domain.
+    valid port, no IP literals, no local/internal hostnames) and returns its ASCII domain.
     Never includes the URL in exception messages so logs stay URL-free."""
     if not raw_url or len(raw_url) > 2048:
         raise ValueError("url_invalid")
@@ -145,9 +149,17 @@ def validate_https_public_url(raw_url: str) -> str:
         parsed = urlparse(raw_url)
     except ValueError as error:
         raise ValueError("url_invalid") from error
+    if "\x00" in raw_url or "%" in parsed.netloc:
+        raise ValueError("url_invalid")
     if parsed.scheme.lower() != "https":
         raise ValueError("url_invalid")
     if parsed.username is not None or parsed.password is not None:
+        raise ValueError("url_invalid")
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("url_invalid") from error
+    if port is not None and not (1 <= port <= 65535):
         raise ValueError("url_invalid")
     hostname = parsed.hostname
     if not hostname or hostname.endswith("."):
@@ -157,9 +169,13 @@ def validate_https_public_url(raw_url: str) -> str:
     except UnicodeError as error:
         raise ValueError("url_invalid") from error
     if (
-        ascii_host == "localhost"
+        ascii_host in ("localhost", "localhost.localdomain", "home.arpa")
         or ascii_host.endswith(".localhost")
         or ascii_host.endswith(".local")
+        or ascii_host.endswith(".internal")
+        or ascii_host.endswith(".localdomain")
+        or ascii_host.endswith(".lan")
+        or ascii_host.endswith(".home.arpa")
     ):
         raise ValueError("url_invalid")
     try:
@@ -169,7 +185,17 @@ def validate_https_public_url(raw_url: str) -> str:
         if str(ip_err) == "url_invalid":
             raise
     parts = ascii_host.split(".")
-    if len(parts) < 2 or parts[-1].isdigit():
+    if (
+        len(parts) < 2
+        or not all(_DNS_LABEL_RE.match(part) for part in parts)
+        or parts[-1].isdigit()
+        or _HEX_OR_DEC_PART_RE.match(parts[-1]) is not None
+        or any(p.startswith("0x") for p in parts)
+        or (
+            2 <= len(parts) <= 4
+            and all(_HEX_OR_DEC_PART_RE.match(p) is not None for p in parts)
+        )
+    ):
         raise ValueError("url_invalid")
     return ascii_host
 
