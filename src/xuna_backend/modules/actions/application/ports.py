@@ -199,3 +199,10 @@ class ComputerUseSessionStore(Protocol):
         """Counts one owner approval asked during a running session; returns the new count,
         or `None` when the session is not running."""
         ...
+
+
+# Re-export from domain.ports for application-layer consumers (Wave D)
+from xuna_backend.modules.actions.domain.ports import (  # noqa: E402
+    AutonomousJobRepository as AutonomousJobRepository,
+)
+

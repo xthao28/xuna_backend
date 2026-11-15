@@ -37,6 +37,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalDecision,
     ApprovalRequest,
     ApprovalScope,
+    ApprovalState,
 )
 from xuna_backend.modules.actions.domain.standing_approval import (
     StandingApproval,
@@ -320,6 +321,16 @@ class _SessionPerCallAuditLog:
             return await self._log(s).recent(owner_id, limit)
 
 
+def build_short_session_host_repository(app_state: Any) -> HostRepository:
+    """Short-lived DB session per read for long-lived streams and detached jobs."""
+    return _SessionPerCallHostRepository(app_state)
+
+
+def build_short_session_audit_log(app_state: Any) -> AuditLog:
+    """Short-lived DB session per audit write for long-lived streams and detached jobs."""
+    return _SessionPerCallAuditLog(app_state)
+
+
 def build_stream_orchestrator(app_state: Any) -> Orchestrator:
     """Builds an `Orchestrator` safe for use inside long-lived SSE / WebSocket streams."""
     hub: HostSessionHub = app_state.host_session_hub
@@ -429,6 +440,14 @@ async def decide_action_approval(
     if updated is None:
         raise AppError("not_found", HTTPStatus.NOT_FOUND)
     await session.commit()
+    runner = getattr(request.app.state, "job_runner", None)
+    if runner is not None:
+        try:
+            await runner.on_approval_resolved(
+                approval_id, updated.state == ApprovalState.APPROVED
+            )
+        except Exception as err:
+            _logger.debug("Failed notifying job runner of approval %s: %s", approval_id, err)
     return {
         "approvalId": str(updated.approval_id),
         "state": updated.state.value,
@@ -597,6 +616,12 @@ async def emergency_stop_actions(
         request_id=_request_id(request),
     )
     await session.commit()
+    runner = getattr(request.app.state, "job_runner", None)
+    if runner is not None:
+        try:
+            await runner.cancel_all_for_owner(owner.owner_id, reason=reason)
+        except Exception as err:
+            _logger.debug("Failed cancelling autonomous jobs on emergency stop: %s", err)
     return {
         "stopped": summary.stopped,
         "hostsNotified": summary.hosts_notified,

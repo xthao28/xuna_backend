@@ -1,12 +1,15 @@
 """SQLAlchemy ORM models for `action_approvals` (UDC-4 §5.2, UDC-7),
-`host_standing_approvals` (ADR-0014 D1) and `cu_sessions` (UDC-17 S17.6).
+`host_standing_approvals` (ADR-0014 D1), `cu_sessions` (UDC-17 S17.6),
+`approval_scopes` (Wave A R2), and `autonomous_jobs` (Wave D M1).
 
 No raw arguments are stored — only `args_sha256` and the deterministic summary.
 """
 
 import uuid
 from datetime import datetime
+from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -18,6 +21,7 @@ from sqlalchemy import (
     Text,
     text,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -150,3 +154,51 @@ class ApprovalScopeModel(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+
+class AutonomousJobModel(Base):
+    """Persisted autonomous multi-step job records (Wave D)."""
+
+    __tablename__ = "autonomous_jobs"
+
+    job_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("owners.owner_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    pet_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    host_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("hosts.host_id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    title: Mapped[str] = mapped_column(String(128), nullable=False)
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    sub_goals: Mapped[list[dict[str, Any]]] = mapped_column(
+        sa.JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=False,
+        default=list,
+    )
+    active_sub_goal_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_steps: Mapped[int] = mapped_column(Integer, nullable=False, default=50)
+    steps_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pending_approval_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=True,
+    )
+    checkpoint_data: Mapped[dict[str, Any] | None] = mapped_column(
+        sa.JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=True,
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stop_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
