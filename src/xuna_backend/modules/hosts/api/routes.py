@@ -24,6 +24,7 @@ from xuna_backend.modules.hosts.api.schemas import (
     DevInvokeToolRequest,
     SelfEnrollHostRequest,
     SetHostGrantsRequest,
+    SetHostPolicyRequest,
     UpdateHostManifestRequest,
 )
 from xuna_backend.modules.hosts.application.ports import (
@@ -39,12 +40,14 @@ from xuna_backend.modules.hosts.application.use_cases import (
     SelfEnrollHostCommand,
     claim_enrollment,
     confirm_enrollment,
+    get_host_policy,
     invoke_tool,
     list_hosts,
     owner_phone_public_keys_b64,
     revoke_host,
     self_enroll_host,
     set_grants,
+    set_host_policy,
     update_host_manifest,
 )
 from xuna_backend.modules.hosts.domain.crypto import (
@@ -83,6 +86,7 @@ _ERROR_STATUS = {
     "host_offline": HTTPStatus.CONFLICT,
     "tool_not_found": HTTPStatus.NOT_FOUND,
     "grant_denied": HTTPStatus.FORBIDDEN,
+    "policy_blocked": HTTPStatus.UNPROCESSABLE_ENTITY,
 }
 
 
@@ -547,6 +551,80 @@ async def set_host_grants_endpoint(
             action=action,
         )
     except HostError as error:
+        raise _problem(error) from error
+    await commit_or_conflict(session)
+    return _json(response)
+
+
+@router.get("/hosts/{host_id}/policy")
+async def get_host_policy_endpoint(
+    host_id: str,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+) -> dict[str, Any]:
+    """Retrieves active policy, apps, and allow/deny rules from an online host (UDC-18)."""
+    try:
+        parsed_id = HostId.from_str(host_id)
+    except ValueError as error:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
+
+    try:
+        policy = await get_host_policy(
+            _host_repo(request, session),
+            _hub(request),
+            owner.owner_id,
+            parsed_id,
+        )
+    except HostError as error:
+        raise _problem(error) from error
+
+    return policy
+
+
+@router.put("/hosts/{host_id}/policy")
+async def set_host_policy_endpoint(
+    host_id: str,
+    body: SetHostPolicyRequest,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    """Updates the trust preset and app/domain allow/deny policies on an online host (UDC-18)."""
+    try:
+        parsed_id = HostId.from_str(host_id)
+    except ValueError as error:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
+    now = datetime.now(UTC)
+
+    async def action() -> StoredResponse:
+        res = await set_host_policy(
+            _host_repo(request, session),
+            _hub(request),
+            _audit(request, session),
+            owner.owner_id,
+            parsed_id,
+            body.model_dump(mode="json"),
+            now,
+            request_id=getattr(request.state, "request_id", ""),
+        )
+        return StoredResponse(HTTPStatus.OK, res)
+
+    try:
+        response = await run_once(
+            session,
+            owner_id=owner.owner_id,
+            key=parse_key(idempotency_key),
+            fingerprint=request_hash(
+                "set_host_policy",
+                {"hostId": str(parsed_id), **body.model_dump(mode="json")},
+            ),
+            now=now,
+            action=action,
+        )
+    except HostError as error:
+        await commit_or_conflict(session)
         raise _problem(error) from error
     await commit_or_conflict(session)
     return _json(response)

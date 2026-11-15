@@ -93,6 +93,15 @@ class SetHostGrantsRequest(BaseModel):
     suspendAll: bool | None = None
 
 
+class SetHostPolicyRequest(_StrictSchema):
+    schemaVersion: Literal[1] = 1
+    trustPreset: Literal["strict", "standard", "autopilot"]
+    allowApps: list[str] = Field(default_factory=list)
+    denyApps: list[str] = Field(default_factory=list)
+    allowDomains: list[str] = Field(default_factory=list)
+    denyDomains: list[str] = Field(default_factory=list)
+
+
 class DevInvokeToolRequest(_StrictSchema):
     schemaVersion: Literal[1] = 1
     tool: str = Field(min_length=3, max_length=64)

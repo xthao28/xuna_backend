@@ -812,6 +812,32 @@ class OrchestratorJobStepExecutor:
                     await self._on_pending_approval(job.job_id, captured_approval_id)
 
         orch = self._orchestrator_factory()
+        job_apps_raw = cp.get("apps") or (
+            call.arguments.get("apps") if isinstance(call.arguments, dict) else None
+        )
+        job_apps = (
+            [str(a) for a in job_apps_raw]
+            if isinstance(job_apps_raw, list | tuple)
+            else []
+        )
+        job_domains_raw = cp.get("domains") or (
+            call.arguments.get("domains") if isinstance(call.arguments, dict) else None
+        )
+        job_domains = (
+            [str(d) for d in job_domains_raw]
+            if isinstance(job_domains_raw, list | tuple)
+            else []
+        )
+        job_mission_env: dict[str, object] = {
+            "goal": job.goal,
+            "apps": job_apps,
+            "domains": job_domains,
+            "maxSteps": job.max_steps,
+            "maxMinutes": int(cp.get("max_minutes") or cp.get("maxMinutes") or 15),
+            "planSteps": [
+                sg.title if hasattr(sg, "title") else str(sg) for sg in job.sub_goals
+            ],
+        }
         action_ctx = ActionContext(
             owner_id=job.owner_id,
             pet_id=job.pet_id,
@@ -823,6 +849,7 @@ class OrchestratorJobStepExecutor:
             self_host_id=None,
             host_defaults=pinned_defaults,
             host_screen_consent=True,
+            mission_envelope=job_mission_env,
         )
         tool_msg = await orch.handle_call(call, action_ctx)
 

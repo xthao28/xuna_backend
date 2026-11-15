@@ -283,6 +283,8 @@ class ActionContext:
     # UDC-17 S17.5: the owner tapped "Chạy lại" on a template saved on their phone; this
     # turn's `cu.session_start` must match its scope. `None` for every other turn.
     cu_template: CuTemplatePin | None = None
+    # Wave E (UDC-18): Optional envelope representing a multi-step mission or AutonomousJob plan.
+    mission_envelope: dict[str, object] | None = None
 
 
 class Orchestrator:
@@ -1827,6 +1829,65 @@ class Orchestrator:
                     if prompts is not None:
                         active_cu.owner_prompts = prompts
 
+                mission_env = ctx.mission_envelope
+                if mission_env is None and descriptor.name in (
+                    "cu.session_start",
+                    "cu.session_extend",
+                ):
+                    mission_goal = str(clean_args.get("goal") or "")
+                    if (
+                        not mission_goal
+                        and active_cu is not None
+                        and getattr(active_cu, "goal", None)
+                    ):
+                        mission_goal = str(active_cu.goal)
+                    apps_raw = clean_args.get("apps")
+                    apps_list = (
+                        [str(a) for a in apps_raw]
+                        if isinstance(apps_raw, list | tuple)
+                        else []
+                    )
+                    if (
+                        not apps_list
+                        and active_cu is not None
+                        and getattr(active_cu, "allowed_apps", None)
+                    ):
+                        apps_list = [str(a) for a in active_cu.allowed_apps]
+                    domains_raw = clean_args.get("domains")
+                    domains_list = (
+                        [str(d) for d in domains_raw]
+                        if isinstance(domains_raw, list | tuple)
+                        else []
+                    )
+                    if (
+                        not domains_list
+                        and active_cu is not None
+                        and getattr(active_cu, "allowed_domains", None)
+                    ):
+                        domains_list = [str(d) for d in active_cu.allowed_domains]
+                    max_steps_val = clean_args.get("maxSteps")
+                    max_steps = (
+                        int(max_steps_val)
+                        if isinstance(max_steps_val, int | str)
+                        else 12
+                    )
+                    max_mins_val = clean_args.get("maxMinutes")
+                    max_mins = (
+                        int(max_mins_val)
+                        if isinstance(max_mins_val, int | str)
+                        else 5
+                    )
+                    mission_env = {
+                        "goal": mission_goal,
+                        "apps": apps_list,
+                        "domains": domains_list,
+                        "maxSteps": max_steps,
+                        "maxMinutes": max_mins,
+                    }
+                    plan_steps_raw = clean_args.get("planSteps")
+                    if isinstance(plan_steps_raw, list | tuple):
+                        mission_env["planSteps"] = [str(s) for s in plan_steps_raw]
+
                 await ctx.emit_event(
                     ActionPendingEvent(
                         approval_id=str(approval_req.approval_id),
@@ -1840,6 +1901,7 @@ class Orchestrator:
                         standing_tool=standing_offer_tool,
                         standing_arguments=standing_offer_args,
                         standing_approved_count=standing_approved_count,
+                        mission_envelope=mission_env,
                     )
                 )
 

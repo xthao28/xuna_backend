@@ -142,6 +142,8 @@ class ActionPendingEvent:
     # UDC-17 S17.5: set with the standing offer when this exact call was approved at least
     # `STANDING_SUGGEST_MIN_APPROVALS` times in the window, so the phone can suggest it.
     standing_approved_count: int | None = None
+    # Additive metadata for Wave E Mission Card UX (UDC-18). None for standard 1-step approvals.
+    mission_envelope: dict[str, object] | None = None
 
     def standing_payload(self) -> dict[str, object] | None:
         """The `standing` object of `action_pending` on SSE and the voice WebSocket, or
@@ -177,6 +179,8 @@ class ActionPendingEvent:
         standing = self.standing_payload()
         if standing is not None:
             payload["standing"] = standing
+        if self.mission_envelope is not None:
+            payload["missionEnvelope"] = self.mission_envelope
         return payload
 
 

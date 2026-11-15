@@ -10,6 +10,7 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.audit.domain.event import AuditAction, AuditEvent
@@ -1021,3 +1022,92 @@ async def invoke_tool(
         duration_ms=duration_ms,
         error_code=error_code,
     )
+
+
+async def get_host_policy(
+    hosts: HostRepository,
+    hub: HostSessionHub,
+    owner_id: uuid.UUID,
+    host_id: HostId,
+    timeout_s: float = 5.0,
+) -> dict[str, Any]:
+    """Retrieves current host policy from online host via XTP `xuna/get_policy` (UDC-18)."""
+    host = await hosts.get_host(host_id)
+    if host is None or host.owner_id != owner_id or host.status != HostStatus.ACTIVE:
+        raise HostError("not_found")
+
+    if not hub.is_online(str(host_id)):
+        raise HostError("host_offline")
+
+    try:
+        raw_result = await hub.send_request(
+            str(host_id),
+            "xuna/get_policy",
+            {},
+            timeout_s=timeout_s,
+        )
+    except TimeoutError as exc:
+        raise HostError("host_offline") from exc
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "host_offline" in msg:
+            raise HostError("host_offline") from exc
+        raise HostError("policy_blocked", msg) from exc
+
+    return raw_result
+
+
+async def set_host_policy(
+    hosts: HostRepository,
+    hub: HostSessionHub,
+    audit: AuditLog,
+    owner_id: uuid.UUID,
+    host_id: HostId,
+    policy_data: dict[str, Any],
+    now: datetime,
+    request_id: str = "",
+    timeout_s: float = 5.0,
+) -> dict[str, Any]:
+    """Updates host policy on online host via XTP `xuna/set_policy` and audits it (UDC-18)."""
+    host = await hosts.get_host(host_id)
+    if host is None or host.owner_id != owner_id or host.status != HostStatus.ACTIVE:
+        raise HostError("not_found")
+
+    if not hub.is_online(str(host_id)):
+        raise HostError("host_offline")
+
+    try:
+        raw_result = await hub.send_request(
+            str(host_id),
+            "xuna/set_policy",
+            policy_data,
+            timeout_s=timeout_s,
+        )
+    except TimeoutError as exc:
+        raise HostError("host_offline") from exc
+    except RuntimeError as exc:
+        msg = str(exc)
+        if "host_offline" in msg:
+            raise HostError("host_offline") from exc
+        raise HostError("policy_blocked", msg) from exc
+
+    preset_val = str(policy_data.get("trustPreset") or "standard")
+    allow_apps = policy_data.get("allowApps")
+    allow_apps_count = len(allow_apps) if isinstance(allow_apps, list) else 0
+
+    await audit.record(
+        AuditEvent(
+            owner_id=owner_id,
+            action=AuditAction.HOST_POLICY_UPDATED,
+            occurred_at=now,
+            subject=str(host_id),
+            request_id=request_id,
+            metadata={
+                "trustPreset": preset_val,
+                "allowAppsCount": allow_apps_count,
+            },
+        )
+    )
+
+    return raw_result
+
