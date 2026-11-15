@@ -4,6 +4,7 @@ Extracted from `orchestrator.py` to separate lifecycle/approval/board responsibi
 from host tool routing.
 """
 
+import inspect
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
@@ -116,7 +117,9 @@ class ApprovalAndBoardService:
         self._local_result_broker.cancel_for_owner(owner_id)
         self._last_target_store.clear_owner(owner_id)
         if self._scope_store is not None:
-            self._scope_store.clear_owner(owner_id)
+            clear_res = self._scope_store.clear_owner(owner_id)
+            if inspect.isawaitable(clear_res):
+                await clear_res
 
         grants_suspended = await self._host_repo.suspend_r2_plus_grants_for_owner(owner_id, now)
 

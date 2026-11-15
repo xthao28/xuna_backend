@@ -34,6 +34,7 @@ from xuna_backend.modules.actions.application.computer_use import (
     InMemoryComputerUseSessionStore,
     SignedR3ApprovalProof,
     is_activation_key_combo,
+    is_hard_denied_target,
 )
 from xuna_backend.modules.actions.application.orchestrator import (
     ActionContext,
@@ -1095,7 +1096,7 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
                 ToolDescriptor(
                     name="input.type_text",
                     family=ToolFamily.INPUT,
-                    risk=RiskTier.R3,
+                    risk=RiskTier.R2,
                     description="Type text.",
                     input_schema={
                         "type": "object",
@@ -1141,6 +1142,21 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
                     },
                     output_schema=empty_out,
                 ),
+                ToolDescriptor(
+                    name="app.launch",
+                    family=ToolFamily.APP,
+                    risk=RiskTier.R2,
+                    description="Launch app.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "name": {"type": "string"},
+                        },
+                        "additionalProperties": False,
+                    },
+                    output_schema=empty_out,
+                ),
             ),
             updated_at=now,
         )
@@ -1151,6 +1167,7 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
                 Grant(mac_host.host_id, ToolFamily.CU, RiskTier.R3, True, now),
                 Grant(mac_host.host_id, ToolFamily.UI, RiskTier.R2, True, now),
                 Grant(mac_host.host_id, ToolFamily.INPUT, RiskTier.R3, True, now),
+                Grant(mac_host.host_id, ToolFamily.APP, RiskTier.R3, True, now),
             ],
         )
 
@@ -1205,6 +1222,8 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
                 }
             elif tname == "cu.session_end":
                 sc = {"ended": True}
+            elif tname == "app.launch":
+                sc = {"launched": True}
             else:
                 sc = {"effect": "changed"}
             hub.on_response(
@@ -1367,7 +1386,8 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
         assert len(sent_calls) == calls_before_pwd
         assert len(pending_events) == 1
 
-        # 5. Security: input.type_text on normal field requires R3 phone-signed approval
+        # 5. Positive / Trust Envelope: input.type_text on normal field does NOT prompt R3
+        #    inside active session.
         res_type = await orch.handle_call(
             ToolCall(
                 id="c-type",
@@ -1377,9 +1397,58 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
             ctx,
         )
         assert json.loads(res_type.content)["status"] == "ok"
+        assert len(pending_events) == 1  # Relaxed under active session
+        assert "xuna/approval" not in sent_calls[-1]["_meta"]
+
+        # 5b. In-scope app.launch (notes) runs without prompt
+        res_launch_in = await orch.handle_call(
+            ToolCall(
+                id="c-app-in",
+                name="app__launch",
+                arguments={"id": "notes"},
+            ),
+            ctx,
+        )
+        assert json.loads(res_launch_in.content)["status"] == "ok"
+        assert len(pending_events) == 1
+        assert "xuna/approval" not in sent_calls[-1]["_meta"]
+
+        # 5c. Safe editing shortcut (Cmd+N) runs without prompt
+        res_cmd_n = await orch.handle_call(
+            ToolCall(
+                id="c-cmd-n",
+                name="input__key",
+                arguments={"combo": "Cmd+N"},
+            ),
+            ctx,
+        )
+        assert json.loads(res_cmd_n.content)["status"] == "ok"
+        assert len(pending_events) == 1
+
+        # 5d. Draft line break (Enter inside active session) runs without prompt
+        res_enter_draft = await orch.handle_call(
+            ToolCall(
+                id="c-enter-draft",
+                name="input__key",
+                arguments={"combo": "Enter"},
+            ),
+            ctx,
+        )
+        assert json.loads(res_enter_draft.content)["status"] == "ok"
+        assert len(pending_events) == 1
+
+        # 5e. Security: Out-of-scope app.launch (safari) escalates to R3!
+        res_launch_out = await orch.handle_call(
+            ToolCall(
+                id="c-app-out",
+                name="app__launch",
+                arguments={"id": "safari"},
+            ),
+            ctx,
+        )
+        assert json.loads(res_launch_out.content)["status"] == "ok"
         assert len(pending_events) == 2
         assert pending_events[-1].risk == "R3"
-        assert "Mua sữa" in pending_events[-1].summary
         assert "signature" in sent_calls[-1]["_meta"]["xuna/approval"]
 
         # 6. Security: clicking consequential cached button (@s1:e3 = "Xóa ghi chú") WITHOUT
@@ -1419,12 +1488,9 @@ def test_orchestrator_cu_session_r2_exemption_r3_escalation_and_fail_closed() ->
         assert json.loads(res_tab.content)["status"] == "ok"
         assert len(pending_events) == expected_pending
 
-        # 7c. The model cannot lower Enter to R2 by omitting or negating `inForm`, and
-        # modifier variants and Space are treated the same way.
+        # 7c. Activation keys like Cmd+Return and Space still escalate to R3
         for idx, key_args in enumerate(
             (
-                {"combo": "Enter"},
-                {"combo": "Enter", "inForm": False},
                 {"combo": "Cmd+Return"},
                 {"combo": "Space"},
             )
@@ -1541,3 +1607,44 @@ def test_state_driven_hint_covers_consent_and_host_approval() -> None:
     approval_hint = state_driven_hint({"errorCode": "approval_required"})
     assert approval_hint is not None and "ui__inspect" in approval_hint
     assert state_driven_hint({"errorCode": "grant_denied"}) is None
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "warp",
+        "alacritty",
+        "kitty",
+        "wezterm",
+        "ghostty",
+        "hyper",
+        "terminal",
+        "iterm",
+        "iterm2",
+        "system_settings",
+        "com.apple.systemsettings",
+        "systemsettings",
+        "system settings",
+        "cmd.exe",
+        "powershell",
+        "1password",
+    ],
+)
+def test_hard_denied_process_tokens(token: str) -> None:
+    assert is_hard_denied_target(token) is True
+    # Verify path handling as well (e.g. /Applications/Ghostty.app)
+    assert is_hard_denied_target(f"/Applications/{token}.app") is True
+
+
+def test_standard_apps_not_hard_denied() -> None:
+    assert is_hard_denied_target("notes") is False
+    assert is_hard_denied_target("safari") is False
+    assert is_hard_denied_target("calculator") is False
+    assert is_hard_denied_target("calendar") is False
+
+
+def test_hard_denied_target_fails_closed_on_empty_and_none() -> None:
+    assert is_hard_denied_target("") is True
+    assert is_hard_denied_target("   ") is True
+    assert is_hard_denied_target(None) is True
+

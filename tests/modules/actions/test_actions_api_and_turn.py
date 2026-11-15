@@ -706,3 +706,172 @@ def test_cu_session_snapshot_and_stop_endpoints() -> None:
     again = client.post("/v1/actions/cu-session/cu-http/stop", headers=headers).json()
     assert again["alreadyEnded"] is True
     assert any(e.action.value == "host.cu_session_stopped" for e in audit_log.events)
+
+
+def test_action_pending_wire_payload_normalizes_risk_lowercase() -> None:
+    pending = ActionPendingEvent(
+        approval_id="ap-wire-1",
+        target="Mac",
+        summary="Bắt đầu phiên điều khiển máy tính",
+        risk="R3",
+        expires_in=60,
+        host_id="host-1",
+        args_sha256="abc123",
+        expires_at="2026-10-30T12:01:00Z",
+        standing_tool="cu.session_start",
+        standing_arguments={"goal": "Open Notes"},
+    )
+    payload = pending.wire_payload()
+    assert payload["risk"] == "r3"
+    assert payload["approvalId"] == "ap-wire-1"
+    assert payload["hostId"] == "host-1"
+    assert payload["argsSha256"] == "abc123"
+    assert payload["expiresAt"] == "2026-10-30T12:01:00Z"
+    assert payload["standing"] == {
+        "tool": "cu.session_start",
+        "arguments": {"goal": "Open Notes"},
+    }
+
+
+def test_turn_sse_action_pending_emits_lowercase_risk_r3_and_rejects_15m_scope() -> None:
+    llm = _ScriptedLLM(
+        [
+            [
+                ToolCallRequested(
+                    ToolCall(
+                        id="call-r3",
+                        name="files__write",
+                        arguments={"target": "Mac", "path": "notes.txt"},
+                    )
+                ),
+                _done(10),
+            ],
+            [TextDelta("OK"), _done(5)],
+        ]
+    )
+    client, issuer, owner, host_repo, approval_repo, _ = _build_test_harness(llm)
+
+    host = Host(
+        host_id=HostId.generate(),
+        owner_id=owner.owner_id,
+        alias=HostAlias("Mac"),
+        platform=HostPlatform.MACOS,
+        hostname="mac-host",
+        os_version="15.0",
+        agent_version="0.1.0",
+        public_key=FAKE_PUBKEY,
+        status=HostStatus.ACTIVE,
+        created_at=NOW,
+    )
+    asyncio.run(host_repo.save_host(host))
+    asyncio.run(
+        host_repo.save_manifest(
+            Manifest(
+                host_id=host.host_id,
+                tools=(
+                    ToolDescriptor(
+                        name="files.write",
+                        description="Write file.",
+                        input_schema={
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "additionalProperties": False,
+                        },
+                        output_schema={
+                            "type": "object",
+                            "properties": {},
+                            "additionalProperties": False,
+                        },
+                        family=ToolFamily.FILES,
+                        risk=RiskTier.R3,
+                    ),
+                ),
+                updated_at=NOW,
+            )
+        )
+    )
+    asyncio.run(
+        host_repo.set_grants(
+            host.host_id,
+            [
+                Grant(
+                    host_id=host.host_id,
+                    family=ToolFamily.FILES,
+                    max_risk=RiskTier.R3,
+                    enabled=True,
+                    updated_at=NOW,
+                )
+            ],
+        )
+    )
+
+    import httpx
+
+    hub = client.app.state.host_session_hub  # type: ignore[union-attr]
+
+    async def fake_send_text(_raw: str) -> None:
+        return None
+
+    async def noop() -> None:
+        pass
+
+    headers = {"Authorization": f"Bearer {issuer.token('owner-1')}"}
+
+    async def _run() -> list[tuple[str, dict[str, Any]]]:
+        await hub.open_session(str(host.host_id), object(), fake_send_text, noop, noop)
+        created_ids: list[str] = []
+        saved_event = asyncio.Event()
+        original_save = approval_repo.save
+
+        async def _capture_save(req: ApprovalRequest) -> None:
+            await original_save(req)
+            created_ids.append(str(req.approval_id))
+            saved_event.set()
+
+        approval_repo.save = _capture_save  # type: ignore[method-assign]
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=client.app),  # type: ignore[arg-type]
+            base_url="http://test",
+        ) as async_client:
+
+            async def _decide() -> None:
+                await asyncio.wait_for(saved_event.wait(), timeout=2.0)
+                approval_id = created_ids[0]
+                bad = await async_client.post(
+                    f"/v1/actions/approvals/{approval_id}",
+                    headers=headers,
+                    json={"decision": "approve", "scope": "conversation_15m"},
+                )
+                assert bad.status_code == 400, bad.text
+                assert bad.json()["detail"] == "r3_requires_once_scope"
+                reject = await async_client.post(
+                    f"/v1/actions/approvals/{approval_id}",
+                    headers=headers,
+                    json={"decision": "reject"},
+                )
+                assert reject.status_code == 200, reject.text
+
+            _, resp = await asyncio.wait_for(
+                asyncio.gather(
+                    _decide(),
+                    async_client.post(
+                        f"/v1/conversations/{PET_HEX}/turns",
+                        headers=headers,
+                        json={
+                            "schemaVersion": 1,
+                            "text": "ghi file ghi chú",
+                            "clientCapabilities": ["host_actions_v1"],
+                        },
+                    ),
+                ),
+                timeout=5.0,
+            )
+            assert resp.status_code == 200
+            return _parse_sse(resp.text)
+
+    events = asyncio.run(_run())
+    pending_events = [payload for name, payload in events if name == "action_pending"]
+    assert len(pending_events) == 1
+    assert pending_events[0]["risk"] == "r3"
+    assert pending_events[0]["hostId"] == str(host.host_id)

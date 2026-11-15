@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 
 import httpx
 import pytest
@@ -15,6 +16,7 @@ from xuna_backend.modules.cognition.domain.types import (
     Message,
     Role,
     TextDelta,
+    ToolCall,
     ToolCallRequested,
     ToolSpec,
 )
@@ -233,3 +235,319 @@ def test_registry_creates_embedder() -> None:
         {"base_url": "http://ai:8000/v1", "model": "m1"},
     )
     assert isinstance(embedder_inst, OpenAICompatibleEmbedder)
+
+
+def test_thought_signature_in_tool_call_and_serialization() -> None:
+    def handle(_request: httpx.Request) -> httpx.Response:
+        body = sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "c_sig_1",
+                                    "function": {"name": "get_time", "arguments": "{}"},
+                                    "extra_content": {"thought_signature": "sig_abc_123"},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    events = run(httpx.MockTransport(handle))
+    tool = next(e for e in events if isinstance(e, ToolCallRequested))
+    assert tool.call.id == "c_sig_1"
+    assert tool.call.extra == {"thought_signature": "sig_abc_123"}
+
+    # Verify serialization of message containing this ToolCall retains extra_content
+    asst_msg = Message(Role.ASSISTANT, content="", tool_calls=(tool.call,))
+    serialized = openai_compatible._serialize_message(asst_msg)
+    assert serialized["tool_calls"][0]["extra_content"] == {"thought_signature": "sig_abc_123"}
+
+
+def test_thought_signature_from_global_cache_across_instances() -> None:
+    call_id = "c_cached_42"
+    sig_payload = {"thought_signature": "global_reasoning_token_xyz"}
+    openai_compatible._GLOBAL_SIGNATURE_CACHE[call_id] = sig_payload
+
+    # Create a brand new generator instance with empty local _tool_call_extra
+    gen2 = OpenAICompatibleTextGenerator("http://other:8000/v1", "model2", api_key="k2")
+    assert call_id not in gen2._tool_call_extra
+
+    # Construct a ToolCall without extra field populated
+    tc_bare = ToolCall(id=call_id, name="calc", arguments={"expr": "2+2"})
+    msg = Message(Role.ASSISTANT, content="", tool_calls=(tc_bare,))
+
+    payload = gen2._payload(ChatRequest(messages=(msg,)))
+    serialized_call = payload["messages"][0]["tool_calls"][0]
+    assert serialized_call["extra_content"] == sig_payload
+
+
+def test_redacted_error_logging(caplog: pytest.LogCaptureFixture) -> None:
+    fake_gemini_key = "AIzaSyD-1234567890abcdefghijklmnopqrstuv"
+    credential_sample = "auth_sample_value_98765"
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        error_json = json.dumps(
+            {
+                "error": {
+                    "code": 400,
+                    "message": f"Bad key: {fake_gemini_key} or Bearer {credential_sample}",
+                }
+            }
+        )
+        return httpx.Response(400, content=error_json.encode())
+
+    with caplog.at_level(logging.WARNING):
+        generator = OpenAICompatibleTextGenerator(
+            "http://ai.internal:8000/v1",
+            "m",
+            api_key=credential_sample,
+            transport=httpx.MockTransport(handle),
+        )
+
+        async def collect() -> None:
+            async for _ in generator.stream(REQUEST):
+                pass
+
+        with pytest.raises(ProviderUnavailableError):
+            asyncio.run(collect())
+
+    # Ensure secret values are strictly NOT present in logs
+    assert fake_gemini_key not in caplog.text
+    assert credential_sample not in caplog.text
+    assert "[REDACTED_API_KEY]" in caplog.text or "[REDACTED]" in caplog.text
+
+
+def test_sanitize_error_text_redacts_groq_key() -> None:
+    groq_key = "gsk_vA1bC2dE3fG4hI5jK6lM7nO8pQ9rS0tU1vW2"
+    groq_key_alt = "gsk_test-Key_9876543210_abcdef"
+    error_msg = (
+        f"Groq API error: invalid key {groq_key} for organization. "
+        f"Traceback shows fallback key {groq_key_alt}."
+    )
+    sanitized = openai_compatible._sanitize_error_text(error_msg)
+    assert groq_key not in sanitized
+    assert groq_key_alt not in sanitized
+    assert sanitized == (
+        "Groq API error: invalid key [REDACTED_API_KEY] for organization. "
+        "Traceback shows fallback key [REDACTED_API_KEY]."
+    )
+
+
+def test_groq_key_redacted_in_error_logging(caplog: pytest.LogCaptureFixture) -> None:
+    groq_key = "gsk_prodKey1234567890abcdefghijklmnopqrstuv"
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        error_json = json.dumps(
+            {
+                "error": {
+                    "code": 401,
+                    "message": f"Groq key {groq_key} is invalid or expired.",
+                }
+            }
+        )
+        return httpx.Response(401, content=error_json.encode())
+
+    with caplog.at_level(logging.WARNING):
+        generator = OpenAICompatibleTextGenerator(
+            "http://ai.internal:8000/v1",
+            "m",
+            api_key="cfg_api_token_123",
+            transport=httpx.MockTransport(handle),
+        )
+
+        async def collect() -> None:
+            async for _ in generator.stream(REQUEST):
+                pass
+
+        with pytest.raises(ProviderUnavailableError):
+            asyncio.run(collect())
+
+    assert groq_key not in caplog.text
+    assert "[REDACTED_API_KEY]" in caplog.text
+
+
+def test_quota_exhaustion_fast_fails_without_sleep_retries() -> None:
+    attempt_count = 0
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempt_count
+        attempt_count += 1
+        error_json = json.dumps(
+            {
+                "error": {
+                    "code": 429,
+                    "status": "RESOURCE_EXHAUSTED",
+                    "message": "Resource has been exhausted (e.g. check quota).",
+                }
+            }
+        )
+        return httpx.Response(429, content=error_json.encode())
+
+    generator = OpenAICompatibleTextGenerator(
+        "http://ai.internal:8000/v1", "m", api_key="k", transport=httpx.MockTransport(handle)
+    )
+
+    async def collect() -> list[ChatEvent]:
+        return [e async for e in generator.stream(REQUEST)]
+
+    with pytest.raises(ProviderUnavailableError) as exc_info:
+        asyncio.run(collect())
+
+    assert "quota_exhausted" in str(exc_info.value)
+    # Crucial: fast-fails immediately on attempt 1 without sleep-retrying 3 times!
+    assert attempt_count == 1
+
+
+def test_chunked_thought_signature_streaming() -> None:
+    def handle(_request: httpx.Request) -> httpx.Response:
+        body = sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "thought_signature": "part_1_",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_1",
+                                    "function": {"name": "test_tool", "arguments": '{"x": '},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "thought_signature": "part_2",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": "42}"},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    events = run(httpx.MockTransport(handle))
+    tool = next(e for e in events if isinstance(e, ToolCallRequested))
+    assert tool.call.id == "call_1"
+    assert tool.call.name == "test_tool"
+    assert tool.call.arguments == {"x": 42}
+    assert tool.call.extra == {"thought_signature": "part_1_part_2"}
+
+
+def test_pre_call_thought_signature_buffering() -> None:
+    def handle(_request: httpx.Request) -> httpx.Response:
+        body = sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "thought_signature": "early_reasoning_",
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "thought_signature": "more_reasoning_",
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "thought_signature": "final_sig",
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_pre_1",
+                                    "function": {"name": "calc", "arguments": '{"expr": "1+1"}'},
+                                }
+                            ],
+                        }
+                    }
+                ]
+            },
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    events = run(httpx.MockTransport(handle))
+    tool = next(e for e in events if isinstance(e, ToolCallRequested))
+    assert tool.call.id == "call_pre_1"
+    assert tool.call.name == "calc"
+    assert tool.call.arguments == {"expr": "1+1"}
+    assert tool.call.extra == {"thought_signature": "early_reasoning_more_reasoning_final_sig"}
+
+
+def test_mid_stream_thought_signature_without_tool_calls_chunk() -> None:
+    def handle(_request: httpx.Request) -> httpx.Response:
+        body = sse(
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "id": "call_mid_1",
+                                    "function": {"name": "notes_create", "arguments": '{"t": '},
+                                    "thought_signature": "chunk1_",
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "thought_signature": "chunk2_",
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": '"note"}'},
+                                    "thought_signature": "chunk3",
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+        return httpx.Response(200, content=body, headers={"content-type": "text/event-stream"})
+
+    events = run(httpx.MockTransport(handle))
+    tool = next(e for e in events if isinstance(e, ToolCallRequested))
+    assert tool.call.id == "call_mid_1"
+    assert tool.call.arguments == {"t": "note"}
+    assert tool.call.extra == {"thought_signature": "chunk1_chunk2_chunk3"}
+
+

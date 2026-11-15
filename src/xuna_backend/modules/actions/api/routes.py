@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import logging
 import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -52,6 +53,8 @@ from xuna_backend.modules.hosts.domain.entities import (
     RiskTier,
 )
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
+
+_logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/actions", tags=["actions"])
 
@@ -392,6 +395,7 @@ async def decide_action_approval(
         if body.publicKey is not None:
             pub_bytes = _decode_b64_flex(body.publicKey, 65)
     except ValueError as error:
+        _logger.warning("Approval %s rejected on decode/validation: %s", approval_id, error)
         raise AppError("approval_signature_invalid", HTTPStatus.BAD_REQUEST, str(error)) from error
 
     orch = Orchestrator(
@@ -417,6 +421,7 @@ async def decide_action_approval(
         )
     except ValueError as error:
         code = str(error)
+        _logger.warning("Approval %s failed with %s", approval_id, code)
         if code in ("r3_requires_once_scope", "approval_signature_invalid"):
             raise AppError(code, HTTPStatus.BAD_REQUEST, code) from error
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, code) from error
@@ -493,6 +498,11 @@ async def create_standing_approval(
         sig_bytes = _decode_b64_flex(body.signature, 64)
         pub_bytes = _decode_b64_flex(body.publicKey, 65)
     except ValueError as error:
+        _logger.warning(
+            "Standing approval %s rejected on decode/validation: %s",
+            body.approvalId,
+            error,
+        )
         raise AppError("approval_signature_invalid", HTTPStatus.BAD_REQUEST, str(error)) from error
     service = _standing_service(request, session)
     try:

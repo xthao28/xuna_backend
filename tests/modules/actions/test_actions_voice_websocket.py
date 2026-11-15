@@ -356,6 +356,7 @@ def test_voice_websocket_r2_approval_and_board_hid_flow() -> None:
                 parsed = json.loads(msg["text"])
                 events.append(parsed)
                 if parsed["type"] == "action_pending":
+                    assert parsed["risk"] == parsed["risk"].lower()
                     # Owner approves over WebSocket (or REST)
                     ws.send_json(
                         {

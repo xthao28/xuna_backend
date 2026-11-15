@@ -105,9 +105,9 @@ def build_meta_tool_specs(
     directory = ", ".join(directory_parts) if directory_parts else "none"
     search_description = (
         "Find host tools that are not in your direct tool list. Query with short English "
-        "keywords (e.g. 'tv volume', 'smart home light', 'clipboard'). Then call "
-        f"tool_describe for the exact arguments and tool_invoke to run it. Deferred tools: "
-        f"{directory}"
+        "keywords (e.g. 'tv volume', 'smart home light', 'clipboard'). Returns compact "
+        "argument schemas ready for immediate tool_invoke or call tool_describe for verbose "
+        f"schema. Deferred tools: {directory}"
     )
     return (
         ToolSpec(
@@ -213,16 +213,26 @@ def search_tools(
 
     def _entry(name: str) -> dict[str, object]:
         item = eligible[name]
+        schema = item.descriptor.input_schema
+        props_raw = schema.get("properties") if isinstance(schema, Mapping) else {}
+        props = props_raw if isinstance(props_raw, Mapping) else {}
+        required_raw = schema.get("required") if isinstance(schema, Mapping) else ()
+        required = set(required_raw) if isinstance(required_raw, list | tuple | set) else set()
+        args = {str(k): _render_property(v, k in required) for k, v in props.items()}
         return {
             "name": name,
             "description": item.descriptor.description[:160],
             "hosts": list(item.aliases),
+            "args": args,
         }
 
     if scored:
         return {
             "matches": [_entry(name) for _, _, name in scored[:max_results]],
-            "next": "Call tool_describe(name) for the exact arguments, then tool_invoke.",
+            "next": (
+                "Proceed directly to tool_invoke(name, argumentsJson) or call tool_describe "
+                "for verbose schema."
+            ),
         }
     return {
         "matches": [],

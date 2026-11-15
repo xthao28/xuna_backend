@@ -265,7 +265,7 @@ class InMemoryApprovalScopeStore:
     def __init__(self) -> None:
         self._scopes: dict[tuple[uuid.UUID, str, str, str], datetime] = {}
 
-    def has_valid_scope(
+    async def has_valid_scope(
         self,
         owner_id: uuid.UUID,
         pet_id: str,
@@ -282,7 +282,7 @@ class InMemoryApprovalScopeStore:
             return False
         return True
 
-    def grant_scope(
+    async def grant_scope(
         self,
         owner_id: uuid.UUID,
         pet_id: str,
@@ -295,7 +295,7 @@ class InMemoryApprovalScopeStore:
         self._scopes[key] = expires_at
         return expires_at
 
-    def clear_owner(self, owner_id: uuid.UUID) -> int:
+    async def clear_owner(self, owner_id: uuid.UUID) -> int:
         count = 0
         for key in list(self._scopes.keys()):
             if key[0] == owner_id:

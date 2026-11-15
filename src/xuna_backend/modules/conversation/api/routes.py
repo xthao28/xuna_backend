@@ -616,23 +616,7 @@ async def turn(
                     case GestureChosen(gesture=gesture):
                         yield _sse("gesture", {"name": gesture.value})
                     case ActionPendingEvent() as pending:
-                        pending_payload: dict[str, Any] = {
-                            "approvalId": pending.approval_id,
-                            "target": pending.target,
-                            "summary": pending.summary,
-                            "risk": pending.risk,
-                            "expiresIn": pending.expires_in,
-                        }
-                        if pending.host_id is not None:
-                            pending_payload["hostId"] = pending.host_id
-                        if pending.args_sha256 is not None:
-                            pending_payload["argsSha256"] = pending.args_sha256
-                        if pending.expires_at is not None:
-                            pending_payload["expiresAt"] = pending.expires_at
-                        standing = pending.standing_payload()
-                        if standing is not None:
-                            pending_payload["standing"] = standing
-                        yield _sse("action_pending", pending_payload)
+                        yield _sse("action_pending", pending.wire_payload())
                     case BoardHidRequestEvent() as hid_req:
                         yield _sse(
                             "board_hid_request",

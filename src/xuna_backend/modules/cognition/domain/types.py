@@ -50,6 +50,7 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    extra: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)

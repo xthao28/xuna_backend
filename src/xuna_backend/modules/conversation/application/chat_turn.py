@@ -592,6 +592,7 @@ async def chat_turn(
             request,
             sections=sections,
             locale_vi=locale_vi,
+            code_generator=code_generator,
         ):
             yield ev
         return
@@ -634,7 +635,7 @@ async def chat_turn(
                 text_parts: list[str] = round_text_parts,
                 calls: list[ToolCall] = round_calls,
             ) -> AsyncIterator[ChatEvent]:
-                nonlocal active_generator
+                nonlocal active_generator, active_max_tokens
                 try:
                     async for ev in active_generator.stream(req):
                         yield ev
@@ -646,6 +647,7 @@ async def chat_turn(
                         and not calls
                     ):
                         active_generator = code_generator
+                        active_max_tokens = max(active_max_tokens, 3000)
                         async for ev in active_generator.stream(req):
                             yield ev
                     else:
@@ -818,15 +820,32 @@ async def _single_round_chat_turn(
     *,
     sections: bool = False,
     locale_vi: bool = True,
+    code_generator: TextGenerator | None = None,
 ) -> AsyncIterator[TurnEvent]:
     tags = GestureTagFilter()
     sec_filter = ReplySectionFilter() if sections else None
     detail_accum: list[str] = []
+    active_gen = generator
+    emitted_any = False
+
+    async def _iter_events() -> AsyncIterator[ChatEvent]:
+        nonlocal active_gen
+        try:
+            async for ev in active_gen.stream(request):
+                yield ev
+        except ProviderUnavailableError:
+            if code_generator is not None and active_gen is not code_generator and not emitted_any:
+                active_gen = code_generator
+                async for ev in active_gen.stream(request):
+                    yield ev
+            else:
+                raise
 
     try:
-        async for event in generator.stream(request):
+        async for event in _iter_events():
             match event:
                 case TextDelta(text=text):
+                    emitted_any = True
                     clean, gesture = tags.feed(text)
                     if gesture is not None:
                         yield GestureChosen(gesture)

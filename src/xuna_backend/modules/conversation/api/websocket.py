@@ -630,24 +630,9 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         {"type": "gesture", "name": event.gesture.value}
                                     )
                                 elif isinstance(event, ActionPendingEvent):
-                                    pending_msg: dict[str, Any] = {
-                                        "type": "action_pending",
-                                        "approvalId": event.approval_id,
-                                        "target": event.target,
-                                        "summary": event.summary,
-                                        "risk": event.risk,
-                                        "expiresIn": event.expires_in,
-                                    }
-                                    if event.host_id is not None:
-                                        pending_msg["hostId"] = event.host_id
-                                    if event.args_sha256 is not None:
-                                        pending_msg["argsSha256"] = event.args_sha256
-                                    if event.expires_at is not None:
-                                        pending_msg["expiresAt"] = event.expires_at
-                                    standing = event.standing_payload()
-                                    if standing is not None:
-                                        pending_msg["standing"] = standing
-                                    await websocket.send_json(pending_msg)
+                                    await websocket.send_json(
+                                        {"type": "action_pending", **event.wire_payload()}
+                                    )
                                 elif isinstance(event, BoardHidRequestEvent):
                                     await websocket.send_json(
                                         {

@@ -66,6 +66,12 @@ HARD_DENIED_PROCESS_TOKENS: frozenset[str] = frozenset(
         "terminal",
         "iterm",
         "iterm2",
+        "warp",
+        "alacritty",
+        "kitty",
+        "wezterm",
+        "ghostty",
+        "hyper",
         "bash",
         "zsh",
         "sh",
@@ -76,7 +82,9 @@ HARD_DENIED_PROCESS_TOKENS: frozenset[str] = frozenset(
         "systemsettings",
         "systemsettings.exe",
         "system settings",
+        "system_settings",
         "system preferences",
+        "com.apple.systemsettings",
         "control",
         "control.exe",
         "1password",
@@ -153,10 +161,12 @@ def is_activation_key_combo(combo: str) -> bool:
     return spec.split("+")[-1].strip().lower() in _ACTIVATION_KEYS
 
 
-def is_hard_denied_target(app_or_process: str) -> bool:
-    normalized = app_or_process.strip().lower()
+def is_hard_denied_target(target: str | None) -> bool:
+    if target is None:
+        return True
+    normalized = target.strip().lower()
     if not normalized:
-        return False
+        return True
     if normalized in HARD_DENIED_PROCESS_TOKENS:
         return True
     base = normalized.replace("\\", "/").split("/")[-1]
@@ -748,16 +758,24 @@ class ComputerUseSessionRunner:
             raise ComputerUseError("session_not_found")
         await self._check_liveness_and_budgets(state, count_step=True)
 
-        if tool_name not in ("input.click", "input.type_text", "input.key", "input.scroll"):
+        if tool_name not in (
+            "input.click",
+            "input.type_text",
+            "input.key",
+            "input.scroll",
+            "app.launch",
+        ):
             raise ComputerUseError("unsupported_cu_tool", tool_name)
 
         # Reject any action whose arguments or target app leave the allowlist or hit denylist
-        target_app = str(arguments.get("appId") or "").strip().lower()
+        target_app = str(
+            arguments.get("appId") or arguments.get("id") or arguments.get("name") or ""
+        ).strip().lower()
         if target_app:
             if is_hard_denied_target(target_app):
                 state.outside_allowlist_attempts += 1
                 raise ComputerUseError("denylisted_target_forbidden")
-            if target_app not in state.allowed_apps:
+            if target_app not in state.allowed_apps and tool_name != "app.launch":
                 state.outside_allowlist_attempts += 1
                 raise ComputerUseError("app_not_in_session_allowlist")
 
@@ -768,24 +786,41 @@ class ComputerUseSessionRunner:
 
         element_id = str(arguments.get("elementId") or "").strip()
         target_node = state.cached_nodes.get(element_id) if element_id else None
-        if target_node is not None and is_password_ui_node(target_node):
-            state.password_typed_attempts += 1
-            raise ComputerUseError("password_field_forbidden")
-        if arguments.get("isPasswordField") is True:
+
+        # Typing into password fields is strictly forbidden
+        if tool_name == "input.type_text" and (
+            (target_node is not None and is_password_ui_node(target_node))
+            or arguments.get("isPasswordField") is True
+        ):
             state.password_typed_attempts += 1
             raise ComputerUseError("password_field_forbidden")
 
         # Determine whether this step requires phone-signed R3 approval
         requires_r3 = False
         if tool_name == "input.type_text":
-            requires_r3 = True
+            # Typing inside active session does not unconditionally demand R3 proof
+            requires_r3 = False
         elif tool_name == "input.click":
             node_name = str((target_node or {}).get("name") or arguments.get("elementName") or "")
-            if is_consequential_element_name(node_name):
+            if (
+                is_consequential_element_name(node_name)
+                or (target_node is not None and is_password_ui_node(target_node))
+                or arguments.get("isPasswordField") is True
+            ):
                 requires_r3 = True
-        elif tool_name == "input.key" and is_activation_key_combo(
-            str(arguments.get("combo") or "")
-        ):
+        elif tool_name == "input.key":
+            combo = str(arguments.get("combo") or "")
+            if is_activation_key_combo(combo):
+                role_val = (
+                    (target_node or {}).get("role")
+                    or arguments.get("focusedRole")
+                    or arguments.get("role")
+                )
+                focused_role = str(role_val or "").lower()
+                is_draft = focused_role in {"textarea", "textfield", "searchfield", "document"}
+                if not is_draft:
+                    requires_r3 = True
+        elif tool_name == "app.launch" and target_app and target_app not in state.allowed_apps:
             requires_r3 = True
 
         if requires_r3:

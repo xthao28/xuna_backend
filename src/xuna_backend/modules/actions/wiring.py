@@ -3,9 +3,11 @@
 from fastapi import FastAPI
 
 from xuna_backend.modules.actions.api.routes import router as actions_router
+from xuna_backend.modules.actions.infrastructure.approval_scope_store import (
+    SqlApprovalScopeStore,
+)
 from xuna_backend.modules.actions.infrastructure.brokers import (
     InMemoryApprovalBroker,
-    InMemoryApprovalScopeStore,
     InMemoryLastTargetStore,
     InMemoryLocalResultBroker,
 )
@@ -24,7 +26,7 @@ def wire_actions(app: FastAPI) -> None:
     app.state.approval_broker = InMemoryApprovalBroker()
     app.state.local_result_broker = InMemoryLocalResultBroker()
     app.state.last_target_store = InMemoryLastTargetStore()
-    app.state.approval_scope_store = InMemoryApprovalScopeStore()
+    app.state.approval_scope_store = SqlApprovalScopeStore(lambda: app.state.database.sessions())
     # UDC-17 S17.6: durable sessions. The database is created in the app lifespan, so the
     # store reaches it at call time.
     app.state.cu_session_store = SqlComputerUseSessionStore(lambda: app.state.database.sessions())

@@ -129,9 +129,9 @@ class LastTargetStore(Protocol):
 
 
 class ApprovalScopeStore(Protocol):
-    """In-memory 15-minute `conversation_15m` R2 approval scope store (`UDC-7` S7.1)."""
+    """15-minute `conversation_15m` R2 approval scope store (`UDC-7` S7.1)."""
 
-    def has_valid_scope(
+    async def has_valid_scope(
         self,
         owner_id: uuid.UUID,
         pet_id: str,
@@ -140,7 +140,7 @@ class ApprovalScopeStore(Protocol):
         now: datetime,
     ) -> bool: ...
 
-    def grant_scope(
+    async def grant_scope(
         self,
         owner_id: uuid.UUID,
         pet_id: str,
@@ -149,7 +149,7 @@ class ApprovalScopeStore(Protocol):
         now: datetime,
     ) -> datetime: ...
 
-    def clear_owner(self, owner_id: uuid.UUID) -> int: ...
+    async def clear_owner(self, owner_id: uuid.UUID) -> int: ...
 
 
 class ComputerUseSessionStore(Protocol):

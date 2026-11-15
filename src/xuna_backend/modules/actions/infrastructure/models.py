@@ -126,3 +126,27 @@ class CuSessionModel(Base):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False)
     stop_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ApprovalScopeModel(Base):
+    """Persisted 15-minute `conversation_15m` R2 approval scopes (Wave A R2)."""
+
+    __tablename__ = "approval_scopes"
+
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("owners.owner_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    pet_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    host_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("hosts.host_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    tool: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+

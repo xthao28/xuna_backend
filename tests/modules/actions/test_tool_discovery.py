@@ -793,3 +793,51 @@ def test_scripted_llm_events_are_chat_events() -> None:
         raise AssertionError("no event")
 
     assert isinstance(asyncio.run(first()), TextDelta)
+
+
+def test_tool_search_matches_include_compact_args() -> None:
+    result = search_tools(_eligible(), "tv volume")
+    matches = result["matches"]
+    assert isinstance(matches, list) and len(matches) > 0
+    first_match = matches[0]
+    assert first_match["name"] == "tv.control"
+    assert "args" in first_match
+    args = first_match["args"]
+    assert isinstance(args, dict)
+    assert "command" in args
+    assert "power|volume_up|volume_down" in args["command"]
+    assert "REQUIRED" in args["command"]
+
+
+def test_tool_search_next_hint_guides_direct_invoke() -> None:
+    result = search_tools(_eligible(), "clipboard")
+    assert result["next"] == (
+        "Proceed directly to tool_invoke(name, argumentsJson) or call tool_describe "
+        "for verbose schema."
+    )
+
+
+def test_direct_tool_invoke_from_search_args_without_tool_describe() -> None:
+    orch, hub, ctx = _orchestrator()
+
+    # 1. Search returns match with compact args
+    search_call = ToolCall(id="s1", name=TOOL_SEARCH_FUNCTION, arguments={"query": "tv volume"})
+    search_msg = asyncio.run(orch.handle_call(search_call, ctx))
+    search_payload = json.loads(search_msg.content)
+    assert search_payload["status"] == "ok"
+    match = search_payload["output"]["matches"][0]
+    assert match["name"] == "tv.control"
+    assert "command" in match["args"]
+
+    # 2. Directly invoke without calling tool_describe
+    invoke_call = ToolCall(
+        id="i1",
+        name=TOOL_INVOKE_FUNCTION,
+        arguments={"name": match["name"], "argumentsJson": '{"command": "volume_up"}'},
+    )
+    invoke_msg = asyncio.run(orch.handle_call(invoke_call, ctx))
+    invoke_payload = json.loads(invoke_msg.content)
+    assert invoke_payload["status"] == "ok"
+    assert hub.sent[0]["name"] == "tv.control"
+    assert hub.sent[0]["arguments"] == {"command": "volume_up"}
+

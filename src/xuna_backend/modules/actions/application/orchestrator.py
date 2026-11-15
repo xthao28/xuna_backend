@@ -13,6 +13,7 @@ Executes the 8-step pipeline per tool call:
 """
 
 import base64
+import inspect
 import uuid
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
@@ -560,8 +561,42 @@ class Orchestrator:
                 return RiskTier.R3
         elif descriptor.name == "input.key":
             combo = clean_args.get("combo")
-            if isinstance(combo, str) and is_activation_key_combo(combo):
-                return RiskTier.R3
+            if isinstance(combo, str):
+                norm_combo = "+".join(p.strip().lower() for p in combo.split("+") if p.strip())
+                is_safe_editing = norm_combo in {
+                    "cmd+n", "cmd+a", "cmd+c", "cmd+v",
+                    "command+n", "command+a", "command+c", "command+v",
+                    "ctrl+n", "ctrl+a", "ctrl+c", "ctrl+v",
+                }
+                is_draft_break = norm_combo in {"enter", "return", "shift+enter", "shift+return"}
+                focused_role = str(
+                    clean_args.get("focusedRole") or clean_args.get("focused_role") or ""
+                ).lower()
+                cached_node = cls._lookup_cached_cu_node(active_cu, clean_args)
+                if cached_node is not None:
+                    node_role = str(cached_node.get("role") or "").lower()
+                    if node_role:
+                        focused_role = node_role
+                is_draft_area = focused_role in {"textarea", "textfield", "searchfield", "document"}
+                in_form = clean_args.get("inForm") is True
+                allow_draft = (
+                    is_draft_break and not in_form and (active_cu is not None or is_draft_area)
+                )
+                if is_safe_editing or allow_draft:
+                    return descriptor.risk
+                if is_activation_key_combo(combo):
+                    return RiskTier.R3
+        elif descriptor.name == "app.launch":
+            if active_cu is not None:
+                raw_app = (
+                    clean_args.get("id")
+                    or clean_args.get("app_id")
+                    or clean_args.get("name")
+                    or ""
+                )
+                app_name = str(raw_app).strip().lower()
+                if app_name and app_name not in active_cu.allowed_apps:
+                    return RiskTier.R3
         return descriptor.risk
 
     @staticmethod
@@ -1396,10 +1431,26 @@ class Orchestrator:
 
         self._last_target_store.set_last_target(ctx.owner_id, ctx.pet_id, target_alias, now)
 
+        raw_launch_id = (
+            clean_args.get("id") or clean_args.get("app_id") or clean_args.get("name") or ""
+        )
+        is_in_scope_app_launch = (
+            active_cu is not None
+            and descriptor.name == "app.launch"
+            and str(raw_launch_id).strip().lower() in active_cu.allowed_apps
+        )
+        if active_cu is not None and descriptor.name == "app.launch" and not is_in_scope_app_launch:
+            effective_risk = RiskTier.R3
+
         exempt_by_cu_session = (
             active_cu is not None
-            and descriptor.family in (ToolFamily.SCREEN, ToolFamily.UI, ToolFamily.INPUT)
-            and effective_risk == RiskTier.R2
+            and (
+                (
+                    descriptor.family in (ToolFamily.SCREEN, ToolFamily.UI, ToolFamily.INPUT)
+                    and effective_risk == RiskTier.R2
+                )
+                or is_in_scope_app_launch
+            )
         )
 
         approval_req: ApprovalRequest | None = None
@@ -1421,13 +1472,15 @@ class Orchestrator:
                     args_sha256(clean_args),
                     now,
                 )
-            has_15m_scope = (
-                effective_risk == RiskTier.R2
-                and self._scope_store is not None
-                and self._scope_store.has_valid_scope(
+            has_15m_scope = False
+            if effective_risk == RiskTier.R2 and self._scope_store is not None:
+                scope_res = self._scope_store.has_valid_scope(
                     ctx.owner_id, ctx.pet_id, host.host_id, descriptor.name, now
                 )
-            )
+                if inspect.isawaitable(scope_res):
+                    has_15m_scope = await scope_res
+                else:
+                    has_15m_scope = bool(scope_res)
             expires_at = now + timedelta(seconds=APPROVAL_TTL_SECONDS)
             if standing_hit is not None:
                 approval_req = ApprovalRequest(
@@ -1620,13 +1673,15 @@ class Orchestrator:
                     and effective_risk == RiskTier.R2
                     and self._scope_store is not None
                 ):
-                    self._scope_store.grant_scope(
+                    grant_res = self._scope_store.grant_scope(
                         ctx.owner_id,
                         ctx.pet_id,
                         host.host_id,
                         descriptor.name,
                         self._clock(),
                     )
+                    if inspect.isawaitable(grant_res):
+                        await grant_res
 
             if args_sha256(clean_args) != approval_req.args_sha256:
                 await ctx.emit_event(

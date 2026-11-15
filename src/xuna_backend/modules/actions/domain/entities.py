@@ -156,6 +156,29 @@ class ActionPendingEvent:
             payload["approvedCount"] = self.standing_approved_count
         return payload
 
+    def wire_payload(self) -> dict[str, object]:
+        """Wire JSON payload for `action_pending` on SSE and the voice WebSocket.
+
+        Serializes `risk` in lowercase (`r1`..`r3`) to match mobile `ActionEventMapper`.
+        """
+        payload: dict[str, object] = {
+            "approvalId": self.approval_id,
+            "target": self.target,
+            "summary": self.summary,
+            "risk": self.risk.lower(),
+            "expiresIn": self.expires_in,
+        }
+        if self.host_id is not None:
+            payload["hostId"] = self.host_id
+        if self.args_sha256 is not None:
+            payload["argsSha256"] = self.args_sha256
+        if self.expires_at is not None:
+            payload["expiresAt"] = self.expires_at
+        standing = self.standing_payload()
+        if standing is not None:
+            payload["standing"] = standing
+        return payload
+
 
 @dataclass(frozen=True, slots=True)
 class BoardHidRequestEvent:

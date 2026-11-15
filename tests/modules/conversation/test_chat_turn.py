@@ -337,3 +337,183 @@ def test_settings_from_env_parses_expert_provider_options() -> None:
     assert s.text_expert_max_tokens == 4096
     assert "text_expert_provider='openai_compatible'" in repr(s)
     assert "secret-key" not in repr(s)
+
+
+def test_multi_round_generator_switch_preserves_thought_signatures() -> None:
+    from xuna_backend.modules.actions.application.orchestrator import EventSink
+    from xuna_backend.modules.cognition.domain.types import (
+        Message,
+        Role,
+        ToolCall,
+        ToolCallRequested,
+        ToolSpec,
+    )
+    from xuna_backend.modules.cognition.infrastructure.openai_compatible import (
+        _serialize_message,
+    )
+    from xuna_backend.modules.conversation.application.chat_turn import chat_turn
+
+    code_gen_received_messages: list[tuple[Message, ...]] = []
+
+    class PrimaryGen:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+            self.calls += 1
+            # Round 0: request a forge__ tool call with thought signature in extra
+            tc = ToolCall(
+                id="call_forge_001",
+                name="forge__execute",
+                arguments={"script": "print('ok')"},
+                extra={"thought_signature": "reasoning_signature_abc_123"},
+            )
+            yield ToolCallRequested(tc)
+            yield ChatFinished("primary", "model-primary", 50, 50, 100)
+
+    class CodeGen:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+            self.calls += 1
+            code_gen_received_messages.append(request.messages)
+            yield TextDelta("Code execution finished.")
+            yield ChatFinished("code_provider", "code-model", 80, 20, 150)
+
+    async def mock_tool_runner(call: ToolCall, emit: EventSink) -> Message:
+        return Message(Role.TOOL, content="script output: ok", tool_call_id=call.id)
+
+    primary = PrimaryGen()
+    code_gen = CodeGen()
+    req = build_request("hãy chạy code", Locale.VI)
+    # Give request a tool spec so allow_tools_this_round is True
+    req = ChatRequest(
+        messages=req.messages,
+        tools=(ToolSpec("forge__execute", "run code", {"type": "object", "properties": {}}),),
+        locale=req.locale,
+    )
+
+    async def run() -> list[object]:
+        return [
+            e
+            async for e in chat_turn(
+                primary,
+                req,
+                tool_runner=mock_tool_runner,
+                code_generator=code_gen,
+            )
+        ]
+
+    events = asyncio.run(run())
+    assert any(isinstance(e, TextDelta) and "Code execution finished." in e.text for e in events)
+    assert code_gen.calls == 1
+
+    # Verify that code_generator received the assistant message with thought
+    # signature in ToolCall.extra
+    received = code_gen_received_messages[0]
+    asst_msg = next(m for m in received if m.role == Role.ASSISTANT)
+    assert len(asst_msg.tool_calls) == 1
+    assert asst_msg.tool_calls[0].id == "call_forge_001"
+    assert asst_msg.tool_calls[0].extra == {"thought_signature": "reasoning_signature_abc_123"}
+
+    # And verify serialized payload includes extra_content for upstream API
+    serialized = _serialize_message(asst_msg)
+    assert serialized["tool_calls"][0]["extra_content"] == {
+        "thought_signature": "reasoning_signature_abc_123"
+    }
+
+
+def test_fallback_from_primary_generator_to_code_generator_on_provider_unavailable() -> None:
+    from xuna_backend.modules.actions.application.orchestrator import EventSink
+    from xuna_backend.modules.cognition.application.ports import ProviderUnavailableError
+    from xuna_backend.modules.cognition.domain.types import (
+        Message,
+        Role,
+        ToolCall,
+        ToolCallRequested,
+        ToolSpec,
+    )
+    from xuna_backend.modules.conversation.application.chat_turn import chat_turn
+
+    # 1. Single round fallback test
+    class FailingGen:
+        async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+            raise ProviderUnavailableError("quota_exhausted: 429 Resource has been exhausted")
+            yield TextDelta("never")
+
+    class WorkingCodeGen:
+        async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+            yield TextDelta("Phản hồi dự phòng thành công!")
+            yield ChatFinished("fallback", "model-fallback", 10, 10, 50)
+
+    req1 = build_request("xin chào", Locale.VI)
+
+    async def collect_single() -> list[object]:
+        return [e async for e in chat_turn(FailingGen(), req1, code_generator=WorkingCodeGen())]
+
+    events1 = asyncio.run(collect_single())
+    assert any(
+        isinstance(e, TextDelta) and "Phản hồi dự phòng thành công!" in e.text for e in events1
+    )
+
+    # 2. Multi-round fallback across rounds test
+    class MultiRoundPrimary:
+        def __init__(self) -> None:
+            self.round = 0
+
+        async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+            if self.round == 0:
+                self.round += 1
+                # Non-code tool call in round 0
+                yield ToolCallRequested(
+                    ToolCall("c_notes_1", "notes_create", {"title": "đơn nghỉ phép"})
+                )
+                yield ChatFinished("primary", "model-primary", 20, 20, 80)
+            else:
+                # Round 1 fails with quota exhausted
+                raise ProviderUnavailableError("quota_exhausted: 429 Daily quota reached")
+
+    class MultiRoundFallback:
+        def __init__(self) -> None:
+            self.received_messages: list[tuple[Message, ...]] = []
+
+        async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+            self.received_messages.append(request.messages)
+            yield TextDelta("Đã tạo đơn nghỉ phép dự phòng.")
+            yield ChatFinished("fallback", "model-fallback", 30, 20, 90)
+
+    async def mock_runner(call: ToolCall, emit: EventSink) -> Message:
+        return Message(Role.TOOL, content="ok: created", tool_call_id=call.id)
+
+    primary2 = MultiRoundPrimary()
+    fallback2 = MultiRoundFallback()
+    req2 = ChatRequest(
+        messages=req1.messages,
+        tools=(ToolSpec("notes_create", "create note", {"type": "object", "properties": {}}),),
+        locale=req1.locale,
+    )
+
+    async def collect_multi() -> list[object]:
+        return [
+            e
+            async for e in chat_turn(
+                primary2,
+                req2,
+                tool_runner=mock_runner,
+                code_generator=fallback2,
+            )
+        ]
+
+    events2 = asyncio.run(collect_multi())
+
+    assert any(
+        isinstance(e, TextDelta) and "Đã tạo đơn nghỉ phép dự phòng." in e.text for e in events2
+    )
+    # Check that fallback received round 0 messages (user, assistant tool_call, tool response)
+    assert len(fallback2.received_messages) == 1
+    msgs = fallback2.received_messages[0]
+    roles = [m.role for m in msgs]
+    assert Role.ASSISTANT in roles
+    assert Role.TOOL in roles
+
