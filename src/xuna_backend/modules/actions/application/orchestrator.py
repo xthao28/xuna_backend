@@ -40,8 +40,10 @@ from xuna_backend.modules.actions.application.computer_use import (
     ComputerUseSessionState,
     InMemoryComputerUseSessionStore,
     build_session_event,
+    hit_test_node_at_coordinates,
     is_activation_key_combo,
     is_consequential_element_name,
+    is_editable_field_role,
     is_password_ui_node,
     redact_ui_tree_nodes,
     session_expiry_reason,
@@ -180,7 +182,9 @@ _CU_SESSION_ENDING_ERROR_CODES: frozenset[str] = frozenset(
 )
 
 # UDC-17 S17.1: tools whose risk the host decides from the live screen via `xuna/preflight`.
-_PREFLIGHT_TOOLS: frozenset[str] = frozenset({"input.click", "input.type_text", "input.key"})
+_PREFLIGHT_TOOLS: frozenset[str] = frozenset(
+    {"input.click", "input.type_text", "input.key", "input.drag"}
+)
 # Desktop agents only; other host kinds keep the legacy estimate until they implement it.
 _PREFLIGHT_PLATFORMS: frozenset[HostPlatform] = frozenset(
     {HostPlatform.WINDOWS, HostPlatform.MACOS}
@@ -191,7 +195,7 @@ _METHOD_NOT_FOUND_PREFIX = "rpc_error:-32601:"
 # ADR-0015 D1: text typed since the last commit, kept per session for the next commit card.
 _MAX_REMEMBERED_DRAFTS = 5
 # Input steps that can commit typed text (send, submit), so their cards show it.
-_COMMIT_INPUT_TOOLS: frozenset[str] = frozenset({"input.click", "input.key"})
+_COMMIT_INPUT_TOOLS: frozenset[str] = frozenset({"input.click", "input.key", "input.drag"})
 
 # Host agents built before `xuna/policy.idempotent` existed do not declare it. Only for
 # those undeclared descriptors, these known toggles keep repeat protection; a host's own
@@ -608,17 +612,89 @@ class Orchestrator:
                 return RiskTier.R3
             return descriptor.risk
         if descriptor.name == "input.click":
+            x_norm = clean_args.get("xNorm")
+            y_norm = clean_args.get("yNorm")
+            is_coord_click = isinstance(x_norm, int | float) and isinstance(y_norm, int | float)
+
             explicit_name = clean_args.get("elementName")
             if isinstance(explicit_name, str) and is_consequential_element_name(explicit_name):
                 return RiskTier.R3
-            cached_node = cls._lookup_cached_cu_node(active_cu, clean_args)
+
+            cached_node = None
+            if isinstance(x_norm, int | float) and isinstance(y_norm, int | float):
+                if (
+                    float(x_norm) < 0.0
+                    or float(x_norm) > 1.0
+                    or float(y_norm) < 0.0
+                    or float(y_norm) > 1.0
+                ):
+                    return RiskTier.R3
+                if active_cu is not None:
+                    cached_node = hit_test_node_at_coordinates(
+                        list(active_cu.cached_nodes.values()), float(x_norm), float(y_norm)
+                    )
+            else:
+                cached_node = cls._lookup_cached_cu_node(active_cu, clean_args)
+
             if cached_node is not None:
+                if is_password_ui_node(cached_node):
+                    return RiskTier.R3
                 cached_name = cached_node.get("name")
                 if isinstance(cached_name, str) and is_consequential_element_name(cached_name):
                     return RiskTier.R3
+                if active_cu is not None and active_cu.typed_count > 0:
+                    if is_coord_click:
+                        role = str(cached_node.get("role") or "")
+                        if (
+                            not is_editable_field_role(role)
+                            or cached_node.get("editable") is False
+                            or cached_node.get("readOnly") is True
+                        ):
+                            return RiskTier.R3
+                    else:
+                        if not cached_name or not str(cached_name).strip():
+                            return RiskTier.R3
             elif active_cu is not None:
-                # No tree read in this process (not inspected yet, or the backend restarted):
-                # the real label is unknown, so the click may be a commit.
+                # No tree read in this process (not inspected yet, or the backend restarted),
+                # or unclassified coordinate hit: target is unknown, so escalate to R3.
+                return RiskTier.R3
+        elif descriptor.name == "input.drag":
+            from_x = clean_args.get("fromXNorm") or clean_args.get("startXNorm")
+            from_y = clean_args.get("fromYNorm") or clean_args.get("startYNorm")
+            to_x = clean_args.get("toXNorm") or clean_args.get("endXNorm")
+            to_y = clean_args.get("toYNorm") or clean_args.get("endYNorm")
+
+            for c in (from_x, from_y, to_x, to_y):
+                if isinstance(c, int | float) and (c < 0.0 or c > 1.0):
+                    return RiskTier.R3
+
+            start_node = None
+            end_node = None
+            if active_cu is not None:
+                nodes = list(active_cu.cached_nodes.values())
+                if isinstance(from_x, int | float) and isinstance(from_y, int | float):
+                    start_node = hit_test_node_at_coordinates(nodes, float(from_x), float(from_y))
+                if isinstance(to_x, int | float) and isinstance(to_y, int | float):
+                    end_node = hit_test_node_at_coordinates(nodes, float(to_x), float(to_y))
+
+                if (start_node and is_password_ui_node(start_node)) or (
+                    end_node and is_password_ui_node(end_node)
+                ):
+                    return RiskTier.R3
+
+                # Uncommitted draft text protection:
+                if active_cu.typed_count > 0:
+                    return RiskTier.R3
+
+                for node in (start_node, end_node):
+                    if node:
+                        name = node.get("name")
+                        if isinstance(name, str) and is_consequential_element_name(name):
+                            return RiskTier.R3
+
+                if start_node is None or end_node is None:
+                    return RiskTier.R3
+            elif active_cu is not None:
                 return RiskTier.R3
         elif descriptor.name == "input.key":
             combo = clean_args.get("combo")
@@ -682,6 +758,11 @@ class Orchestrator:
             name = clean_args.get("elementName")
             if isinstance(name, str) and is_consequential_element_name(name):
                 return RiskTier.R3
+        elif descriptor.name == "input.drag":
+            for k in ("elementName", "fromElementName", "toElementName"):
+                name = clean_args.get(k)
+                if isinstance(name, str) and is_consequential_element_name(name):
+                    return RiskTier.R3
         return descriptor.risk
 
     async def _host_preflight(
@@ -812,7 +893,7 @@ class Orchestrator:
                 await self._end_cu_state(active_cu, err_code, now)
             return
 
-        if descriptor.name == "ui.inspect" and status == "ok":
+        if descriptor.name in ("ui.inspect", "ui.observe_hybrid") and status == "ok":
             raw_nodes = structured_content.get("nodes")
             if isinstance(raw_nodes, list):
                 dict_nodes = [n for n in raw_nodes if isinstance(n, dict)]
@@ -1120,6 +1201,29 @@ class Orchestrator:
                     tool_call_id=call.id,
                 )
 
+        if tool_name in ("input.click", "input.drag"):
+            for k in (
+                "xNorm",
+                "yNorm",
+                "fromXNorm",
+                "fromYNorm",
+                "toXNorm",
+                "toYNorm",
+                "startXNorm",
+                "startYNorm",
+                "endXNorm",
+                "endYNorm",
+            ):
+                val = clean_args.get(k)
+                if isinstance(val, int | float) and (val < 0.0 or val > 1.0):
+                    return Message(
+                        role=Role.TOOL,
+                        content=_encode_tool_payload(
+                            "invalid_args", {"errorCode": "out_of_bounds"}
+                        ),
+                        tool_call_id=call.id,
+                    )
+
         last_target = self._last_target_store.get_last_target(ctx.owner_id, ctx.pet_id, now)
         last_alias = last_target[0] if last_target is not None else None
         last_at = last_target[1] if last_target is not None else None
@@ -1387,14 +1491,46 @@ class Orchestrator:
                 tool_call_id=call.id,
             )
 
-        if descriptor.name in ("input.click", "input.type_text", "input.key"):
+        if descriptor.name in ("input.click", "input.type_text", "input.key", "input.drag"):
             cached_node = self._lookup_cached_cu_node(active_cu, clean_args)
+            if cached_node is None and descriptor.name == "input.click" and active_cu is not None:
+                x_norm = clean_args.get("xNorm")
+                y_norm = clean_args.get("yNorm")
+                if isinstance(x_norm, int | float) and isinstance(y_norm, int | float):
+                    cached_node = hit_test_node_at_coordinates(
+                        list(active_cu.cached_nodes.values()), float(x_norm), float(y_norm)
+                    )
+            if cached_node is None and descriptor.name == "input.drag" and active_cu is not None:
+                from_x = clean_args.get("fromXNorm") or clean_args.get("startXNorm")
+                from_y = clean_args.get("fromYNorm") or clean_args.get("startYNorm")
+                to_x = clean_args.get("toXNorm") or clean_args.get("endXNorm")
+                to_y = clean_args.get("toYNorm") or clean_args.get("endYNorm")
+                sn = (
+                    hit_test_node_at_coordinates(
+                        list(active_cu.cached_nodes.values()), float(from_x), float(from_y)
+                    )
+                    if isinstance(from_x, int | float) and isinstance(from_y, int | float)
+                    else None
+                )
+                en = (
+                    hit_test_node_at_coordinates(
+                        list(active_cu.cached_nodes.values()), float(to_x), float(to_y)
+                    )
+                    if isinstance(to_x, int | float) and isinstance(to_y, int | float)
+                    else None
+                )
+                if sn and is_password_ui_node(sn):
+                    cached_node = sn
+                elif en and is_password_ui_node(en):
+                    cached_node = en
+
             # The model's declared name counts only when it types: a click on "Quên mật
             # khẩu" is not typing into a password field (UDC-17 S17.6).
             explicit_elem_name = clean_args.get("elementName")
             synthetic_node: dict[str, object] = (
                 {"name": explicit_elem_name, "role": "textfield"}
-                if isinstance(explicit_elem_name, str) and descriptor.name != "input.click"
+                if isinstance(explicit_elem_name, str)
+                and descriptor.name not in ("input.click", "input.drag")
                 else {}
             )
             if (cached_node is not None and is_password_ui_node(cached_node)) or (
@@ -2046,8 +2182,37 @@ class Orchestrator:
                 card_state = active_cu
             if card_state is not None:
                 await ctx.emit_event(build_session_event(card_state, card_now, result_summary))
+        detached_image_b64: str | None = None
+        detached_image_mime: str = "image/jpeg"
+        if descriptor.name == "ui.observe_hybrid" and isinstance(structured_content, dict):
+            sc_obj = structured_content.get("screenshot")
+            if isinstance(sc_obj, dict):
+                b64_val = sc_obj.pop("dataBase64", None) or sc_obj.pop("bytesBase64", None)
+                if isinstance(b64_val, str):
+                    detached_image_b64 = b64_val
+                if isinstance(sc_obj.get("mimeType"), str):
+                    detached_image_mime = str(sc_obj["mimeType"])
+            elif isinstance(sc_obj, str):
+                sc_str = structured_content.pop("screenshot", None)
+                if isinstance(sc_str, str):
+                    detached_image_b64 = sc_str
+            if not detached_image_b64 and "jpegBase64" in structured_content:
+                raw_b64 = structured_content.pop("jpegBase64", None)
+                if isinstance(raw_b64, str):
+                    detached_image_b64 = raw_b64
+            if not detached_image_b64 and "dataBase64" in structured_content:
+                raw_b64 = structured_content.pop("dataBase64", None)
+                if isinstance(raw_b64, str):
+                    detached_image_b64 = raw_b64
+
         if status == "ok" and not is_repeat_safe(descriptor):
             content = _encode_tool_payload(status, structured_content, repeatSafe=False)
         else:
             content = _encode_tool_payload(status, structured_content)
-        return Message(role=Role.TOOL, content=content, tool_call_id=call.id)
+        return Message(
+            role=Role.TOOL,
+            content=content,
+            tool_call_id=call.id,
+            image_base64=detached_image_b64,
+            image_mime_type=detached_image_mime,
+        )

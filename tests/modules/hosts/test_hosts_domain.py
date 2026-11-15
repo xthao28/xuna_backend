@@ -161,8 +161,12 @@ def test_golden_canonical_json_and_args_sha256() -> None:
         assert canonical_json(inp) == item["canonical"]
         assert args_sha256(inp) == item["argsSha256"]
 
-    with pytest.raises(ValueError):
-        canonical_json({"bad_float": 1.25})
+    assert canonical_json({"zero": -0.0, "one": 1.0}) == '{"one":1,"zero":0}'
+    assert canonical_json({"zero": 0, "one": 1}) == '{"one":1,"zero":0}'
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError):
+            canonical_json({"bad_float": bad})
 
 
 def test_sample_frames_parse_cleanly() -> None:

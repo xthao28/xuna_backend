@@ -7,6 +7,7 @@ byte-for-byte.
 import base64
 import hashlib
 import json
+import math
 from enum import IntEnum
 
 from xuna_backend.modules.hosts.domain.entities import HostId
@@ -98,9 +99,16 @@ def decode_b64url_16b(encoded: str) -> bytes:
 
 
 def canonical_json(value: object) -> str:
-    """Encodes `value` into XTP v1 canonical JSON (keys sorted, no whitespace, no floats)."""
-    _reject_floats(value)
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """Encodes `value` into XTP v1 canonical JSON (RFC 8785 JCS number/key rules).
+
+    Keys are sorted lexicographically by Unicode code point, insignificant whitespace is
+    omitted, finite floats follow ECMA-262 / RFC 8785 deterministic formatting (so `0.0`
+    and `0` both serialize as `"0"`, `1.0` and `1` both serialize as `"1"`), and `NaN` /
+    `±Infinity` are rejected.
+    """
+    parts: list[str] = []
+    _write_canonical(parts, value)
+    return "".join(parts)
 
 
 def args_sha256(arguments: dict[str, object]) -> str:
@@ -146,14 +154,85 @@ def preapproval_proof_message(
     return PREAPPROVAL_DOMAIN + body.encode()
 
 
-def _reject_floats(value: object) -> None:
+def _format_jcs_float(value: float) -> str:
+    if not math.isfinite(value):
+        raise ValueError(
+            "infinite or NaN floating-point numbers are not allowed in canonical JSON"
+        )
+    if value == 0.0:
+        return "0"
+    sign = "-" if value < 0.0 else ""
+    s = repr(-value if value < 0.0 else value).lower()
+    if "e" in s:
+        mant, exp_str = s.split("e", 1)
+        exp = int(exp_str)
+    else:
+        mant, exp = s, 0
+    if "." in mant:
+        int_part, frac_part = mant.split(".", 1)
+        raw_digits = int_part + frac_part
+        raw_exp = exp - len(frac_part)
+    else:
+        raw_digits = mant
+        raw_exp = exp
+    stripped_leading = raw_digits.lstrip("0")
+    digits = stripped_leading.rstrip("0")
+    tz = len(stripped_leading) - len(digits)
+    actual_exp = raw_exp + tz
+    k = len(digits)
+    n = actual_exp + k
+    if k <= n <= 21:
+        body = digits + ("0" * (n - k))
+    elif 0 < n <= 21:
+        body = f"{digits[:n]}.{digits[n:]}"
+    elif -6 < n <= 0:
+        body = f"0.{'0' * (-n)}{digits}"
+    else:
+        mantissa = digits if k == 1 else f"{digits[0]}.{digits[1:]}"
+        exp_val = n - 1
+        exp_sign = "+" if exp_val >= 0 else "-"
+        body = f"{mantissa}e{exp_sign}{abs(exp_val)}"
+    return f"{sign}{body}"
+
+
+def _write_canonical(parts: list[str], value: object) -> None:
+    if value is None:
+        parts.append("null")
+        return
+    if isinstance(value, bool):
+        parts.append("true" if value else "false")
+        return
+    if isinstance(value, int):
+        parts.append(str(value))
+        return
     if isinstance(value, float):
-        raise ValueError("floating-point numbers are not allowed in XTP v1 canonical JSON")
+        parts.append(_format_jcs_float(value))
+        return
+    if isinstance(value, str):
+        parts.append(json.dumps(value, ensure_ascii=False))
+        return
     if isinstance(value, list):
-        for item in value:
-            _reject_floats(item)
-    elif isinstance(value, dict):
-        for k, v in value.items():
+        parts.append("[")
+        for idx, item in enumerate(value):
+            if idx > 0:
+                parts.append(",")
+            _write_canonical(parts, item)
+        parts.append("]")
+        return
+    if isinstance(value, dict):
+        keys: list[str] = []
+        for k in value:
             if not isinstance(k, str):
                 raise ValueError("canonical JSON object keys must be strings")
-            _reject_floats(v)
+            keys.append(k)
+        keys.sort()
+        parts.append("{")
+        for idx, k in enumerate(keys):
+            if idx > 0:
+                parts.append(",")
+            parts.append(json.dumps(k, ensure_ascii=False))
+            parts.append(":")
+            _write_canonical(parts, value[k])
+        parts.append("}")
+        return
+    raise TypeError(f"unsupported type in canonical JSON: {type(value).__name__}")

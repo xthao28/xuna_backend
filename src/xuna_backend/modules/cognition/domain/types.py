@@ -59,6 +59,8 @@ class Message:
     content: str
     tool_call_id: str | None = None
     tool_calls: tuple[ToolCall, ...] = ()
+    image_base64: str | None = None
+    image_mime_type: str = "image/jpeg"
 
     def __post_init__(self) -> None:
         if self.tool_calls and self.role is not Role.ASSISTANT:

@@ -74,8 +74,10 @@ _UI_AUTOMATION_TOOLS = frozenset(
         "cu__session_extend",
         "cu__session_end",
         "ui__inspect",
+        "ui__observe_hybrid",
         "ui__find",
         "input__click",
+        "input__drag",
         "input__type_text",
         "input__key",
         "input__scroll",
@@ -114,9 +116,11 @@ _UI_SKILL_MODULE_VI = (
     "sổ để lấy snapshot mới trước khi thử lại.\n"
     "  Trên máy tính (khi có `cu__session_start`): mở phiên giới hạn bằng `cu__session_start` "
     "(khai báo `goal`, danh sách `apps`, `domains`, `maxSteps`, `maxMinutes`), sau đó "
-    "`ui__inspect` -> `input__click` / `input__type_text` / `input__key` / `input__scroll` "
-    "(truyền `elementId` và `elementName` thực tế từ `nodes`), kiểm tra lại trạng thái "
-    "cửa sổ, và đóng phiên bằng `cu__session_end`. Biết tên hoặc vai trò phần tử cần "
+    "`ui__inspect` / `ui__observe_hybrid` -> `input__click` / `input__drag` / "
+    "`input__type_text` / `input__key` / `input__scroll` (dùng `elementId` và "
+    "`elementName` từ `nodes`, hoặc tọa độ chuẩn hóa `xNorm, yNorm` trong [0.0, 1.0] "
+    "cho `input__click` / `input__drag` khi phần tử không có mã tham chiếu), kiểm tra "
+    "lại trạng thái cửa sổ, và đóng phiên bằng `cu__session_end`. Biết tên hoặc vai trò "
     "dùng thì gọi `ui__find` (trả vài ứng viên kèm `ref`, không tự chọn hộ) thay vì đọc "
     "cả cây; `ui__inspect` với `interactiveOnly: true` chỉ trả phần tử bấm/gõ được. Sau "
     "mỗi thao tác, đọc `changes` trong kết quả: `added` là phần tử mới kèm `ref`, "
@@ -147,8 +151,10 @@ _UI_SKILL_MODULE_EN = (
     "references before retrying.\n"
     "  On a desktop computer (when `cu__session_start` is available): start a bounded "
     "session with `cu__session_start` (`goal`, target `apps`, `domains`, `maxSteps`, "
-    "`maxMinutes`), then run `ui__inspect` -> `input__click` / `input__type_text` / "
-    "`input__key` / `input__scroll` using live `elementId` and `elementName` from `nodes`, "
+    "`maxMinutes`), then run `ui__inspect` or `ui__observe_hybrid` -> `input__click` / "
+    "`input__drag` / `input__type_text` / `input__key` / `input__scroll` (using live `elementId` "
+    "and `elementName` from `nodes`, or fallback normalized coordinates `xNorm, yNorm` in "
+    "[0.0, 1.0] for `input__click` / `input__drag` when elements lack reference IDs), "
     "verify the updated window state, and finish with `cu__session_end`. When you know an "
     "element's name or role, call `ui__find` (a few candidates with `ref`, never a pick) "
     "instead of reading the whole tree; `ui__inspect` with `interactiveOnly: true` returns "
@@ -273,7 +279,7 @@ def truncate_tool_value(
     if isinstance(val, str):
         return val[:max_str]
     if isinstance(val, dict):
-        return {
+        res = {
             str(k)[:40]: truncate_tool_value(
                 v,
                 max_str=_max_str_for_key(str(k), max_str, ui_tree_max),
@@ -283,6 +289,10 @@ def truncate_tool_value(
             )
             for k, v in list(val.items())[:16]
         }
+        for pk in ("settled", "settleMs"):
+            if pk in val and pk not in res:
+                res[pk] = val[pk]
+        return res
     if isinstance(val, list | tuple):
         return [
             truncate_tool_value(
@@ -426,6 +436,9 @@ def encode_tool_payload(
         or "snapshot" in output
     ):
         slim_out = {k: v for k, v in output.items() if k not in ("nodes", "elements", "rows")}
+        for pk in ("settled", "settleMs"):
+            if pk in output and pk not in slim_out:
+                slim_out[pk] = output[pk]
         # Vietnamese labels are up to 3 bytes per char: shrink the tree before giving up.
         for tree_max in (_UI_TREE_MAX, 2400, 1500, 800):
             body["output"] = truncate_tool_value(slim_out, ui_tree_max=tree_max)
@@ -438,7 +451,12 @@ def encode_tool_payload(
             slim_encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
             if len(slim_encoded.encode("utf-8")) <= MAX_TOOL_OUTPUT_BYTES:
                 return slim_encoded
-    minimal: dict[str, object] = {"status": status, "output": {"truncated": True}}
+    minimal_output: dict[str, object] = {"truncated": True}
+    if isinstance(output, dict):
+        for pk in ("settled", "settleMs"):
+            if pk in output:
+                minimal_output[pk] = output[pk]
+    minimal: dict[str, object] = {"status": status, "output": minimal_output}
     if hint is not None:
         minimal["hint"] = hint
     return json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))

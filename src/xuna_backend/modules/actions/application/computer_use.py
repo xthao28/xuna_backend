@@ -215,6 +215,59 @@ def is_editable_field_role(role: str) -> bool:
     return any(hint in lowered for hint in _EDITABLE_FIELD_ROLE_HINTS)
 
 
+def hit_test_node_at_coordinates(
+    nodes: list[dict[str, Any]],
+    x_norm: float,
+    y_norm: float,
+) -> dict[str, Any] | None:
+    """Finds the deepest/smallest UI node containing the normalized coordinate `(x_norm, y_norm)`.
+
+    Checks `bounds`, `boxNorm`, or `box` (either list `[xMin, yMin, xMax, yMax]` or
+    dict `{"x": ..., "y": ..., "width": ..., "height": ...}`).
+    """
+    best_match: dict[str, Any] | None = None
+    smallest_area: float = float("inf")
+
+    for node in nodes:
+        raw_bounds = node.get("bounds") or node.get("boxNorm") or node.get("box")
+        x_min: float | None = None
+        y_min: float | None = None
+        x_max: float | None = None
+        y_max: float | None = None
+
+        if isinstance(raw_bounds, list | tuple) and len(raw_bounds) >= 4:
+            try:
+                x_min = float(raw_bounds[0])
+                y_min = float(raw_bounds[1])
+                x_max = float(raw_bounds[2])
+                y_max = float(raw_bounds[3])
+            except (ValueError, TypeError):
+                continue
+        elif isinstance(raw_bounds, dict):
+            try:
+                x = float(raw_bounds.get("x", 0))
+                y = float(raw_bounds.get("y", 0))
+                w = float(raw_bounds.get("width", 0))
+                h = float(raw_bounds.get("height", 0))
+                x_min = x
+                y_min = y
+                x_max = x + w
+                y_max = y + h
+            except (ValueError, TypeError):
+                continue
+
+        if x_min is None or y_min is None or x_max is None or y_max is None:
+            continue
+
+        if x_min <= x_norm <= x_max and y_min <= y_norm <= y_max:
+            area = abs((x_max - x_min) * (y_max - y_min))
+            if area <= smallest_area:
+                smallest_area = area
+                best_match = node
+
+    return best_match
+
+
 def redact_ui_tree_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     redacted: list[dict[str, Any]] = []
     for raw in nodes:
@@ -760,6 +813,7 @@ class ComputerUseSessionRunner:
 
         if tool_name not in (
             "input.click",
+            "input.drag",
             "input.type_text",
             "input.key",
             "input.scroll",
@@ -801,11 +855,75 @@ class ComputerUseSessionRunner:
             # Typing inside active session does not unconditionally demand R3 proof
             requires_r3 = False
         elif tool_name == "input.click":
+            x_norm = arguments.get("xNorm")
+            y_norm = arguments.get("yNorm")
+            is_coord = isinstance(x_norm, int | float) and isinstance(y_norm, int | float)
+            if isinstance(x_norm, int | float) and isinstance(y_norm, int | float):
+                if (
+                    float(x_norm) < 0.0
+                    or float(x_norm) > 1.0
+                    or float(y_norm) < 0.0
+                    or float(y_norm) > 1.0
+                ):
+                    raise ComputerUseError("out_of_bounds")
+                if target_node is None:
+                    target_node = hit_test_node_at_coordinates(
+                        list(state.cached_nodes.values()), float(x_norm), float(y_norm)
+                    )
             node_name = str((target_node or {}).get("name") or arguments.get("elementName") or "")
             if (
                 is_consequential_element_name(node_name)
                 or (target_node is not None and is_password_ui_node(target_node))
                 or arguments.get("isPasswordField") is True
+                or (
+                    state.typed_count > 0
+                    and (
+                        target_node is None
+                        or not is_editable_field_role(str((target_node or {}).get("role") or ""))
+                    )
+                )
+                or (is_coord and target_node is None)
+            ):
+                requires_r3 = True
+        elif tool_name == "input.drag":
+            from_x = arguments.get("fromXNorm") or arguments.get("startXNorm")
+            from_y = arguments.get("fromYNorm") or arguments.get("startYNorm")
+            to_x = arguments.get("toXNorm") or arguments.get("endXNorm")
+            to_y = arguments.get("toYNorm") or arguments.get("endYNorm")
+
+            for c in (from_x, from_y, to_x, to_y):
+                if isinstance(c, int | float) and (c < 0.0 or c > 1.0):
+                    raise ComputerUseError("out_of_bounds")
+
+            start_node = (
+                hit_test_node_at_coordinates(
+                    list(state.cached_nodes.values()), float(from_x), float(from_y)
+                )
+                if isinstance(from_x, int | float) and isinstance(from_y, int | float)
+                else None
+            )
+            end_node = (
+                hit_test_node_at_coordinates(
+                    list(state.cached_nodes.values()), float(to_x), float(to_y)
+                )
+                if isinstance(to_x, int | float) and isinstance(to_y, int | float)
+                else None
+            )
+
+            if (
+                (start_node is not None and is_password_ui_node(start_node))
+                or (end_node is not None and is_password_ui_node(end_node))
+                or state.typed_count > 0
+                or (
+                    start_node is not None
+                    and is_consequential_element_name(str(start_node.get("name") or ""))
+                )
+                or (
+                    end_node is not None
+                    and is_consequential_element_name(str(end_node.get("name") or ""))
+                )
+                or start_node is None
+                or end_node is None
             ):
                 requires_r3 = True
         elif tool_name == "input.key":

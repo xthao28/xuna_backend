@@ -70,7 +70,9 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "cu.session_extend",
     "ui.inspect",
     "ui.find",
+    "ui.observe_hybrid",
     "input.click",
+    "input.drag",
     "input.type_text",
     "input.key",
     "input.scroll",
@@ -283,6 +285,21 @@ def _host_tool_spec(tool_name: str, item: EligibleHostTool) -> ToolSpec:
         "type": "string",
         "enum": list(item.aliases),
     }
+    if tool_name == "input.click":
+        if "xNorm" not in props:
+            props["xNorm"] = {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "Normalized X coordinate [0.0, 1.0] relative to target window",
+            }
+        if "yNorm" not in props:
+            props["yNorm"] = {
+                "type": "number",
+                "minimum": 0.0,
+                "maximum": 1.0,
+                "description": "Normalized Y coordinate [0.0, 1.0] relative to target window",
+            }
     schema_copy["properties"] = props
     return ToolSpec(
         name=to_function_name(tool_name),

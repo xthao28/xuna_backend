@@ -126,7 +126,24 @@ def _serialize_message(
             "content": m.content or None,
             "tool_calls": serialized_calls,
         }
-    msg: dict[str, Any] = {"role": m.role.value, "content": m.content}
+    content_val: Any
+    if m.image_base64:
+        blocks: list[dict[str, Any]] = []
+        if m.content:
+            blocks.append({"type": "text", "text": m.content})
+        blocks.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{m.image_mime_type};base64,{m.image_base64}",
+                },
+            }
+        )
+        content_val = blocks
+    else:
+        content_val = m.content
+
+    msg: dict[str, Any] = {"role": m.role.value, "content": content_val}
     if m.tool_call_id:
         msg["tool_call_id"] = m.tool_call_id
     return msg
@@ -249,9 +266,11 @@ class OpenAICompatibleTextGenerator:
                             data = line[5:].strip()
                             if data == "[DONE]":
                                 break
-                            chunk = json.loads(data)
-                            usage = chunk.get("usage") or usage
-                            for choice in chunk.get("choices") or []:
+                            parsed_chunk = json.loads(data)
+                            if not isinstance(parsed_chunk, dict):
+                                continue
+                            usage = parsed_chunk.get("usage") or usage
+                            for choice in parsed_chunk.get("choices") or []:
                                 delta = choice.get("delta") or {}
                                 if delta.get("content"):
                                     yield TextDelta(str(delta["content"]))

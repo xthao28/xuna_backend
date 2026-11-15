@@ -67,6 +67,18 @@
       },
       "canonical": "{\"a\":\"Xin chào XUNA\",\"b\":{\"x\":false,\"y\":true},\"m\":[3,1,2],\"z\":10}",
       "argsSha256": "ca2e6fc38621ad445bdf2dcec9ff5bad3a8ecffa7e13ff46e66eadc8392a4341"
+    },
+    {
+      "input": {
+        "xNorm": 0.5,
+        "yNorm": 0.15625,
+        "fromXNorm": 0.0,
+        "toXNorm": 1.0,
+        "tiny": 0.00001,
+        "micro": 1e-7
+      },
+      "canonical": "{\"fromXNorm\":0,\"micro\":1e-7,\"tiny\":0.00001,\"toXNorm\":1,\"xNorm\":0.5,\"yNorm\":0.15625}",
+      "argsSha256": "1d0559cb45f6c6337b5264efd510cc527689ac8d598e1261ecfe7797eaa97323"
     }
   ]
 }
