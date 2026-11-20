@@ -229,6 +229,9 @@ class ActionSummary:
                 return f"Tìm và phát '{q}' trên {target}"[:240]
             case "app.launch":
                 app_id = str(arguments.get("id", arguments.get("app_id", "")))[:40]
+                open_target = str(arguments.get("openTarget") or "").strip()[:60]
+                if open_target:
+                    return f"Mở '{open_target}' bằng {app_id} trên {target}"[:240]
                 return f"Mở {app_id} trên {target}"[:240]
             case "app.open_scheme":
                 uri = str(arguments.get("uri", "ứng dụng"))[:40]
@@ -304,9 +307,16 @@ class ActionSummary:
                 # The search text is the model's: it is not shown or stored.
                 return f"Tìm phần tử trong cửa sổ đang mở trên {target}"[:240]
             case "input.click":
+                menu_path = str(arguments.get("menuPath") or "").strip()[:60]
+                if menu_path:
+                    return f"Chọn menu '{menu_path}' trên {target}"[:240]
                 elem = str(arguments.get("elementName") or arguments.get("elementId") or "phần tử")[
                     :40
                 ]
+                if arguments.get("hover") is True:
+                    return f"Di chuột lên '{elem}' trên {target}"[:240]
+                if arguments.get("clickCount") == 2:
+                    return f"Nhấp đúp vào '{elem}' trên {target}"[:240]
                 return f"Nhấp vào '{elem}' trên {target}"[:240]
             case "input.type_text":
                 typed = str(arguments.get("text", ""))[:60]
@@ -555,6 +565,9 @@ class ActionSummary:
                 return f"Search and play '{q}' on {target}"[:240]
             case "app.launch":
                 app_id = str(arguments.get("id", arguments.get("app_id", "")))[:40]
+                open_target = str(arguments.get("openTarget") or "").strip()[:60]
+                if open_target:
+                    return f"Open '{open_target}' in {app_id} on {target}"[:240]
                 return f"Open {app_id} on {target}"[:240]
             case "app.open_scheme":
                 uri = str(arguments.get("uri", "app"))[:40]
@@ -624,9 +637,16 @@ class ActionSummary:
             case "ui.find":
                 return f"Find elements in the active window on {target}"[:240]
             case "input.click":
+                menu_path = str(arguments.get("menuPath") or "").strip()[:60]
+                if menu_path:
+                    return f"Select menu '{menu_path}' on {target}"[:240]
                 elem = str(arguments.get("elementName") or arguments.get("elementId") or "element")[
                     :40
                 ]
+                if arguments.get("hover") is True:
+                    return f"Hover over '{elem}' on {target}"[:240]
+                if arguments.get("clickCount") == 2:
+                    return f"Double-click '{elem}' on {target}"[:240]
                 return f"Click '{elem}' on {target}"[:240]
             case "input.type_text":
                 typed = str(arguments.get("text", ""))[:60]

@@ -875,3 +875,175 @@ def test_turn_sse_action_pending_emits_lowercase_risk_r3_and_rejects_15m_scope()
     assert len(pending_events) == 1
     assert pending_events[0]["risk"] == "r3"
     assert pending_events[0]["hostId"] == str(host.host_id)
+
+
+def test_sse_abnormal_exit_cleans_up_cu_session_while_normal_exit_preserves_it() -> None:
+    from xuna_backend.modules.actions.application.computer_use import ComputerUseSessionState
+    from xuna_backend.modules.cognition.application.ports import ProviderUnavailableError
+
+    def _seed_online_host_and_cu(
+        client: TestClient, host_repo: _FakeHostRepo, owner_id: uuid.UUID, sid: str
+    ) -> Host:
+        host = Host(
+            host_id=HostId.generate(),
+            owner_id=owner_id,
+            alias=HostAlias("Mac"),
+            platform=HostPlatform.MACOS,
+            hostname="mac-host",
+            os_version="15.0",
+            agent_version="0.1.0",
+            public_key=FAKE_PUBKEY,
+            status=HostStatus.ACTIVE,
+            created_at=NOW,
+        )
+        asyncio.run(host_repo.save_host(host))
+        asyncio.run(
+            host_repo.save_manifest(
+                Manifest(
+                    host_id=host.host_id,
+                    tools=(
+                        ToolDescriptor(
+                            name="ui.inspect",
+                            description="Inspect",
+                            input_schema={
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                            output_schema={
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                            family=ToolFamily.UI,
+                            risk=RiskTier.R2,
+                        ),
+                    ),
+                    updated_at=NOW,
+                )
+            )
+        )
+        asyncio.run(
+            host_repo.set_grants(
+                host.host_id,
+                [Grant(host.host_id, ToolFamily.UI, RiskTier.R2, True, NOW)],
+            )
+        )
+        hub = client.app.state.host_session_hub  # type: ignore[union-attr]
+
+        async def send_frame(raw: str) -> None:
+            frame = json.loads(raw)
+            if frame.get("method") == "tools/call":
+                hub.on_response(
+                    str(host.host_id),
+                    frame["id"],
+                    {
+                        "structuredContent": {"nodes": []},
+                        "_meta": {"xuna/status": "ok"},
+                    },
+                )
+
+        async def noop() -> None:
+            return None
+
+        asyncio.run(hub.open_session(str(host.host_id), object(), send_frame, noop, noop))
+        now_utc = datetime.now(UTC)
+        cu_store = client.app.state.cu_session_store  # type: ignore[union-attr]
+        asyncio.run(
+            cu_store.start(
+                ComputerUseSessionState(
+                    session_id=sid,
+                    owner_id=owner_id,
+                    host_id=host.host_id,
+                    goal="Work",
+                    allowed_apps=("notes",),
+                    allowed_domains=(),
+                    max_steps=20,
+                    max_minutes=10,
+                    started_at_utc=now_utc,
+                    last_heartbeat_at=now_utc,
+                    target_alias="Mac",
+                ),
+                now_utc,
+            )
+        )
+        return host
+
+    # 1. Normal SSE completion keeps active CU session running (F14b reuse)
+    llm_ok = _ScriptedLLM([[TextDelta("Xong."), _done(5)]])
+    c1, i1, o1, hr1, _, _ = _build_test_harness(llm_ok)
+    _seed_online_host_and_cu(c1, hr1, o1.owner_id, "cu-sse-keep")
+    resp_ok = c1.post(
+        f"/v1/conversations/{PET_HEX}/turns",
+        headers={"Authorization": f"Bearer {i1.token('owner-1')}"},
+        json={"schemaVersion": 1, "text": "Tiếp tục đi", "clientCapabilities": ["host_actions_v1"]},
+    )
+    assert resp_ok.status_code == 200
+    assert asyncio.run(c1.app.state.cu_session_store.get_active_for_owner(o1.owner_id)) is not None  # type: ignore[union-attr]
+
+    # 2. ProviderUnavailableError mid-turn emits event: cu_session (ended) before error
+    async def fail_stream(_req: ChatRequest, _round_idx: int) -> AsyncIterator[ChatEvent]:
+        if False:
+            yield _done()
+        raise ProviderUnavailableError("down")
+
+    c2, i2, o2, hr2, _, _ = _build_test_harness(_ScriptedLLM(fail_stream))
+    _seed_online_host_and_cu(c2, hr2, o2.owner_id, "cu-sse-prov")
+    resp_fail = c2.post(
+        f"/v1/conversations/{PET_HEX}/turns",
+        headers={"Authorization": f"Bearer {i2.token('owner-1')}"},
+        json={"schemaVersion": 1, "text": "Kiểm tra", "clientCapabilities": ["host_actions_v1"]},
+    )
+    assert resp_fail.status_code == 200
+    parsed = _parse_sse(resp_fail.text)
+    cu_idx = next(idx for idx, (name, _) in enumerate(parsed) if name == "cu_session")
+    err_idx = next(idx for idx, (name, _) in enumerate(parsed) if name == "error")
+    assert cu_idx < err_idx
+    assert parsed[cu_idx][1]["status"] == "ended"
+    assert parsed[cu_idx][1]["endReason"] == "turn_provider_error"
+    assert asyncio.run(c2.app.state.cu_session_store.get_active_for_owner(o2.owner_id)) is None  # type: ignore[union-attr]
+
+    # 3. Client disconnect mid-stream triggers finally: cleanup (turn_disconnected)
+    from starlette.requests import Request as StarletteRequest
+
+    from xuna_backend.modules.conversation.api.routes import TurnBody, turn
+
+    started_evt = asyncio.Event()
+
+    async def slow_stream(_req: ChatRequest, _round_idx: int) -> AsyncIterator[ChatEvent]:
+        yield TextDelta("Đợi chút...")
+        started_evt.set()
+        await asyncio.sleep(5.0)
+        yield _done()
+
+    c3, _i3, o3, hr3, _, _ = _build_test_harness(_ScriptedLLM(slow_stream))
+    _seed_online_host_and_cu(c3, hr3, o3.owner_id, "cu-sse-disc")
+
+    async def _disconnect_mid_stream() -> None:
+        scope = {
+            "type": "http",
+            "method": "POST",
+            "path": f"/v1/conversations/{PET_HEX}/turns",
+            "headers": [],
+            "app": c3.app,
+        }
+        req = StarletteRequest(scope)
+        req.state.request_id = "req-disc-1"
+        resp = await turn(
+            pet_id=PET_HEX,
+            body=TurnBody(
+                schemaVersion=1,
+                text="Chạy dài",
+                clientCapabilities=["host_actions_v1"],
+            ),
+            request=req,
+            owner=o3,
+            session=_DummyDbSession(),  # type: ignore[arg-type]
+        )
+        body_iter = resp.body_iterator
+        first_chunk = await body_iter.__anext__()  # type: ignore[union-attr]
+        assert "Đợi chút" in str(first_chunk)
+        await body_iter.aclose()  # type: ignore[union-attr]
+
+    asyncio.run(_disconnect_mid_stream())
+    assert asyncio.run(c3.app.state.cu_session_store.get_active_for_owner(o3.owner_id)) is None  # type: ignore[union-attr]

@@ -115,6 +115,27 @@ class AutonomousJobRunner:
     def compactor(self) -> SubGoalCompactor:
         return self._compactor
 
+    async def get_job(self, job_id: uuid.UUID) -> AutonomousJob | None:
+        return await self._store.get(job_id)
+
+    async def get_active_for_owner(self, owner_id: uuid.UUID) -> AutonomousJob | None:
+        return await self._store.get_active_for_owner(owner_id)
+
+    async def list_for_owner(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        limit: int = 10,
+        offset: int = 0,
+        states: tuple[AutonomousJobState, ...] | None = None,
+    ) -> list[AutonomousJob]:
+        return await self._store.list_for_owner(
+            owner_id=owner_id,
+            limit=limit,
+            offset=offset,
+            states=states,
+        )
+
     async def start_job(
         self,
         job_id: uuid.UUID,
@@ -712,8 +733,7 @@ class OrchestratorJobStepExecutor:
                 "sub_goal_index": idx,
                 "role": "user",
                 "content": (
-                    f"Execute Sub-Goal {idx + 1}: "
-                    f"{current_sg.title} ({current_sg.description})"
+                    f"Execute Sub-Goal {idx + 1}: " f"{current_sg.title} ({current_sg.description})"
                 ),
             }
             active_turns.append(user_prompt_turn)
@@ -815,18 +835,12 @@ class OrchestratorJobStepExecutor:
         job_apps_raw = cp.get("apps") or (
             call.arguments.get("apps") if isinstance(call.arguments, dict) else None
         )
-        job_apps = (
-            [str(a) for a in job_apps_raw]
-            if isinstance(job_apps_raw, list | tuple)
-            else []
-        )
+        job_apps = [str(a) for a in job_apps_raw] if isinstance(job_apps_raw, list | tuple) else []
         job_domains_raw = cp.get("domains") or (
             call.arguments.get("domains") if isinstance(call.arguments, dict) else None
         )
         job_domains = (
-            [str(d) for d in job_domains_raw]
-            if isinstance(job_domains_raw, list | tuple)
-            else []
+            [str(d) for d in job_domains_raw] if isinstance(job_domains_raw, list | tuple) else []
         )
         job_mission_env: dict[str, object] = {
             "goal": job.goal,
@@ -834,9 +848,7 @@ class OrchestratorJobStepExecutor:
             "domains": job_domains,
             "maxSteps": job.max_steps,
             "maxMinutes": int(cp.get("max_minutes") or cp.get("maxMinutes") or 15),
-            "planSteps": [
-                sg.title if hasattr(sg, "title") else str(sg) for sg in job.sub_goals
-            ],
+            "planSteps": [sg.title if hasattr(sg, "title") else str(sg) for sg in job.sub_goals],
         }
         action_ctx = ActionContext(
             owner_id=job.owner_id,

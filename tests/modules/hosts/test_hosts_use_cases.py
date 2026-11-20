@@ -11,6 +11,7 @@ from tests.helpers import MemoryAuditLog, SimulatedDevice
 from xuna_backend.modules.audit.domain.event import AuditAction
 from xuna_backend.modules.hosts.application.use_cases import (
     ClaimEnrollmentCommand,
+    DevApprovalInput,
     HostError,
     OpenHostSessionCommand,
     StartEnrollmentCommand,
@@ -19,6 +20,7 @@ from xuna_backend.modules.hosts.application.use_cases import (
     invoke_tool,
     list_hosts,
     open_host_session,
+    preflight_tool,
     record_duplicate_session_rejection,
     record_manifest,
     revoke_host,
@@ -27,14 +29,17 @@ from xuna_backend.modules.hosts.application.use_cases import (
 )
 from xuna_backend.modules.hosts.domain.crypto import (
     HostProofPurpose,
+    args_sha256,
     host_proof_message,
     public_key_fingerprint_b64url,
 )
 from xuna_backend.modules.hosts.domain.entities import (
     Grant,
     Host,
+    HostAlias,
     HostId,
     HostPlatform,
+    HostStatus,
     Manifest,
     PendingEnrollment,
     RiskTier,
@@ -90,9 +95,7 @@ class FakeHostRepository:
     async def set_grants(self, host_id: HostId, grants: list[Grant]) -> None:
         self.grants[host_id.value] = list(grants)
 
-    async def suspend_r2_plus_grants_for_owner(
-        self, owner_id: uuid.UUID, now: datetime
-    ) -> int:
+    async def suspend_r2_plus_grants_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int:
         from dataclasses import replace
 
         suspended = 0
@@ -508,5 +511,239 @@ def test_revoke_during_live_session_and_grant_enforcement() -> None:
                 ),
                 now,
             )
+
+    asyncio.run(_run())
+
+
+def test_preflight_tool_and_dev_approval_forwarding() -> None:
+    async def _run() -> None:
+        now = datetime(2026, 11, 19, 12, 0, tzinfo=UTC)
+        owner_id = uuid.uuid4()
+        other_owner_id = uuid.uuid4()
+        host_repo = FakeHostRepository()
+        audit = MemoryAuditLog()
+        hub = InMemoryHostSessionHub()
+
+        host = Host(
+            host_id=HostId.generate(),
+            owner_id=owner_id,
+            alias=HostAlias("Mac"),
+            platform=HostPlatform.MACOS,
+            hostname="mac-host",
+            os_version="15.0",
+            agent_version="0.1.0",
+            public_key=SimulatedDevice().public_key,
+            status=HostStatus.ACTIVE,
+            created_at=now,
+        )
+        await host_repo.save_host(host)
+        input_click = ToolDescriptor(
+            name="input.click",
+            description="Click",
+            input_schema={
+                "type": "object",
+                "properties": {"xNorm": {"type": "number"}, "yNorm": {"type": "number"}},
+                "additionalProperties": False,
+            },
+            output_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            family=ToolFamily.INPUT,
+            risk=RiskTier.R2,
+        )
+        cu_start = ToolDescriptor(
+            name="cu.session_start",
+            description="Start CU",
+            input_schema={
+                "type": "object",
+                "properties": {"goal": {"type": "string"}, "apps": {"type": "array"}},
+                "additionalProperties": False,
+            },
+            output_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            family=ToolFamily.CU,
+            risk=RiskTier.R3,
+        )
+        await record_manifest(host_repo, host.host_id, [input_click, cu_start], now)
+        await set_grants(
+            host_repo,
+            audit,
+            owner_id,
+            host.host_id,
+            [(ToolFamily.CU, RiskTier.R3, True), (ToolFamily.INPUT, RiskTier.R3, True)],
+            now,
+        )
+
+        # Offline host -> host_offline
+        with pytest.raises(HostError) as off_err:
+            await preflight_tool(
+                host_repo, hub, owner_id, host.host_id, "input.click", {"xNorm": 0.5, "yNorm": 0.5}
+            )
+        assert off_err.value.code == "host_offline"
+
+        sent_frames: list[dict[str, object]] = []
+        reply_mode = ["ok"]
+
+        async def send_frame(raw: str) -> None:
+            import json
+
+            frame = json.loads(raw)
+            sent_frames.append(frame)
+            if frame.get("method") == "xuna/preflight":
+                if reply_mode[0] == "timeout":
+                    return
+                if reply_mode[0] == "denied":
+                    hub.on_response(
+                        str(host.host_id),
+                        frame["id"],
+                        {
+                            "preflight": {
+                                "status": "denied",
+                                "errorCode": "password_field_forbidden",
+                            }
+                        },
+                    )
+                    return
+                if reply_mode[0] == "malformed":
+                    hub.on_response(
+                        str(host.host_id),
+                        frame["id"],
+                        {"unexpected": True},
+                    )
+                    return
+                hub.on_response(
+                    str(host.host_id),
+                    frame["id"],
+                    {
+                        "preflight": {
+                            "status": "ok",
+                            "effectiveRisk": "R3",
+                            "reasonCode": "sensitive_control",
+                            "element": {"role": "button", "name": "SecretSubmitBtn"},
+                        }
+                    },
+                )
+            elif frame.get("method") == "tools/call":
+                hub.on_response(
+                    str(host.host_id),
+                    frame["id"],
+                    {
+                        "structuredContent": {"sessionId": "cu-signed"},
+                        "_meta": {"xuna/status": "ok"},
+                    },
+                )
+
+        async def close_frame() -> None:
+            return None
+
+        await hub.open_session(str(host.host_id), object(), send_frame, close_frame, close_frame)
+
+        # 1. preflight ok: sends exact {"name", "arguments"} and never audits element_name
+        audit.events.clear()
+        res_ok = await preflight_tool(
+            host_repo, hub, owner_id, host.host_id, "input.click", {"xNorm": 0.5, "yNorm": 0.5}
+        )
+        assert res_ok.status == "ok"
+        assert res_ok.effective_risk == RiskTier.R3
+        assert res_ok.reason_code == "sensitive_control"
+        assert res_ok.element_role == "button"
+        assert res_ok.element_name == "SecretSubmitBtn"
+        assert sent_frames[-1]["params"] == {
+            "name": "input.click",
+            "arguments": {"xNorm": 0.5, "yNorm": 0.5},
+        }
+        assert audit.events == []
+
+        # 2. preflight denied
+        reply_mode[0] = "denied"
+        res_denied = await preflight_tool(
+            host_repo, hub, owner_id, host.host_id, "input.click", {"xNorm": 0.5, "yNorm": 0.5}
+        )
+        assert res_denied.status == "denied"
+        assert res_denied.error_code == "password_field_forbidden"
+
+        # 3. preflight timeout
+        reply_mode[0] = "timeout"
+        res_timeout = await preflight_tool(
+            host_repo,
+            hub,
+            owner_id,
+            host.host_id,
+            "input.click",
+            {"xNorm": 0.5, "yNorm": 0.5},
+            deadline_ms=100,
+        )
+        assert res_timeout.status == "timeout"
+        assert res_timeout.error_code == "deadline_exceeded"
+
+        # 4. preflight malformed -> validation_failed
+        reply_mode[0] = "malformed"
+        with pytest.raises(HostError) as mal_err:
+            await preflight_tool(
+                host_repo, hub, owner_id, host.host_id, "input.click", {"xNorm": 0.5, "yNorm": 0.5}
+            )
+        assert mal_err.value.code == "validation_failed"
+
+        # 5. wrong owner & missing tool
+        with pytest.raises(HostError) as own_err:
+            await preflight_tool(host_repo, hub, other_owner_id, host.host_id, "input.click", {})
+        assert own_err.value.code == "not_found"
+
+        with pytest.raises(HostError) as tool_err:
+            await preflight_tool(host_repo, hub, owner_id, host.host_id, "input.nonexistent", {})
+        assert tool_err.value.code == "tool_not_found"
+
+        # 6. invoke_tool with dev_approval forwards exact approval fields when approved
+        approval_id = str(uuid.uuid4())
+        expires_at = "2026-11-19T13:00:00+00:00"
+        sig_b64 = base64.b64encode(b"\x11" * 64).decode("ascii")
+        pub_b64 = base64.b64encode(b"\x04" + b"\x22" * 64).decode("ascii")
+        dev_approval = DevApprovalInput(
+            approval_id=approval_id,
+            expires_at=expires_at,
+            scope="once",
+            signature=sig_b64,
+            public_key=pub_b64,
+        )
+        cu_args: dict[str, object] = {"goal": "Signed", "apps": ["notes"]}
+
+        # include_dev_approval=False STILL denies even if dev_approval is supplied
+        denied_inv = await invoke_tool(
+            host_repo,
+            hub,
+            audit,
+            owner_id,
+            host.host_id,
+            "cu.session_start",
+            cu_args,
+            now,
+            include_dev_approval=False,
+            dev_approval=dev_approval,
+        )
+        assert denied_inv.status == "denied"
+        assert denied_inv.error_code == "approval_required"
+
+        ok_inv = await invoke_tool(
+            host_repo,
+            hub,
+            audit,
+            owner_id,
+            host.host_id,
+            "cu.session_start",
+            cu_args,
+            now,
+            include_dev_approval=True,
+            dev_approval=dev_approval,
+        )
+        assert ok_inv.status == "ok"
+        call_params = sent_frames[-1]["params"]
+        assert isinstance(call_params, dict)
+        meta = call_params["_meta"]
+        assert isinstance(meta, dict)
+        assert meta["xuna/approval"] == {
+            "approvalId": approval_id,
+            "argsSha256": args_sha256(cu_args),
+            "expiresAt": expires_at,
+            "scope": "once",
+            "signature": sig_b64,
+            "publicKey": pub_b64,
+        }
 
     asyncio.run(_run())

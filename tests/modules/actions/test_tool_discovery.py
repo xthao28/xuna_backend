@@ -76,24 +76,43 @@ from xuna_backend.modules.hosts.domain.entities import (
 
 NOW = datetime(2026, 11, 5, 9, 0, 0, tzinfo=UTC)
 
-# 24 real tool names: more than the 20 catalog slots, so the catalog must defer.
+# 40 real tool names: more than the 36 catalog slots, so the catalog must defer.
 _TOOL_NAMES: tuple[str, ...] = (
+    "window.active_context",
+    "app.launch",
+    "app.list_allowed",
+    "url.open",
+    "finder.reveal",
     "media.play_pause",
     "media.next",
     "media.previous",
     "media.volume_set",
     "media.now_playing",
     "media.play_search",
-    "app.launch",
-    "app.list_allowed",
-    "app.open_scheme",
-    "url.open",
-    "ui.accessibility_tree",
+    "notes.create",
+    "notes.search",
+    "reminders.create",
+    "calendar.list_events",
+    "workspace.open",
+    "workspace.git_summary",
+    "web.navigate",
+    "web.snapshot",
+    "mcp.list_servers",
+    "mcp.call",
+    "clipboard.write",
+    "clipboard.read",
+    "cu.session_start",
+    "ui.inspect",
+    "ui.find",
+    "ui.observe_hybrid",
+    "input.click",
+    "input.drag",
+    "input.type_text",
+    "input.key",
+    "input.scroll",
+    "cu.session_end",
     "notifications.list",
     "notifications.action",
-    "clipboard.read",
-    "clipboard.write",
-    "window.active_context",
     "selection.read",
     "dev.ports",
     "system.vitals",
@@ -194,7 +213,7 @@ def test_catalog_defers_overflow_behind_meta_tools() -> None:
     specs = _build()
     names = [s.name for s in specs]
     assert len(specs) <= MAX_CATALOG_TOOLS
-    assert names[:4] == ["app__launch", "app__list_allowed", "ui__accessibility_tree", "url__open"]
+    assert names[:4] == ["window__active_context", "app__launch", "app__list_allowed", "url__open"]
     assert {TOOL_SEARCH_FUNCTION, TOOL_DESCRIBE_FUNCTION, TOOL_INVOKE_FUNCTION} <= set(names)
     direct = {n.replace("__", ".") for n in names if "__" in n}
     search_spec = next(s for s in specs if s.name == TOOL_SEARCH_FUNCTION)
@@ -243,7 +262,7 @@ def _eligible(granted: set[ToolFamily] | None = None) -> dict[str, Any]:
     [
         ("tv volume", "tv.control"),
         ("smart home light", "smarthome.control"),
-        ("clipboard", "clipboard.read"),
+        ("clipboard text", "clipboard.read"),
         ("tv.list_devices", "tv.list_devices"),
     ],
 )
@@ -466,7 +485,7 @@ def test_remote_error_code_reaches_model_with_hint() -> None:
         "_meta": {"xuna/status": "failed", "xuna/errorCode": "stale_ref"},
     }
     orch, _, ctx = _orchestrator(response=response)
-    call = ToolCall(id="c6", name="ui__accessibility_tree", arguments={})
+    call = ToolCall(id="c6", name="ui__inspect", arguments={})
     payload = json.loads(asyncio.run(orch.handle_call(call, ctx)).content)
     assert payload["status"] == "failed"
     assert payload["output"]["errorCode"] == "stale_ref"
@@ -527,7 +546,7 @@ class _ScriptedLLM:
 
 
 _SPEC = ToolSpec(
-    name="ui__accessibility_tree",
+    name="ui__inspect",
     description="UI",
     parameters={"type": "object", "properties": {}, "additionalProperties": False},
 )
@@ -549,8 +568,7 @@ def _run_turn(
 def test_turn_allows_long_observe_act_verify_chains() -> None:
     steps = 8  # more than the old 3-round cap
     calls = [
-        [ToolCall(id=f"s{i}", name="ui__accessibility_tree", arguments={"step": i})]
-        for i in range(steps)
+        [ToolCall(id=f"s{i}", name="ui__inspect", arguments={"step": i})] for i in range(steps)
     ]
     llm = _ScriptedLLM(calls, "Xong rồi nha.")
     executed: list[str] = []
@@ -567,7 +585,7 @@ def test_turn_allows_long_observe_act_verify_chains() -> None:
 
 def test_turn_rounds_are_capped_and_last_round_is_tool_free() -> None:
     calls = [
-        [ToolCall(id=f"r{i}", name="ui__accessibility_tree", arguments={"step": i})]
+        [ToolCall(id=f"r{i}", name="ui__inspect", arguments={"step": i})]
         for i in range(MAX_TOOL_ROUNDS + 5)
     ]
     llm = _ScriptedLLM(calls, "Mình dừng ở đây.")
@@ -584,9 +602,7 @@ def test_turn_rounds_are_capped_and_last_round_is_tool_free() -> None:
 
 def test_identical_failing_call_is_blocked_on_third_attempt() -> None:
     same = {"action": "invoke_ref", "refId": "ui_9"}
-    calls = [
-        [ToolCall(id=f"f{i}", name="ui__accessibility_tree", arguments=same)] for i in range(4)
-    ]
+    calls = [[ToolCall(id=f"f{i}", name="ui__inspect", arguments=same)] for i in range(4)]
     llm = _ScriptedLLM(calls, "Mình không bấm được nút đó.")
     executed: list[str] = []
     tool_contents: list[str] = []
@@ -840,4 +856,3 @@ def test_direct_tool_invoke_from_search_args_without_tool_describe() -> None:
     assert invoke_payload["status"] == "ok"
     assert hub.sent[0]["name"] == "tv.control"
     assert hub.sent[0]["arguments"] == {"command": "volume_up"}
-

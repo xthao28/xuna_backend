@@ -10,6 +10,7 @@ import asyncio
 import json
 import logging
 import re
+import secrets
 import time
 from collections.abc import AsyncIterator, Iterable, Mapping
 from typing import Any
@@ -159,6 +160,9 @@ class OpenAICompatibleTextGenerator:
         api_key_header: str = "authorization",
         provider_label: str = NAME,
         reasoning_effort: str = "",
+        max_attempts: int = 5,
+        retry_base_delay_s: float = 1.0,
+        retry_max_delay_s: float = 8.0,
     ) -> None:
         if not base_url.startswith(("http://", "https://")) or not model:
             raise ValueError("base_url (http/https) and model are required")
@@ -179,14 +183,51 @@ class OpenAICompatibleTextGenerator:
         self._transport = transport
         self._label = provider_label
         self._api_key = api_key
+        self._max_attempts = max(1, max_attempts)
+        self._retry_base_delay_s = max(0.0, retry_base_delay_s)
+        self._retry_max_delay_s = max(0.0, retry_max_delay_s)
         self._tool_call_extra: dict[str, dict[str, Any]] = {}
 
     def _payload(self, request: ChatRequest) -> dict[str, Any]:
+        serialized_messages: list[dict[str, Any]] = []
+        pending_tool_images: list[tuple[str, str]] = []
+
+        def _flush_pending_images() -> None:
+            if not pending_tool_images:
+                return
+            blocks: list[dict[str, Any]] = [
+                {"type": "text", "text": "Attached screenshot from tool observation."}
+            ]
+            for mime, b64 in pending_tool_images:
+                blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{b64}"},
+                    }
+                )
+            serialized_messages.append({"role": Role.USER.value, "content": blocks})
+            pending_tool_images.clear()
+
+        for m in request.messages:
+            if m.role is Role.TOOL and m.image_base64:
+                # OpenAI & Gemini OpenAI-compat reject `image_url` parts inside `role="tool"`.
+                # Send text-only tool result first, then attach screenshot in a `role="user"` turn.
+                msg: dict[str, Any] = {"role": Role.TOOL.value, "content": m.content}
+                if m.tool_call_id:
+                    msg["tool_call_id"] = m.tool_call_id
+                serialized_messages.append(msg)
+                pending_tool_images.append((m.image_mime_type, m.image_base64))
+                continue
+            if m.role is not Role.TOOL:
+                _flush_pending_images()
+            serialized_messages.append(_serialize_message(m, self._tool_call_extra))
+        _flush_pending_images()
+
         payload: dict[str, Any] = {
             "model": self._model,
             "stream": True,
             "max_tokens": request.max_output_tokens,
-            "messages": [_serialize_message(m, self._tool_call_extra) for m in request.messages],
+            "messages": serialized_messages,
         }
         if self._reasoning_effort:
             payload["reasoning_effort"] = self._reasoning_effort
@@ -206,151 +247,210 @@ class OpenAICompatibleTextGenerator:
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
         started = time.perf_counter()
+        deadline = started + request.timeout_s
         timeout = httpx.Timeout(request.timeout_s, connect=min(5.0, request.timeout_s))
         usage: dict[str, int] = {}
         calls: dict[int, dict[str, Any]] = {}
         pre_call_extra: dict[str, Any] = {}
+        emitted_any = False
         try:
-            max_attempts = 3
             async with httpx.AsyncClient(timeout=timeout, transport=self._transport) as client:
-                for attempt in range(max_attempts):
+                for attempt in range(self._max_attempts):
                     calls.clear()
                     pre_call_extra.clear()
-                    async with client.stream(
-                        "POST", self._url, json=self._payload(request), headers=self._headers
-                    ) as response:
-                        if response.status_code != 200:
-                            error_bytes = b""
-                            try:
-                                async for chunk in response.aiter_bytes():
-                                    error_bytes += chunk
-                                    if len(error_bytes) >= 1024:
-                                        error_bytes = error_bytes[:1024]
-                                        break
-                            except httpx.HTTPError:
-                                pass
-                            raw_snippet = error_bytes.decode("utf-8", errors="replace")
-                            secrets_to_redact = [self._api_key]
-                            for val in self._headers.values():
-                                secrets_to_redact.append(val)
-                                if val.lower().startswith("bearer "):
-                                    secrets_to_redact.append(val[7:].strip())
-                            sanitized_snippet = _sanitize_error_text(
-                                raw_snippet, secrets_to_redact
-                            )
-                            logger.warning(
-                                "Provider error (status %d): %s",
-                                response.status_code,
-                                sanitized_snippet,
-                            )
-                            if _is_quota_exhausted(sanitized_snippet):
-                                raise ProviderUnavailableError(
-                                    f"quota_exhausted: {sanitized_snippet}"
-                                )
-                            if response.status_code in (429, 503) and attempt + 1 < max_attempts:
-                                retry_after_raw = response.headers.get("retry-after", "")
+                    remaining = max(deadline - time.perf_counter(), 1.0)
+                    attempt_timeout = httpx.Timeout(
+                        min(request.timeout_s, remaining),
+                        connect=min(5.0, remaining),
+                    )
+                    try:
+                        async with client.stream(
+                            "POST",
+                            self._url,
+                            json=self._payload(request),
+                            headers=self._headers,
+                            timeout=attempt_timeout,
+                        ) as response:
+                            if response.status_code != 200:
+                                error_bytes = b""
                                 try:
-                                    delay_s = min(max(float(retry_after_raw), 0.8), 4.0)
-                                except ValueError:
-                                    delay_s = 1.2 * (attempt + 1)
-                                await asyncio.sleep(delay_s)
-                                continue
-                            raise ProviderUnavailableError(
-                                f"status {response.status_code}: {sanitized_snippet}"
-                                if sanitized_snippet
-                                else f"status {response.status_code}"
-                            )
-                        async for line in response.aiter_lines():
-                            if not line.startswith("data:"):
-                                continue
-                            data = line[5:].strip()
-                            if data == "[DONE]":
-                                break
-                            parsed_chunk = json.loads(data)
-                            if not isinstance(parsed_chunk, dict):
-                                continue
-                            usage = parsed_chunk.get("usage") or usage
-                            for choice in parsed_chunk.get("choices") or []:
-                                delta = choice.get("delta") or {}
-                                if delta.get("content"):
-                                    yield TextDelta(str(delta["content"]))
-                                tool_calls = delta.get("tool_calls") or []
-                                delta_thought = (
-                                    delta.get("thought_signature")
-                                    or delta.get("extra_content")
+                                    async for chunk in response.aiter_bytes():
+                                        error_bytes += chunk
+                                        if len(error_bytes) >= 8192:
+                                            error_bytes = error_bytes[:8192]
+                                            break
+                                except httpx.HTTPError:
+                                    pass
+                                raw_snippet = error_bytes.decode("utf-8", errors="replace")
+                                secrets_to_redact = [self._api_key]
+                                for val in self._headers.values():
+                                    secrets_to_redact.append(val)
+                                    if val.lower().startswith("bearer "):
+                                        secrets_to_redact.append(val[7:].strip())
+                                sanitized_snippet = _sanitize_error_text(
+                                    raw_snippet, secrets_to_redact
                                 )
-                                if delta_thought is not None and not tool_calls:
-                                    norm_delta_extra = _normalize_thought_signature(delta_thought)
-                                    if norm_delta_extra:
-                                        if not calls:
-                                            for k, v in norm_delta_extra.items():
-                                                if (
-                                                    k in pre_call_extra
-                                                    and isinstance(pre_call_extra[k], str)
-                                                    and isinstance(v, str)
-                                                ):
-                                                    pre_call_extra[k] += v
-                                                else:
-                                                    pre_call_extra[k] = v
-                                        else:
-                                            slot = calls[max(calls.keys())]
-                                            if slot["extra"] is None:
-                                                slot["extra"] = dict(norm_delta_extra)
-                                            elif isinstance(slot["extra"], dict):
+                                bounded_snippet = sanitized_snippet[:1024]
+                                logger.warning(
+                                    "Provider error (status %d): %s",
+                                    response.status_code,
+                                    bounded_snippet,
+                                )
+                                if _is_quota_exhausted(sanitized_snippet):
+                                    raise ProviderUnavailableError(
+                                        f"quota_exhausted: {bounded_snippet}"
+                                    )
+                                if (
+                                    response.status_code in (429, 503)
+                                    and attempt + 1 < self._max_attempts
+                                ):
+                                    retry_after_raw = response.headers.get("retry-after", "")
+                                    try:
+                                        delay_s = min(max(float(retry_after_raw), 0.8), 10.0)
+                                    except ValueError:
+                                        exp_delay = min(
+                                            self._retry_max_delay_s,
+                                            self._retry_base_delay_s * (2**attempt),
+                                        )
+                                        jitter = (
+                                            secrets.randbelow(351) / 1000.0
+                                            if self._retry_base_delay_s > 0
+                                            else 0.0
+                                        )
+                                        delay_s = exp_delay + jitter
+                                    remaining_after = deadline - time.perf_counter()
+                                    if remaining_after > 1.5:
+                                        sleep_s = min(delay_s, remaining_after - 1.5)
+                                        if sleep_s > 0:
+                                            await asyncio.sleep(sleep_s)
+                                        continue
+                                raise ProviderUnavailableError(
+                                    f"status {response.status_code}: {bounded_snippet}"
+                                    if bounded_snippet
+                                    else f"status {response.status_code}"
+                                )
+                            async for line in response.aiter_lines():
+                                if not line.startswith("data:"):
+                                    continue
+                                data = line[5:].strip()
+                                if data == "[DONE]":
+                                    break
+                                parsed_chunk = json.loads(data)
+                                if not isinstance(parsed_chunk, dict):
+                                    continue
+                                usage = parsed_chunk.get("usage") or usage
+                                for choice in parsed_chunk.get("choices") or []:
+                                    delta = choice.get("delta") or {}
+                                    if delta.get("content"):
+                                        emitted_any = True
+                                        yield TextDelta(str(delta["content"]))
+                                    tool_calls = delta.get("tool_calls") or []
+                                    if tool_calls:
+                                        emitted_any = True
+                                    delta_thought = delta.get("thought_signature") or delta.get(
+                                        "extra_content"
+                                    )
+                                    if delta_thought is not None and not tool_calls:
+                                        norm_delta_extra = _normalize_thought_signature(
+                                            delta_thought
+                                        )
+                                        if norm_delta_extra:
+                                            if not calls:
                                                 for k, v in norm_delta_extra.items():
                                                     if (
-                                                        k in slot["extra"]
-                                                        and isinstance(slot["extra"][k], str)
+                                                        k in pre_call_extra
+                                                        and isinstance(pre_call_extra[k], str)
                                                         and isinstance(v, str)
                                                     ):
-                                                        slot["extra"][k] += v
+                                                        pre_call_extra[k] += v
                                                     else:
-                                                        slot["extra"][k] = v
-                                for call in tool_calls:
-                                    slot = calls.setdefault(
-                                        int(call.get("index", 0)),
-                                        {"id": "", "name": "", "args": "", "extra": None},
-                                    )
-                                    if pre_call_extra:
-                                        if slot["extra"] is None:
-                                            slot["extra"] = dict(pre_call_extra)
-                                        elif isinstance(slot["extra"], dict):
-                                            for k, v in pre_call_extra.items():
-                                                if (
-                                                    k in slot["extra"]
-                                                    and isinstance(slot["extra"][k], str)
-                                                    and isinstance(v, str)
-                                                ):
-                                                    slot["extra"][k] = v + slot["extra"][k]
-                                                else:
-                                                    slot["extra"].setdefault(k, v)
-                                        pre_call_extra.clear()
-                                    function = call.get("function") or {}
-                                    slot["id"] = call.get("id") or slot["id"]
-                                    slot["name"] = function.get("name") or slot["name"]
-                                    slot["args"] += function.get("arguments") or ""
-                                    raw_extra = (
-                                        call.get("extra_content")
-                                        or call.get("thought_signature")
-                                        or delta.get("thought_signature")
-                                    )
-                                    if raw_extra is not None:
-                                        norm_extra = _normalize_thought_signature(raw_extra)
-                                        if norm_extra:
+                                                        pre_call_extra[k] = v
+                                            else:
+                                                slot = calls[max(calls.keys())]
+                                                if slot["extra"] is None:
+                                                    slot["extra"] = dict(norm_delta_extra)
+                                                elif isinstance(slot["extra"], dict):
+                                                    for k, v in norm_delta_extra.items():
+                                                        if (
+                                                            k in slot["extra"]
+                                                            and isinstance(slot["extra"][k], str)
+                                                            and isinstance(v, str)
+                                                        ):
+                                                            slot["extra"][k] += v
+                                                        else:
+                                                            slot["extra"][k] = v
+                                    for call in tool_calls:
+                                        slot = calls.setdefault(
+                                            int(call.get("index", 0)),
+                                            {"id": "", "name": "", "args": "", "extra": None},
+                                        )
+                                        if pre_call_extra:
                                             if slot["extra"] is None:
-                                                slot["extra"] = dict(norm_extra)
+                                                slot["extra"] = dict(pre_call_extra)
                                             elif isinstance(slot["extra"], dict):
-                                                for k, v in norm_extra.items():
+                                                for k, v in pre_call_extra.items():
                                                     if (
                                                         k in slot["extra"]
                                                         and isinstance(slot["extra"][k], str)
                                                         and isinstance(v, str)
                                                     ):
-                                                        slot["extra"][k] += v
+                                                        slot["extra"][k] = v + slot["extra"][k]
                                                     else:
-                                                        slot["extra"][k] = v
-                        break
+                                                        slot["extra"].setdefault(k, v)
+                                            pre_call_extra.clear()
+                                        function = call.get("function") or {}
+                                        slot["id"] = call.get("id") or slot["id"]
+                                        slot["name"] = function.get("name") or slot["name"]
+                                        slot["args"] += function.get("arguments") or ""
+                                        raw_extra = (
+                                            call.get("extra_content")
+                                            or call.get("thought_signature")
+                                            or delta.get("thought_signature")
+                                        )
+                                        if raw_extra is not None:
+                                            norm_extra = _normalize_thought_signature(raw_extra)
+                                            if norm_extra:
+                                                if slot["extra"] is None:
+                                                    slot["extra"] = dict(norm_extra)
+                                                elif isinstance(slot["extra"], dict):
+                                                    for k, v in norm_extra.items():
+                                                        if (
+                                                            k in slot["extra"]
+                                                            and isinstance(slot["extra"][k], str)
+                                                            and isinstance(v, str)
+                                                        ):
+                                                            slot["extra"][k] += v
+                                                        else:
+                                                            slot["extra"][k] = v
+                            break
+                    except (
+                        httpx.TimeoutException,
+                        httpx.ConnectError,
+                        httpx.RemoteProtocolError,
+                    ) as error:
+                        logger.warning("Provider transport error (%s)", type(error).__name__)
+                        remaining_after = deadline - time.perf_counter()
+                        if (
+                            not emitted_any
+                            and attempt + 1 < self._max_attempts
+                            and remaining_after > 1.5
+                        ):
+                            exp_delay = min(
+                                self._retry_max_delay_s,
+                                self._retry_base_delay_s * (2**attempt),
+                            )
+                            jitter = (
+                                secrets.randbelow(351) / 1000.0
+                                if self._retry_base_delay_s > 0
+                                else 0.0
+                            )
+                            sleep_s = min(exp_delay + jitter, remaining_after - 1.5)
+                            if sleep_s > 0:
+                                await asyncio.sleep(sleep_s)
+                            continue
+                        raise ProviderUnavailableError(type(error).__name__) from error
         except (httpx.HTTPError, json.JSONDecodeError) as error:
+            logger.warning("Provider transport error (%s)", type(error).__name__)
             raise ProviderUnavailableError(type(error).__name__) from error
         for slot in calls.values():
             try:
@@ -359,9 +459,7 @@ class OpenAICompatibleTextGenerator:
                 arguments = {}
             if isinstance(arguments, dict) and slot["name"]:
                 call_id = str(slot["id"])
-                extra_dict = (
-                    slot.get("extra") if isinstance(slot.get("extra"), dict) else None
-                )
+                extra_dict = slot.get("extra") if isinstance(slot.get("extra"), dict) else None
                 if extra_dict and call_id:
                     if len(self._tool_call_extra) >= 128:
                         self._tool_call_extra.clear()
@@ -421,6 +519,7 @@ class OpenAICompatibleEmbedder:
                 response.raise_for_status()
                 data = response.json()
         except (httpx.HTTPError, json.JSONDecodeError) as error:
+            logger.warning("Provider transport error (%s)", type(error).__name__)
             raise ProviderUnavailableError(type(error).__name__) from error
 
         items = data.get("data")

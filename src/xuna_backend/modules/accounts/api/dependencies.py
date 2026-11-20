@@ -12,7 +12,7 @@ from fastapi import Depends, Request
 
 from xuna_backend.core.db import DbSession
 from xuna_backend.core.errors import AppError
-from xuna_backend.modules.accounts.application.authenticate import authenticate
+from xuna_backend.modules.accounts.application.authenticate import authenticate_with_status
 from xuna_backend.modules.accounts.application.ports import (
     AuthUnavailableError,
     InvalidTokenError,
@@ -35,12 +35,15 @@ async def current_owner(request: Request, session: Session) -> Owner:
     verifier: TokenVerifier = request.app.state.token_verifier
     owners_for: Callable[[Any], OwnerRepository] = request.app.state.owner_repository
     try:
-        owner = await authenticate(_bearer(request), verifier, owners_for(session))
+        owner, created = await authenticate_with_status(
+            _bearer(request), verifier, owners_for(session)
+        )
     except InvalidTokenError as error:
         raise AppError("unauthorized", HTTPStatus.UNAUTHORIZED) from error
     except AuthUnavailableError as error:
         raise AppError("auth_unavailable", HTTPStatus.SERVICE_UNAVAILABLE) from error
-    await session.commit()
+    if created:
+        await session.commit()
     return owner
 
 

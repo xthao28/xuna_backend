@@ -10,7 +10,7 @@ import math
 import struct
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from enum import StrEnum
 from typing import Literal
 
@@ -21,6 +21,7 @@ from xuna_backend.modules.cognition.application.ports import (
 )
 from xuna_backend.modules.cognition.domain.types import Locale, ToolSpec
 from xuna_backend.modules.conversation.application.chat_turn import (
+    CuCleanupCallback,
     ReplyBudget,
     ToolCallRunner,
     TurnContext,
@@ -181,10 +182,23 @@ class VoiceSession:
         code_generator: TextGenerator | None = None,
         tools: tuple[ToolSpec, ...] = (),
         tool_runner: ToolCallRunner | None = None,
+        turn_note: str | Callable[[Locale], str] | None = None,
+        cu_cleanup: CuCleanupCallback | None = None,
     ) -> AsyncIterator[SpokenTurnEvent]:
         if not text.strip():
             self.state = SessionState.IDLE
             return
+
+        resolved_note: Callable[[Locale], str] | None = None
+        if callable(turn_note):
+            resolved_note = turn_note
+        elif isinstance(turn_note, str) and turn_note:
+            note_text = turn_note
+
+            def _static_note(_loc: Locale, _n: str = note_text) -> str:
+                return _n
+
+            resolved_note = _static_note
 
         self.state = SessionState.REPLYING
         try:
@@ -195,6 +209,7 @@ class VoiceSession:
                 mode=mode,
                 budget=budget,
                 tools=tools,
+                turn_note=resolved_note,
             )
             chosen_gen = generator or self.generator
             text_events = chat_turn(
@@ -204,6 +219,7 @@ class VoiceSession:
                 locale_vi=(req.locale == Locale.VI),
                 tool_runner=tool_runner,
                 code_generator=code_generator,
+                cu_cleanup=cu_cleanup,
             )
             chosen_voice = voice or self.voice
             if self.speak and self.synthesizer is not None:

@@ -95,6 +95,7 @@ HARD_DENIED_PROCESS_TOKENS: frozenset[str] = frozenset(
         "dashlane",
         "keychain access",
         "credential manager",
+        "sudo",
         "banking",
         "vietcombank",
         "techcombank",
@@ -121,7 +122,7 @@ _CONSEQUENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 _PROMPT_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
-        r"(ignore\s+(all\s+)?(previous|prior)\s+instructions|system\s*override|new\s+instruction|open\s+terminal|run\s+powershell|send\s+email\s+to|type\s+password|disable\s+firewall)",
+        r"(ignore\s+(all\s+)?(?:(?:previous|prior)\s+)?instructions|system\s*override|new\s+instruction|open\s+terminal|run\s+powershell|send\s+email\s+to|type\s+password|disable\s+firewall)",
         re.IGNORECASE,
     ),
     re.compile(
@@ -161,6 +162,16 @@ def is_activation_key_combo(combo: str) -> bool:
     return spec.split("+")[-1].strip().lower() in _ACTIVATION_KEYS
 
 
+def _strip_delimiters(text: str) -> str:
+    return re.sub(r"[-_.\s]+", "", text)
+
+
+_NORMALIZED_HARD_DENIED_PROCESS_TOKENS: frozenset[str] = frozenset(
+    _strip_delimiters(token) for token in HARD_DENIED_PROCESS_TOKENS
+)
+_SUDO_BOUNDARY_RE = re.compile(r"(?:^|[^a-z0-9])sudo(?:$|[^a-z0-9])")
+
+
 def is_hard_denied_target(target: str | None) -> bool:
     if target is None:
         return True
@@ -169,10 +180,32 @@ def is_hard_denied_target(target: str | None) -> bool:
         return True
     if normalized in HARD_DENIED_PROCESS_TOKENS:
         return True
+    first_token = normalized.split()[0]
+    first_base = first_token.replace("\\", "/").split("/")[-1]
+    first_without_ext = first_base[:-4] if first_base.endswith((".exe", ".app")) else first_base
+    if first_base in {"sh", "cmd"} or first_without_ext in {"sh", "cmd"}:
+        return True
     base = normalized.replace("\\", "/").split("/")[-1]
     if base in HARD_DENIED_PROCESS_TOKENS:
         return True
-    return any(len(token) >= 4 and token in normalized for token in HARD_DENIED_PROCESS_TOKENS)
+    without_ext = base[:-4] if base.endswith((".exe", ".app")) else base
+    if without_ext in HARD_DENIED_PROCESS_TOKENS:
+        return True
+    stripped_norm = _strip_delimiters(normalized)
+    stripped_base = _strip_delimiters(base)
+    stripped_without_ext = _strip_delimiters(without_ext)
+    if (
+        stripped_norm in _NORMALIZED_HARD_DENIED_PROCESS_TOKENS
+        or stripped_base in _NORMALIZED_HARD_DENIED_PROCESS_TOKENS
+        or stripped_without_ext in _NORMALIZED_HARD_DENIED_PROCESS_TOKENS
+    ):
+        return True
+    if _SUDO_BOUNDARY_RE.search(normalized) is not None:
+        return True
+    return any(
+        len(denied_tok) >= 4 and denied_tok != "sudo" and denied_tok in stripped_norm
+        for denied_tok in _NORMALIZED_HARD_DENIED_PROCESS_TOKENS
+    )
 
 
 def is_password_ui_node(node: dict[str, Any]) -> bool:
@@ -355,9 +388,10 @@ class ComputerUseSessionState:
 
     Durable fields (UDC-17 S17.6, table `cu_sessions`): ids, goal while running, scope,
     budgets, `steps_used`, `typed_count`, UTC start and heartbeat times, `active` and
-    `stop_reason`. Process-local only, never stored: `cached_nodes` (the last UI tree) and
-    `typed_since_commit` (draft text). After a restart those are empty; `typed_count` still
-    tells the next commit card that text was typed.
+    `stop_reason`. Process-local only, never stored: `cached_nodes` (the last UI tree),
+    `typed_since_commit` (draft text), and `last_window` (`appId` / `windowTitle`). After a
+    restart those are empty; `typed_count` still tells the next commit card that text was
+    typed.
     """
 
     session_id: str
@@ -377,6 +411,9 @@ class ComputerUseSessionState:
     # ADR-0015 D1: text typed since the last signed commit (drafts run unsigned), shown on
     # the next commit card so the owner sees what will be sent. Memory only, never logged.
     typed_since_commit: list[str] = field(default_factory=list)
+    # F14b: process-local last observed foreground appId / windowTitle for follow-up turn
+    # continuity. Memory only, never persisted to PostgreSQL.
+    last_window: dict[str, str] = field(default_factory=dict)
     # How many drafts were typed since the last signed commit. Content-free and durable.
     typed_count: int = 0
     # Owner approvals this session asked for, counting the signature that started it
@@ -389,6 +426,34 @@ class ComputerUseSessionState:
     password_typed_attempts: int = 0
     injection_attempts_blocked: int = 0
     target_alias: str = ""
+
+    @property
+    def last_app_id(self) -> str | None:
+        val = self.last_window.get("appId")
+        return val if isinstance(val, str) and val else None
+
+    @last_app_id.setter
+    def last_app_id(self, value: str | None) -> None:
+        if isinstance(value, str):
+            cleaned = " ".join(value.split()).strip()[:64]
+            if cleaned:
+                self.last_window["appId"] = cleaned
+                return
+        self.last_window.pop("appId", None)
+
+    @property
+    def last_window_title(self) -> str | None:
+        val = self.last_window.get("windowTitle")
+        return val if isinstance(val, str) and val else None
+
+    @last_window_title.setter
+    def last_window_title(self, value: str | None) -> None:
+        if isinstance(value, str):
+            cleaned = " ".join(value.split()).strip()[:120]
+            if cleaned:
+                self.last_window["windowTitle"] = cleaned
+                return
+        self.last_window.pop("windowTitle", None)
 
 
 def session_expiry_reason(state: ComputerUseSessionState, now: datetime) -> str | None:
@@ -502,6 +567,7 @@ class InMemoryComputerUseSessionStore:
             state.goal = ""
         state.cached_nodes.clear()
         state.typed_since_commit.clear()
+        state.last_window.clear()
         state.typed_count = 0
         return state
 
@@ -822,9 +888,11 @@ class ComputerUseSessionRunner:
             raise ComputerUseError("unsupported_cu_tool", tool_name)
 
         # Reject any action whose arguments or target app leave the allowlist or hit denylist
-        target_app = str(
-            arguments.get("appId") or arguments.get("id") or arguments.get("name") or ""
-        ).strip().lower()
+        target_app = (
+            str(arguments.get("appId") or arguments.get("id") or arguments.get("name") or "")
+            .strip()
+            .lower()
+        )
         if target_app:
             if is_hard_denied_target(target_app):
                 state.outside_allowlist_attempts += 1

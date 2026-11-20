@@ -187,6 +187,79 @@ BOARD_MEDIA_KEY_SCHEMA: dict[str, object] = {
     "additionalProperties": False,
 }
 
+AUTONOMOUS_JOB_TOOL = "autonomous.job"
+AUTONOMOUS_JOB_FUNCTION_NAME = "autonomous_job"
+AUTONOMOUS_JOB_ACTIONS: tuple[str, ...] = (
+    "start",
+    "status",
+    "pause",
+    "resume",
+    "steer",
+    "cancel",
+)
+AUTONOMOUS_JOB_DESCRIPTION = (
+    "Start or manage a detached background multi-step autonomous job on an online host "
+    "that keeps running across phone screen locks (`start`, `status`, `pause`, `resume`, "
+    "`steer`, `cancel`)."
+)
+AUTONOMOUS_JOB_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": list(AUTONOMOUS_JOB_ACTIONS),
+        },
+        "goal": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+        },
+        "title": {
+            "type": "string",
+            "maxLength": 120,
+        },
+        "target": {
+            "type": "string",
+            "maxLength": 64,
+        },
+        "apps": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 64},
+            "maxItems": 8,
+        },
+        "domains": {
+            "type": "array",
+            "items": {"type": "string", "maxLength": 128},
+            "maxItems": 12,
+        },
+        "maxSteps": {
+            "type": "integer",
+            "minimum": 3,
+            "maximum": 50,
+        },
+        "maxMinutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20,
+        },
+        "jobId": {
+            "type": "string",
+            "maxLength": 64,
+        },
+        "instruction": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+        },
+        "reason": {
+            "type": "string",
+            "maxLength": 64,
+        },
+    },
+    "required": ["action"],
+    "additionalProperties": False,
+}
+
 
 def is_forbidden_tool_name(dotted_name: str) -> bool:
     if dotted_name in FORBIDDEN_TOOLS:
@@ -199,6 +272,8 @@ def to_function_name(tool_name: str) -> str:
     into an OpenAI-compatible function name (`media__play_pause`)."""
     if tool_name == WORKFLOW_TEMPLATE_TOOL:
         return WORKFLOW_TEMPLATE_FUNCTION_NAME
+    if tool_name == AUTONOMOUS_JOB_TOOL:
+        return AUTONOMOUS_JOB_FUNCTION_NAME
     if tool_name != BOARD_TOOL:
         validate_tool_name(tool_name)
     func_name = tool_name.replace(".", "__")
@@ -218,6 +293,12 @@ def from_function_name(func_name: str) -> str | None:
         WORKFLOW_TEMPLATE_TOOL,
     ):
         return WORKFLOW_TEMPLATE_TOOL
+    if func_name in (
+        AUTONOMOUS_JOB_FUNCTION_NAME,
+        "autonomous__job",
+        AUTONOMOUS_JOB_TOOL,
+    ):
+        return AUTONOMOUS_JOB_TOOL
     if "__" in func_name:
         parts = func_name.split("__")
         if len(parts) != 2 or not parts[0] or not parts[1]:

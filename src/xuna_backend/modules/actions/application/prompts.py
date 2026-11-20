@@ -68,6 +68,74 @@ _TOOL_DISCOVERY_MODULE_EN = (
     "(`argumentsJson` is a JSON string). Never guess argument names before describing."
 )
 
+_EXECUTION_LADDER_MODULE_VI = (
+    "\n- Thang thực thi 4 tầng (chọn tầng nhanh nhất và ít gián đoạn nhất cho yêu cầu):\n"
+    "  + Tầng 0 (Headless / 1 bước, ưu tiên cao nhất): Khi tác vụ làm được trực tiếp qua "
+    "công cụ nền, tiện ích hệ điều hành, media, ghi chú, nhắc việc, lịch, clipboard, workspace, "
+    "web hoặc MCP (`media__*`, `notes__*`, `reminders__*`, `calendar__*`, `clipboard__*`, "
+    "`workspace__*`, `web__*`, `mcp__*`) mà không cần bấm giao diện, hãy gọi thẳng trong 1 bước "
+    "— KHÔNG gọi `app__launch` hay `cu__session_start`.\n"
+    "  + Tầng 1 (OS Deep Open — 1 bước): Khi cần mở thư mục, dự án, tệp hoặc URL trong ứng "
+    "dụng, gọi thẳng `app__launch(id, openTarget)` / `url__open` / `finder__reveal` trong 1 bước "
+    "(không cần `cu__session_start`).\n"
+    "  + Tầng 2 (Continue-In-Place — không mở lại từ đầu): Nếu chưa rõ ngữ cảnh desktop hiện "
+    "tại hoặc khi người dùng yêu cầu thao tác trên cửa sổ đang mở sẵn (không yêu cầu mở "
+    "tệp/dự án mới), hãy kiểm tra `window__active_context` (trả cửa sổ tiền cảnh và "
+    "`runningApps`) hoặc đi tiếp trong phiên CU đang mở trước. Nếu đã có phiên CU đang mở "
+    "cho đúng ứng dụng, dùng tiếp ngay không gọi lại `cu__session_start`/`app__launch`. "
+    "Nếu `window__active_context` cho thấy ứng dụng đích đã ở tiền cảnh hoặc `cu__session_start` "
+    "trả `targetAlreadyFocused: true` (đặc biệt kèm `snapshotId` và `nodes`), KHÔNG BAO GIỜ gọi "
+    "`app__launch` mà thao tác tiếp ngay trên snapshot/cửa sổ hiện tại; chỉ gọi `app__launch(id)` "
+    "khi ứng dụng đích chưa ở tiền cảnh.\n"
+    "  + Tầng 3 (Fast AX + Vision Set-of-Marks + Xác minh thật theo Quy tắc H1): Dùng "
+    "`ui__find` / `ui__inspect` (`interactiveOnly: true`) hoặc `ui__observe_hybrid` khi cần bố "
+    "cục trực quan hay nút biểu tượng — LƯU Ý QUAN TRỌNG: nếu chưa có phiên CU đang chạy, "
+    "BẮT BUỘC gọi `cu__session_start` TRƯỚC khi gọi `ui__inspect` / `ui__observe_hybrid` / "
+    "`ui__find` / `input__*` (không gọi `ui__*` trước `cu__session_start` kẻo tốn thêm một lần "
+    "xin duyệt; cần xem cửa sổ hiện tại trước thì dùng `window__active_context`). "
+    "`ui__observe_hybrid` vẽ nhãn số Set-of-Marks `[1]..[N]` "
+    "khớp 1:1 với `@s<id>:eN` và lưới tọa độ chuẩn hóa `[0.0, 1.0]` (`0.2, 0.4, 0.6, 0.8`) trực "
+    'tiếp lên ảnh để bấm theo `elementId` hoặc `(xNorm, yNorm)`. `status="ok"` trên '
+    "`input__*` hoặc `app__launch` chỉ xác nhận đã gửi lệnh chứ CHƯA chứng minh mục tiêu đạt "
+    "được: tuyệt đối không báo đã mở/phát/gửi/xong khi chưa kiểm chứng bằng thay đổi thật "
+    "(`uiChanged: true`, `changes.added`/`changed`, `windowTitle`, `media__now_playing`, hoặc "
+    "kiểm tra lại qua `ui__inspect` / `ui__observe_hybrid`)."
+)
+
+_EXECUTION_LADDER_MODULE_EN = (
+    "\n- 4-tier execution ladder (pick the fastest, least intrusive tier for the goal):\n"
+    "  + Tier 0 (Headless / 1-step, highest priority): When the request can be fulfilled directly "
+    "via background, OS-native, media, notes, reminders, calendar, clipboard, workspace, web, or "
+    "MCP tools (`media__*`, `notes__*`, `reminders__*`, `calendar__*`, `clipboard__*`, "
+    "`workspace__*`, `web__*`, `mcp__*`) without GUI interaction, call it directly in 1 step — "
+    "do NOT call `app__launch` or `cu__session_start`.\n"
+    "  + Tier 1 (OS Deep Open — 1-step): When asked to open a folder, project, file, or URL in "
+    "an app, call `app__launch(id, openTarget)` / `url__open` / `finder__reveal` in 1 step "
+    "(no `cu__session_start` needed).\n"
+    "  + Tier 2 (Continue-In-Place — do not restart from scratch): If current desktop state is "
+    "unclear or the owner asks to interact with an already-open window (without asking to open a "
+    "new file/project), inspect `window__active_context` (returns foreground window and "
+    "`runningApps`) or continue inside the active CU session first. If an active CU session "
+    "already covers the target app, continue in that session without re-calling "
+    "`cu__session_start`/`app__launch`. If `window__active_context` shows the target app is "
+    "already foreground or `cu__session_start` returns `targetAlreadyFocused: true` (especially "
+    "with `snapshotId` and `nodes`), NEVER call `app__launch`; act directly on the current "
+    "window/snapshot. Call `app__launch(id)` only when not yet focused.\n"
+    "  + Tier 3 (Fast AX + Vision Set-of-Marks + Real Verification / Rule H1): Use `ui__find` / "
+    "`ui__inspect` (`interactiveOnly: true`), or `ui__observe_hybrid` when visual layout or icon "
+    "controls are needed — IMPORTANT: when no CU session is active yet, ALWAYS call "
+    "`cu__session_start` BEFORE calling `ui__inspect`, `ui__observe_hybrid`, `ui__find`, or "
+    "`input__*` (never call `ui__*` before `cu__session_start` or it wastes an extra owner "
+    "prompt; use `window__active_context` first if you only need the foreground app). "
+    "`ui__observe_hybrid` overlays Set-of-Marks index labels `[1]..[N]` "
+    "matching `@s<id>:eN` and normalized `[0.0, 1.0]` grid ticks (`0.2, 0.4, 0.6, 0.8`) onto the "
+    'image so you can target via `elementId` or `(xNorm, yNorm)`. `status="ok"` on `input__*` '
+    "or `app__launch` only confirms dispatch, NOT goal completion: never claim an item is opened, "
+    "playing, or sent until verified by real state change (`uiChanged: true`, "
+    "`changes.added`/`changed`, `windowTitle`, `media__now_playing`, or re-inspection via "
+    "`ui__inspect` / `ui__observe_hybrid`)."
+)
+
 _UI_AUTOMATION_TOOLS = frozenset(
     {
         "cu__session_start",
@@ -81,7 +149,6 @@ _UI_AUTOMATION_TOOLS = frozenset(
         "input__type_text",
         "input__key",
         "input__scroll",
-        "ui__accessibility_tree",
         "ui__inspect_tree",
         "ui__tap_text",
         "ui__set_text",
@@ -110,17 +177,38 @@ _UI_SKILL_MODULE_VI = (
     "chiếu (`@s<id>:e<N>` hoặc `refId`). Không đoán mò mã phần tử khi chưa có cây UI.\n"
     "  2) Hành động (`Act`): Dùng đúng mã tham chiếu thực tế từ snapshot hiện hành để nhập "
     "liệu, bấm điều khiển hoặc gửi phím tắt.\n"
-    "  3) Xác minh (`Verify`): Đọc lại cây giao diện mới nhất trả về sau thao tác để "
-    "xác nhận kết quả hoặc thực hiện bước kế tiếp. Nếu gặp `stale_ref`, "
-    '`ambiguous_target`, hoặc `disposition.retry="unsafe"`, bắt buộc inspect lại cửa '
-    "sổ để lấy snapshot mới trước khi thử lại.\n"
-    "  Trên máy tính (khi có `cu__session_start`): mở phiên giới hạn bằng `cu__session_start` "
-    "(khai báo `goal`, danh sách `apps`, `domains`, `maxSteps`, `maxMinutes`), sau đó "
-    "`ui__inspect` / `ui__observe_hybrid` -> `input__click` / `input__drag` / "
-    "`input__type_text` / `input__key` / `input__scroll` (dùng `elementId` và "
-    "`elementName` từ `nodes`, hoặc tọa độ chuẩn hóa `xNorm, yNorm` trong [0.0, 1.0] "
-    "cho `input__click` / `input__drag` khi phần tử không có mã tham chiếu), kiểm tra "
-    "lại trạng thái cửa sổ, và đóng phiên bằng `cu__session_end`. Biết tên hoặc vai trò "
+    "  3) Xác minh (`Verify`, Quy tắc H1): Đọc lại cây giao diện, `uiChanged`, `changes`, "
+    '`waitSatisfied`, `settled`, `windowTitle` hoặc trạng thái thật sau thao tác; `status="ok"` '
+    "chỉ nghĩa là lệnh đã gửi, KHÔNG đồng nghĩa tác vụ đã xong. Nếu `uiChanged: false`, "
+    '`effect: "no_change"`, `waitSatisfied: false`, `settled: false`, `changes.truncated: true`, '
+    'hoặc gặp `stale_ref` / `ambiguous_target` / `disposition.retry="unsafe"`, bắt buộc '
+    "inspect lại qua `ui__inspect` / `ui__observe_hybrid` trước khi tiếp tục hoặc kết luận.\n"
+    "  Trên máy tính (khi có `cu__session_start`): nếu chỉ cần mở một thư mục, dự án hoặc "
+    "tệp trong thư mục cá nhân bằng một ứng dụng bất kỳ, gọi thẳng `app__launch` với cả "
+    "`id` và `openTarget` (mở trực tiếp cấp hệ điều hành trong 1 bước, không cần mở phiên "
+    "`cu__session_start`). Khi cần thao tác sâu bên trong giao diện ứng dụng, mở phiên giới hạn "
+    "bằng `cu__session_start` "
+    "(khai báo `goal`, danh sách `apps`, `domains`, `maxSteps`, `maxMinutes`): nếu kết quả "
+    "trả về `targetAlreadyFocused: true` (kèm `snapshotId`, `nodes`), ứng dụng đích đã ở tiền "
+    "cảnh nên KHÔNG gọi `app__launch` mà thao tác tiếp ngay trên các phần tử vừa trả về (hoặc "
+    "`ui__inspect` / `ui__observe_hybrid`); chỉ gọi `app__launch` (`id` nằm trong `apps`) khi "
+    "`targetAlreadyFocused` là `false` hoặc cần chuyển trang qua `web__navigate`. Dùng "
+    "`ui__inspect` / `ui__observe_hybrid` (vẽ nhãn số Set-of-Marks `[1]..[N]` khớp `@s<id>:eN` "
+    "và lưới tọa độ `[0.0, 1.0]` ở các mốc `0.2, 0.4, 0.6, 0.8`) -> `input__click` / "
+    "`input__drag` / `input__type_text` / `input__key` / `input__scroll` (dùng `elementId` và "
+    "mã `elementId` và `elementName` từ `nodes`, hoặc tọa độ chuẩn hóa `xNorm, yNorm` trong "
+    "[0.0, 1.0], `clickCount: 2` để nhấp đúp mở/kích hoạt dòng trong bảng danh sách, "
+    "`hover: true` chỉ để làm hiện nút ẩn khi rê chuột chứ chưa bấm — phải đọc `changes.added` "
+    "hoặc `ui__inspect` / `ui__observe_hybrid` rồi bấm vào nút vừa hiện, hoặc `menuPath` để "
+    "chọn thanh menu chuẩn của ứng dụng), "
+    "kiểm tra lại trạng thái cửa sổ (lưu ý: gõ từ khóa và bấm `Enter` trong ô tìm kiếm "
+    "chỉ mới hiển thị danh sách kết quả chứ CHƯA mở hay phát mục đích — bắt buộc đọc "
+    "`changes.added` hoặc gọi `ui__find` / `ui__inspect` / `ui__observe_hybrid` để bấm nút "
+    "hành động hoặc nhấp đúp `clickCount: 2` vào đúng dòng `row`/`cell` kết quả, xác minh "
+    "tiêu đề cửa sổ/trạng thái đã đổi thật), "
+    "và đóng phiên bằng `cu__session_end`. Khi tài khoản có nhiều thiết bị và người dùng "
+    "yêu cầu thao tác trên ứng dụng máy tính, luôn chọn đúng `target` máy tính thay vì công "
+    "cụ phát nhạc của điện thoại. Biết tên hoặc vai trò "
     "dùng thì gọi `ui__find` (trả vài ứng viên kèm `ref`, không tự chọn hộ) thay vì đọc "
     "cả cây; `ui__inspect` với `interactiveOnly: true` chỉ trả phần tử bấm/gõ được. Sau "
     "mỗi thao tác, đọc `changes` trong kết quả: `added` là phần tử mới kèm `ref`, "
@@ -145,17 +233,38 @@ _UI_SKILL_MODULE_EN = (
     "Never guess element IDs without a live UI tree.\n"
     "  2) Act: Pass the live reference from the current snapshot to set values, invoke "
     "controls, or send keyboard shortcuts.\n"
-    "  3) Verify: Inspect the updated UI tree returned in the tool output to confirm "
-    "completion or continue. If a tool returns `stale_ref`, `ambiguous_target`, or "
-    '`disposition.retry="unsafe"`, re-inspect the window to obtain fresh snapshot '
-    "references before retrying.\n"
-    "  On a desktop computer (when `cu__session_start` is available): start a bounded "
+    "  3) Verify (Rule H1): Inspect `uiChanged`, `changes`, `waitSatisfied`, `settled`, "
+    '`windowTitle`, or real system state after each action; `status="ok"` only means the '
+    "input was dispatched, NOT that the user's goal succeeded. If `uiChanged: false`, "
+    '`effect: "no_change"`, `waitSatisfied: false`, `settled: false`, `changes.truncated: true`, '
+    '`stale_ref`, `ambiguous_target`, or `disposition.retry="unsafe"` occurs, re-inspect via '
+    "`ui__inspect` / `ui__observe_hybrid` before retrying or reporting completion.\n"
+    "  On a desktop computer (when `cu__session_start` is available): when asked to open a "
+    "folder, project, or file inside the user home directory in any application, call "
+    "`app__launch` directly with both `id` and `openTarget` (1-step OS open-with, no "
+    "`cu__session_start` needed). When in-app UI interaction is needed, start a bounded "
     "session with `cu__session_start` (`goal`, target `apps`, `domains`, `maxSteps`, "
-    "`maxMinutes`), then run `ui__inspect` or `ui__observe_hybrid` -> `input__click` / "
+    "`maxMinutes`): if it returns `targetAlreadyFocused: true` (especially with `snapshotId` "
+    "and `nodes`), the target app is already focused — do NOT call `app__launch`, and instead "
+    "act directly on the returned element refs (or call `ui__inspect` / `ui__observe_hybrid`); "
+    "call `app__launch` (`id` from `apps`) only when `targetAlreadyFocused` is `false` (or "
+    "`web__navigate` for web pages). Use `ui__inspect` or `ui__observe_hybrid` (which draws "
+    "Set-of-Marks labels `[1]..[N]` matching `@s<id>:eN` and normalized `[0.0, 1.0]` grid ticks "
+    "at `0.2, 0.4, 0.6, 0.8`) -> `input__click` / "
     "`input__drag` / `input__type_text` / `input__key` / `input__scroll` (using live `elementId` "
-    "and `elementName` from `nodes`, or fallback normalized coordinates `xNorm, yNorm` in "
-    "[0.0, 1.0] for `input__click` / `input__drag` when elements lack reference IDs), "
-    "verify the updated window state, and finish with `cu__session_end`. When you know an "
+    "and `elementName` from `nodes`, or normalized coordinates `xNorm, yNorm` in [0.0, 1.0], "
+    "`clickCount: 2` to double-click/activate rows in lists or tables, `hover: true` only to "
+    "reveal hover-only controls without clicking — follow up by reading `changes.added` or "
+    "calling `ui__inspect` / `ui__observe_hybrid` and clicking the revealed control, or "
+    "`menuPath` to invoke the OS menu bar), "
+    "verify the updated window state (note: typing a query and pressing `Enter` in a search "
+    "field only displays results — NEVER stop after `Enter`! Read `changes.added` or call "
+    "`ui__find` / `ui__inspect` / `ui__observe_hybrid`, then click the explicit action "
+    "`button` or double-click `clickCount: 2` on the matching `row`/`cell` result item and "
+    "verify the window state changed), "
+    "and finish with `cu__session_end`. When multiple hosts exist and the owner asks for a "
+    "desktop application task, select the computer `target` rather than phone-only shortcuts. "
+    "When you know an "
     "element's name or role, call `ui__find` (a few candidates with `ref`, never a pick) "
     "instead of reading the whole tree; `ui__inspect` with `interactiveOnly: true` returns "
     "only controls. After each action read `changes` in the result: `added` lists new "
@@ -204,8 +313,14 @@ _FORGE_SKILL_MODULE_EN = (
     "`forge__custom_<toolName>`."
 )
 
-SYSTEM_PROMPT_VI = f"{CORE_TOOL_GUARDRAILS_VI}{_UI_SKILL_MODULE_VI}{_FORGE_SKILL_MODULE_VI}"
-SYSTEM_PROMPT_EN = f"{CORE_TOOL_GUARDRAILS_EN}{_UI_SKILL_MODULE_EN}{_FORGE_SKILL_MODULE_EN}"
+SYSTEM_PROMPT_VI = (
+    f"{CORE_TOOL_GUARDRAILS_VI}{_EXECUTION_LADDER_MODULE_VI}"
+    f"{_UI_SKILL_MODULE_VI}{_FORGE_SKILL_MODULE_VI}"
+)
+SYSTEM_PROMPT_EN = (
+    f"{CORE_TOOL_GUARDRAILS_EN}{_EXECUTION_LADDER_MODULE_EN}"
+    f"{_UI_SKILL_MODULE_EN}{_FORGE_SKILL_MODULE_EN}"
+)
 
 
 def _extract_tool_names(tools: Sequence[ToolSpec] | Collection[str] | None) -> set[str]:
@@ -242,6 +357,9 @@ def tool_system_prompt(
     if "tool_search" in active_names:
         parts.append(_TOOL_DISCOVERY_MODULE_EN if is_en else _TOOL_DISCOVERY_MODULE_VI)
 
+    if any("__" in name and name != "board__media_key" for name in active_names):
+        parts.append(_EXECUTION_LADDER_MODULE_EN if is_en else _EXECUTION_LADDER_MODULE_VI)
+
     if active_names & _UI_AUTOMATION_TOOLS:
         parts.append(_UI_SKILL_MODULE_EN if is_en else _UI_SKILL_MODULE_VI)
 
@@ -268,27 +386,95 @@ def _max_str_for_key(key: str, default: int, ui_tree_max: int) -> int:
     return default
 
 
+def _compact_ui_node(item: object, *, max_str: int = 120) -> object:
+    """Strips constant default flags from a UI node dict so 80-96 controls fit inside
+    `MAX_TOOL_OUTPUT_BYTES` (`6144` B) instead of truncating at ~20 controls."""
+    if not isinstance(item, dict):
+        return item[:max_str] if isinstance(item, str) else item
+    if "role" not in item or ("ref" not in item and "id" not in item):
+        return None
+    out: dict[str, object] = {}
+    if isinstance(item.get("ref"), str) and item["ref"]:
+        out["ref"] = str(item["ref"])[:48]
+    elif isinstance(item.get("id"), str) and item["id"]:
+        out["id"] = str(item["id"])[:48]
+    out["role"] = str(item.get("role", "unknown"))[:32]
+    raw_name = item.get("name") if isinstance(item.get("name"), str) else item.get("label")
+    if isinstance(raw_name, str) and raw_name:
+        out["name"] = raw_name[:max_str]
+    raw_val = item.get("value")
+    if isinstance(raw_val, str) and raw_val:
+        out["value"] = raw_val[:80]
+    if item.get("enabled") is False:
+        out["enabled"] = False
+    if item.get("visible") is False:
+        out["visible"] = False
+    if item.get("editable") is True:
+        out["editable"] = True
+    if item.get("isPassword") is True:
+        out["isPassword"] = True
+    if item.get("modal") is True:
+        out["modal"] = True
+    if isinstance(item.get("childrenCount"), int):
+        out["childrenCount"] = item["childrenCount"]
+    bounds = item.get("bounds")
+    if isinstance(bounds, list) and len(bounds) == 4:
+        out["bounds"] = [round(float(x), 3) if isinstance(x, int | float) else x for x in bounds]
+    return out
+
+
 def truncate_tool_value(
     val: object,
     *,
     max_str: int = 360,
     ui_tree_max: int = _UI_TREE_MAX,
     max_list: int = 16,
-    ui_nodes_max: int = 64,
+    ui_nodes_max: int = 96,
 ) -> object:
     if isinstance(val, str):
         return val[:max_str]
     if isinstance(val, dict):
-        res = {
-            str(k)[:40]: truncate_tool_value(
-                v,
-                max_str=_max_str_for_key(str(k), max_str, ui_tree_max),
-                ui_tree_max=ui_tree_max,
-                max_list=ui_nodes_max if str(k) == "nodes" else max_list,
-                ui_nodes_max=ui_nodes_max,
-            )
-            for k, v in list(val.items())[:16]
-        }
+        res: dict[str, object] = {}
+        for k, v in list(val.items())[:16]:
+            key_s = str(k)[:40]
+            if key_s in ("nodes", "matches", "added") and isinstance(v, list | tuple):
+                cap = ui_nodes_max if key_s in ("nodes", "matches") else max_list
+                compacted_items: list[object] = []
+                for elem in list(v)[:cap]:
+                    comp = _compact_ui_node(elem, max_str=min(max_str, 90))
+                    if comp is not None:
+                        compacted_items.append(comp)
+                    else:
+                        compacted_items.append(
+                            truncate_tool_value(
+                                elem,
+                                max_str=max_str,
+                                ui_tree_max=ui_tree_max,
+                                max_list=max_list,
+                                ui_nodes_max=ui_nodes_max,
+                            )
+                        )
+                res[key_s] = compacted_items
+            elif key_s == "runningApps" and isinstance(v, list | tuple):
+                running_cap = max(max_list, 32)
+                res[key_s] = [
+                    truncate_tool_value(
+                        elem,
+                        max_str=max_str,
+                        ui_tree_max=ui_tree_max,
+                        max_list=max_list,
+                        ui_nodes_max=ui_nodes_max,
+                    )
+                    for elem in list(v)[:running_cap]
+                ]
+            else:
+                res[key_s] = truncate_tool_value(
+                    v,
+                    max_str=_max_str_for_key(key_s, max_str, ui_tree_max),
+                    ui_tree_max=ui_tree_max,
+                    max_list=max_list,
+                    ui_nodes_max=ui_nodes_max,
+                )
         for pk in ("settled", "settleMs"):
             if pk in val and pk not in res:
                 res[pk] = val[pk]
@@ -325,8 +511,6 @@ def state_driven_hint(output: dict[str, object]) -> str | None:
             f"forge__synthesize_skill{target_clause}."
         )
     err_code = str(output.get("errorCode", "")).strip()
-    disp = output.get("disposition")
-    retry_unsafe = isinstance(disp, dict) and disp.get("retry") == "unsafe"
     if err_code == "cu_session_required":
         return (
             "Start a bounded session via cu__session_start (declaring goal, apps, domains, "
@@ -339,9 +523,18 @@ def state_driven_hint(output: dict[str, object]) -> str | None:
         "domain_not_in_session_allowlist",
     ):
         return (
-            "The active window or domain is outside the session's approved allowlist; bring "
-            "an approved app to the foreground, or add it to the running session with "
-            "cu__session_extend (one owner signature) instead of ending and restarting."
+            "The foreground window or domain is outside the session's approved allowlist "
+            "(for example, the target app has not been opened yet). Call `app__launch` with "
+            "an approved `id` from this session's `apps` to open and focus it before calling "
+            "`ui__inspect` again, or add a new app/domain with `cu__session_extend` "
+            "(one owner signature) instead of ending and restarting."
+        )
+    if err_code in ("denylisted_target_forbidden", "hard_denied_window"):
+        return (
+            "A restricted terminal or system window is currently in the foreground (or was "
+            "targeted). Never interact with restricted windows; if your task targets an "
+            "approved app in this session, call `app__launch` to bring that approved app to "
+            "the foreground first, then call `ui__inspect`."
         )
     if err_code == "session_scope_limit":
         return (
@@ -405,12 +598,49 @@ def state_driven_hint(output: dict[str, object]) -> str | None:
             "The action needs a refId from the current UI snapshot; inspect the window "
             "and pass one of its refs instead of omitting refId."
         )
-    if err_code in ("stale_ref", "ambiguous_target") or retry_unsafe:
+    if err_code == "target_not_found":
         return (
-            "Snapshot reference is stale or unsafe to retry blindly; re-inspect the window, "
-            "or call ui__find for the element you need, to obtain fresh snapshot references "
-            "before acting."
+            "No matching folder or file was found in the owner's home directory for "
+            "`openTarget`. Ask the owner for the exact folder/file name or relative path."
         )
+    if err_code == "stale_ref":
+        return (
+            "Snapshot reference is stale; re-inspect via ui__inspect, ui__observe_hybrid, "
+            "or ui__find to obtain fresh snapshot references before acting."
+        )
+    if err_code == "ambiguous_target":
+        return (
+            "Target is ambiguous (multiple candidates matched); specify a disambiguated "
+            "relative path or re-inspect with ui__find / ui__observe_hybrid instead of guessing."
+        )
+    if not err_code:
+        if output.get("effect") == "no_change" or output.get("uiChanged") is False:
+            return (
+                "The action produced no visible change in the window ('no_change' / "
+                "uiChanged=false) — Rule H1: do NOT report task completion and do not repeat "
+                "the identical single click. Inspect visually with ui__observe_hybrid, activate "
+                "list/table items with clickCount=2 (double-click) or Enter, hover=true to reveal "
+                "hidden controls, or use menuPath."
+            )
+        if output.get("waitSatisfied") is False:
+            return (
+                "The waitFor/waitForGone condition was not satisfied (waitSatisfied=false). "
+                "Rule H1: do NOT report task completion; inspect the window with ui__inspect or "
+                "ui__observe_hybrid to verify the actual state before continuing."
+            )
+        if output.get("settled") is False:
+            return (
+                "The UI was still transitioning when captured (settled=false). Rule H1: "
+                "re-inspect the settled window with ui__inspect or ui__observe_hybrid before "
+                "acting or reporting completion."
+            )
+        changes = output.get("changes")
+        if isinstance(changes, dict) and changes.get("truncated") is True:
+            return (
+                "The post-action diff (changes.truncated=true) was truncated and may omit new "
+                "or moved controls. Re-inspect with ui__inspect or ui__observe_hybrid before "
+                "acting or reporting completion."
+            )
     return None
 
 
@@ -431,9 +661,7 @@ def encode_tool_payload(
     if len(encoded.encode("utf-8")) <= MAX_TOOL_OUTPUT_BYTES:
         return encoded
     if isinstance(output, dict) and (
-        "compactUiTree" in output
-        or "compactAriaTree" in output
-        or "snapshot" in output
+        "compactUiTree" in output or "compactAriaTree" in output or "snapshot" in output
     ):
         slim_out = {k: v for k, v in output.items() if k not in ("nodes", "elements", "rows")}
         for pk in ("settled", "settleMs"):
@@ -445,12 +673,30 @@ def encode_tool_payload(
             slim_encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
             if len(slim_encoded.encode("utf-8")) <= MAX_TOOL_OUTPUT_BYTES:
                 return slim_encoded
-    if isinstance(output, dict) and isinstance(output.get("nodes"), list):
-        for nodes_max in (48, 32, 20, 12):
-            body["output"] = truncate_tool_value(output, ui_nodes_max=nodes_max)
+    raw_nodes_val = output.get("nodes") if isinstance(output, dict) else None
+    if isinstance(output, dict) and isinstance(raw_nodes_val, list):
+        total_nodes = len(raw_nodes_val)
+        for nodes_max in (96, 72, 56, 40, 28, 16, 12):
+            truncated_out = truncate_tool_value(output, ui_nodes_max=nodes_max)
+            if isinstance(truncated_out, dict) and nodes_max < total_nodes:
+                truncated_out["nodesTruncated"] = True
+                truncated_out["totalNodes"] = total_nodes
+            body["output"] = truncated_out
             slim_encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
             if len(slim_encoded.encode("utf-8")) <= MAX_TOOL_OUTPUT_BYTES:
                 return slim_encoded
+    if isinstance(output, dict) and isinstance(output.get("changes"), dict):
+        for change_cap in (12, 8, 4):
+            body["output"] = truncate_tool_value(output, max_list=change_cap)
+            slim_encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+            if len(slim_encoded.encode("utf-8")) <= MAX_TOOL_OUTPUT_BYTES:
+                return slim_encoded
+        no_changes_out = {k: v for k, v in output.items() if k != "changes"}
+        no_changes_out["changes"] = {"truncated": True}
+        body["output"] = truncate_tool_value(no_changes_out)
+        slim_encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+        if len(slim_encoded.encode("utf-8")) <= MAX_TOOL_OUTPUT_BYTES:
+            return slim_encoded
     minimal_output: dict[str, object] = {"truncated": True}
     if isinstance(output, dict):
         for pk in ("settled", "settleMs"):

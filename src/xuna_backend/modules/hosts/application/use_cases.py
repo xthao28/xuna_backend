@@ -7,6 +7,7 @@ suspension), LAN peer metadata, revocation, and dev/test tool invocation.
 
 import base64
 import hashlib
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,7 @@ from xuna_backend.modules.hosts.application.ports import (
     HostRepository,
     HostSessionHub,
 )
+from xuna_backend.modules.hosts.application.xtp_frames import parse_preflight_result
 from xuna_backend.modules.hosts.domain.crypto import (
     SIGNATURE_SIZE,
     HostProofPurpose,
@@ -134,6 +136,27 @@ class ToolInvocationResult:
     text: str
     duration_ms: int
     error_code: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DevApprovalInput:
+    approval_id: str | None = None
+    expires_at: str | None = None
+    scope: str | None = None
+    signature: str | None = None
+    public_key: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ToolPreflightResult:
+    tool_name: str
+    status: str
+    effective_risk: RiskTier | None
+    reason_code: str | None
+    error_code: str | None
+    element_role: str | None
+    element_name: str | None
+    duration_ms: int
 
 
 async def start_enrollment(
@@ -581,11 +604,7 @@ async def self_enroll_host(
 
     owned = await hosts.list_hosts(owner_id)
     existing = next(
-        (
-            h
-            for h in owned
-            if h.status == HostStatus.ACTIVE and h.public_key == command.public_key
-        ),
+        (h for h in owned if h.status == HostStatus.ACTIVE and h.public_key == command.public_key),
         None,
     )
 
@@ -629,9 +648,7 @@ async def self_enroll_host(
         await hosts.set_grants(host.host_id, grants)
 
     if parsed_tools is not None:
-        manifest: Manifest | None = await record_manifest(
-            hosts, host.host_id, parsed_tools, now
-        )
+        manifest: Manifest | None = await record_manifest(hosts, host.host_id, parsed_tools, now)
     else:
         manifest = await hosts.get_manifest(host.host_id)
 
@@ -775,7 +792,7 @@ async def set_grants(
                     if prev_grant is not None and prev_grant.suspended_at is not None
                     else now
                 )
-            elif item.suspended is False:
+            elif item.suspended is False or enabled:
                 suspended_at = None
             else:
                 suspended_at = prev_grant.suspended_at if prev_grant is not None else None
@@ -833,6 +850,7 @@ async def invoke_tool(
     *,
     deadline_ms: int = 10_000,
     include_dev_approval: bool = False,
+    dev_approval: DevApprovalInput | None = None,
     request_id: str = "",
 ) -> ToolInvocationResult:
     """Dev/test tool invocation path (UDC-3 §5.4; UDC-4 wraps with real owner approvals)."""
@@ -918,13 +936,32 @@ async def invoke_tool(
         "xuna/invocationId": invocation_id,
         "xuna/deadlineMs": deadline_ms,
     }
-    if descriptor.risk.level >= RiskTier.R2.level and include_dev_approval:
-        expires_at = (now + timedelta(seconds=APPROVAL_TTL_S)).astimezone(UTC).isoformat()
-        meta["xuna/approval"] = {
-            "approvalId": str(uuid.uuid4()),
+    if include_dev_approval and (
+        descriptor.risk.level >= RiskTier.R2.level or dev_approval is not None
+    ):
+        approval_id = (
+            dev_approval.approval_id
+            if dev_approval is not None and dev_approval.approval_id is not None
+            else str(uuid.uuid4())
+        )
+        expires_at = (
+            dev_approval.expires_at
+            if dev_approval is not None and dev_approval.expires_at is not None
+            else (now + timedelta(seconds=APPROVAL_TTL_S)).astimezone(UTC).isoformat()
+        )
+        approval_meta: dict[str, object] = {
+            "approvalId": approval_id,
             "argsSha256": args_sha256(arguments),
             "expiresAt": expires_at,
         }
+        if dev_approval is not None:
+            if dev_approval.scope is not None:
+                approval_meta["scope"] = dev_approval.scope
+            if dev_approval.signature is not None:
+                approval_meta["signature"] = dev_approval.signature
+            if dev_approval.public_key is not None:
+                approval_meta["publicKey"] = dev_approval.public_key
+        meta["xuna/approval"] = approval_meta
 
     call_params: dict[str, object] = {
         "name": descriptor.name,
@@ -1024,6 +1061,82 @@ async def invoke_tool(
     )
 
 
+async def preflight_tool(
+    hosts: HostRepository,
+    hub: HostSessionHub,
+    owner_id: uuid.UUID,
+    host_id: HostId,
+    tool_name: str,
+    arguments: dict[str, object],
+    *,
+    deadline_ms: int = 3_000,
+) -> ToolPreflightResult:
+    """Dev/test read-only `xuna/preflight` forwarder (`XUNA_DEV_HOST_TOOLS=1`).
+
+    Sends exact `{"name", "arguments"}` to the host and never logs or audits `element_name`.
+    """
+    try:
+        validate_tool_name(tool_name)
+    except ValueError as error:
+        raise HostError("invalid_argument") from error
+
+    host = await hosts.get_host(host_id)
+    if host is None or host.owner_id != owner_id or host.status != HostStatus.ACTIVE:
+        raise HostError("not_found")
+
+    manifest = await hosts.get_manifest(host_id)
+    descriptor = manifest.find_tool(tool_name) if manifest is not None else None
+    if descriptor is None:
+        raise HostError("tool_not_found")
+
+    if not hub.is_online(str(host_id)):
+        raise HostError("host_offline")
+
+    started = time.monotonic()
+    try:
+        raw_result = await hub.send_request(
+            str(host_id),
+            "xuna/preflight",
+            {"name": descriptor.name, "arguments": dict(arguments)},
+            timeout_s=max(deadline_ms / 1000.0, 0.5),
+        )
+    except TimeoutError:
+        return ToolPreflightResult(
+            tool_name=descriptor.name,
+            status="timeout",
+            effective_risk=None,
+            reason_code=None,
+            error_code="deadline_exceeded",
+            element_role=None,
+            element_name=None,
+            duration_ms=deadline_ms,
+        )
+    except RuntimeError as error:
+        msg = str(error)
+        if msg in ("host_offline", "session_closed"):
+            raise HostError("host_offline") from error
+        if msg.startswith("rpc_error:-32601:"):
+            raise HostError("tool_not_found", msg) from error
+        raise HostError("policy_blocked", msg) from error
+
+    duration_ms = max(int((time.monotonic() - started) * 1000), 0)
+    try:
+        parsed = parse_preflight_result(raw_result)
+    except ValueError as error:
+        raise HostError("validation_failed", str(error)) from error
+
+    return ToolPreflightResult(
+        tool_name=descriptor.name,
+        status=parsed.status,
+        effective_risk=parsed.effective_risk,
+        reason_code=parsed.reason_code,
+        error_code=parsed.error_code,
+        element_role=parsed.element_role,
+        element_name=parsed.element_name,
+        duration_ms=duration_ms,
+    )
+
+
 async def get_host_policy(
     hosts: HostRepository,
     hub: HostSessionHub,
@@ -1110,4 +1223,3 @@ async def set_host_policy(
     )
 
     return raw_result
-

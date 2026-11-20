@@ -14,12 +14,14 @@ Executes the 8-step pipeline per tool call:
 
 import base64
 import inspect
+import json
+import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from xuna_backend.modules.actions.application.approval_and_board_service import (
     ApprovalAndBoardService,
@@ -40,10 +42,12 @@ from xuna_backend.modules.actions.application.computer_use import (
     ComputerUseSessionState,
     InMemoryComputerUseSessionStore,
     build_session_event,
+    contains_prompt_injection_payload,
     hit_test_node_at_coordinates,
     is_activation_key_combo,
     is_consequential_element_name,
     is_editable_field_role,
+    is_hard_denied_target,
     is_password_ui_node,
     redact_ui_tree_nodes,
     session_expiry_reason,
@@ -66,6 +70,7 @@ from xuna_backend.modules.actions.application.prompts import (
     SYSTEM_PROMPT_EN,
     SYSTEM_PROMPT_VI,
     encode_tool_payload,
+    state_driven_hint,
     tool_system_prompt,
     truncate_tool_value,
 )
@@ -101,6 +106,7 @@ from xuna_backend.modules.actions.domain.entities import (
     LocalActionRequestEvent,
     gesture_for_action_status,
 )
+from xuna_backend.modules.actions.domain.job import AutonomousJobState
 from xuna_backend.modules.actions.domain.personalization import (
     HostDefaultConvention,
     InMemoryHostDefaultStore,
@@ -120,6 +126,8 @@ from xuna_backend.modules.actions.domain.target_resolver import (
     TargetResolver,
 )
 from xuna_backend.modules.actions.domain.tool_names import (
+    AUTONOMOUS_JOB_SCHEMA,
+    AUTONOMOUS_JOB_TOOL,
     BOARD_TOOL,
     WORKFLOW_TEMPLATE_TOOL,
     from_function_name,
@@ -149,6 +157,9 @@ from xuna_backend.modules.hosts.domain.entities import (
 )
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
 
+if TYPE_CHECKING:
+    from xuna_backend.modules.actions.application.job_runner import AutonomousJobRunner
+
 __all__ = [
     "BOARD_TARGET_LABEL_EN",
     "BOARD_TARGET_LABEL_VI",
@@ -166,8 +177,26 @@ __all__ = [
 
 EventSink = Callable[[ActionStreamEvent], Awaitable[None]]
 
+_logger = logging.getLogger(__name__)
+_AUDIT_CODE_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+_AUDIT_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{0,64}$")
+
 _truncate_value = truncate_tool_value
 _encode_tool_payload = encode_tool_payload
+
+
+def _sanitize_prompt_note_field(raw: str | None, max_len: int) -> str | None:
+    if not raw:
+        return None
+    collapsed = " ".join(
+        "".join(ch if (ord(ch) >= 32 and ord(ch) != 127) else " " for ch in raw).split()
+    ).strip()
+    if not collapsed:
+        return None
+    if contains_prompt_injection_payload(collapsed):
+        return "[redacted]"
+    return collapsed[:max_len]
+
 
 # Host error codes that mean the computer-use session no longer exists on the host.
 _CU_SESSION_ENDING_ERROR_CODES: frozenset[str] = frozenset(
@@ -190,7 +219,7 @@ _PREFLIGHT_PLATFORMS: frozenset[HostPlatform] = frozenset(
     {HostPlatform.WINDOWS, HostPlatform.MACOS}
 )
 # Preflight reads the live window; a slow answer is treated as no answer (R3).
-PREFLIGHT_TIMEOUT_SECONDS = 2.0
+PREFLIGHT_TIMEOUT_SECONDS = 3.0
 _METHOD_NOT_FOUND_PREFIX = "rpc_error:-32601:"
 # ADR-0015 D1: text typed since the last commit, kept per session for the next commit card.
 _MAX_REMEMBERED_DRAFTS = 5
@@ -308,8 +337,10 @@ class Orchestrator:
         code_generator: TextGenerator | None = None,
         standing_repo: StandingApprovalRepository | None = None,
         cu_session_store: ComputerUseSessionStore | None = None,
+        job_runner: "AutonomousJobRunner | None" = None,
     ) -> None:
         self._standing_repo = standing_repo
+        self._job_runner = job_runner
         self._cu_session_store: ComputerUseSessionStore = (
             cu_session_store if cu_session_store is not None else InMemoryComputerUseSessionStore()
         )
@@ -429,6 +460,7 @@ class Orchestrator:
             state.stop_reason = reason
         state.cached_nodes.clear()
         state.typed_since_commit.clear()
+        state.last_window.clear()
         state.typed_count = 0
         if was_active:
             minutes = max(int((now - state.started_at_utc).total_seconds() // 60), 0)
@@ -513,6 +545,156 @@ class Orchestrator:
             owner_id, state.host_id, "owner_stopped", host_confirmed, request_id
         )
         return CuSessionStopResult(stopped=True, host_confirmed=host_confirmed, already_ended=False)
+
+    async def cleanup_dangling_cu_session(
+        self,
+        *,
+        owner_id: uuid.UUID,
+        reason: str = "turn_aborted",
+        request_id: str = "",
+    ) -> ComputerUseSessionEvent | None:
+        """Closes a dangling CU session on abnormal turn exit, preserving detached jobs.
+
+        Idempotent and non-raising: ends backend state first, notifies the host best-effort
+        with a valid `cu.session_end` outcome, audits safely, and returns the ended event.
+        """
+        raw_reason = (reason or "").strip()[:64]
+        clean_reason = raw_reason if _AUDIT_CODE_RE.match(raw_reason) else "turn_aborted"
+        raw_rid = (request_id or "").strip()[:64]
+        safe_request_id = raw_rid if _AUDIT_REQUEST_ID_RE.match(raw_rid) else ""
+
+        now = self._clock()
+        try:
+            state = await self._cu_session_store.get_active_for_owner(owner_id)
+        except Exception:
+            _logger.warning("cleanup_dangling_cu_session: store lookup failed", exc_info=True)
+            return None
+        if state is None or not state.active:
+            return None
+
+        if self._job_runner is not None:
+            try:
+                active_job = await self._job_runner.get_active_for_owner(owner_id)
+            except Exception:
+                active_job = None
+            if (
+                active_job is not None
+                and not active_job.is_terminal
+                and active_job.session_id == state.session_id
+            ):
+                return None
+
+        if clean_reason in ("turn_max_rounds", "turn_timeout"):
+            host_outcome = "budget_exceeded"
+        elif clean_reason in ("turn_provider_error", "turn_failed"):
+            host_outcome = "failed"
+        else:
+            host_outcome = "stopped"
+
+        try:
+            await self._end_cu_state(state, clean_reason, now, safe_request_id)
+        except Exception:
+            _logger.warning("cleanup_dangling_cu_session: _end_cu_state failed", exc_info=True)
+            state.active = False
+            state.stop_reason = clean_reason
+            state.cached_nodes.clear()
+            state.typed_since_commit.clear()
+            state.last_window.clear()
+            state.typed_count = 0
+
+        host_confirmed = await self._end_cu_session_on_host(state, host_outcome)
+        try:
+            await self._audit_cu_session_stop(
+                owner_id,
+                state.host_id,
+                clean_reason,
+                host_confirmed,
+                safe_request_id,
+            )
+        except Exception:
+            _logger.warning("cleanup_dangling_cu_session: audit stop failed", exc_info=True)
+        return build_session_event(state, now, "")
+
+    @staticmethod
+    def _record_cu_window_context(
+        state: ComputerUseSessionState | None,
+        *,
+        app_id: object = None,
+        window_title: object = None,
+        clear_title_if_app_changed: bool = False,
+    ) -> None:
+        if state is None or not state.active:
+            return
+        prev_app = state.last_app_id
+        next_app: str | None = None
+        if isinstance(app_id, str):
+            cleaned_app = " ".join(app_id.split()).strip()[:64]
+            if cleaned_app:
+                next_app = cleaned_app
+                state.last_app_id = cleaned_app
+        if isinstance(window_title, str) and window_title.strip():
+            state.last_window_title = window_title
+        elif (
+            clear_title_if_app_changed
+            and next_app is not None
+            and (prev_app or "").lower() != next_app.lower()
+        ):
+            state.last_window_title = None
+
+    async def active_cu_session_prompt_note(
+        self,
+        owner_id: uuid.UUID,
+        locale: Locale = Locale.VI,
+        *,
+        host_id: HostId | None = None,
+        request_id: str = "",
+    ) -> str | None:
+        """Returns a bounded, Rule H5-compliant prompt note when a live CU session exists."""
+        now = self._clock()
+        state = await self._live_cu_session(owner_id, host_id, now, request_id)
+        if state is None:
+            return None
+        remaining_steps = max(state.max_steps - state.steps_used, 0)
+        seconds_left = max(
+            int(state.max_minutes * 60 - (now - state.started_at_utc).total_seconds()),
+            0,
+        )
+        remaining_minutes = max((seconds_left + 59) // 60, 0) if seconds_left > 0 else 0
+        apps_str = ", ".join(state.allowed_apps[:8])
+        domains_str = ", ".join(state.allowed_domains[:12])
+        target_label = state.target_alias or str(state.host_id)
+        app_label = _sanitize_prompt_note_field(state.last_app_id, 64)
+        safe_title = _sanitize_prompt_note_field(state.last_window_title, 100)
+        if locale == Locale.EN:
+            loc_parts: list[str] = []
+            if app_label:
+                loc_parts.append(f"app={app_label}")
+            if safe_title:
+                loc_parts.append(f"window='{safe_title}'")
+            window_clause = f"; last observed {', '.join(loc_parts)}" if loc_parts else ""
+            return (
+                f"\n- Active computer-use session '{state.session_id}' on '{target_label}' "
+                f"is still running (apps=[{apps_str or 'none'}], "
+                f"domains=[{domains_str or 'none'}], "
+                f"remainingSteps={remaining_steps}, remainingMinutes={remaining_minutes}"
+                f"{window_clause}). Continue inside this session with ui__inspect / "
+                "ui__observe_hybrid / input__* instead of restarting or calling app__launch "
+                "unless a different app or domain must be added via cu__session_extend."
+            )
+        loc_parts_vi: list[str] = []
+        if app_label:
+            loc_parts_vi.append(f"app={app_label}")
+        if safe_title:
+            loc_parts_vi.append(f"cửa sổ='{safe_title}'")
+        window_clause_vi = f"; cửa sổ gần nhất: {', '.join(loc_parts_vi)}" if loc_parts_vi else ""
+        return (
+            f"\n- Phiên điều khiển '{state.session_id}' trên '{target_label}' vẫn đang mở "
+            f"(apps=[{apps_str or 'không có'}], domains=[{domains_str or 'không có'}], "
+            f"còn {remaining_steps} bước / {remaining_minutes} phút{window_clause_vi}). "
+            "Hãy thao tác tiếp ngay trong phiên này bằng ui__inspect / ui__observe_hybrid / "
+            "input__* thay vì mở lại từ đầu hoặc gọi app__launch, trừ khi cần thêm app/tên "
+            "miền mới qua cu__session_extend."
+        )
 
     async def record_cu_heartbeat(
         self, *, owner_id: uuid.UUID, session_id: str, request_id: str = ""
@@ -703,9 +885,18 @@ class Orchestrator:
             if isinstance(combo, str):
                 norm_combo = "+".join(p.strip().lower() for p in combo.split("+") if p.strip())
                 is_safe_editing = norm_combo in {
-                    "cmd+n", "cmd+a", "cmd+c", "cmd+v",
-                    "command+n", "command+a", "command+c", "command+v",
-                    "ctrl+n", "ctrl+a", "ctrl+c", "ctrl+v",
+                    "cmd+n",
+                    "cmd+a",
+                    "cmd+c",
+                    "cmd+v",
+                    "command+n",
+                    "command+a",
+                    "command+c",
+                    "command+v",
+                    "ctrl+n",
+                    "ctrl+a",
+                    "ctrl+c",
+                    "ctrl+v",
                 }
                 is_draft_break = norm_combo in {"enter", "return", "shift+enter", "shift+return"}
                 focused_role = str(
@@ -728,10 +919,7 @@ class Orchestrator:
         elif descriptor.name == "app.launch":
             if active_cu is not None:
                 raw_app = (
-                    clean_args.get("id")
-                    or clean_args.get("app_id")
-                    or clean_args.get("name")
-                    or ""
+                    clean_args.get("id") or clean_args.get("app_id") or clean_args.get("name") or ""
                 )
                 app_name = str(raw_app).strip().lower()
                 if app_name and app_name not in active_cu.allowed_apps:
@@ -760,6 +948,26 @@ class Orchestrator:
             name = clean_args.get("elementName")
             if isinstance(name, str) and is_consequential_element_name(name):
                 return RiskTier.R3
+            menu_path = clean_args.get("menuPath")
+            if isinstance(menu_path, str):
+                lower_menu = menu_path.strip().lower()
+                destructive_menu_tokens = (
+                    "quit",
+                    "exit",
+                    "empty trash",
+                    "sign out",
+                    "log out",
+                    "logout",
+                    "uninstall",
+                    "format",
+                    "thoát",
+                    "đăng xuất",
+                    "dọn sạch thùng rác",
+                )
+                if is_consequential_element_name(menu_path) or any(
+                    tok in lower_menu for tok in destructive_menu_tokens
+                ):
+                    return RiskTier.R3
         elif descriptor.name == "input.drag":
             for k in ("elementName", "fromElementName", "toElementName"):
                 name = clean_args.get(k)
@@ -825,7 +1033,16 @@ class Orchestrator:
                 )
             return
 
-        if descriptor.name == "cu.session_start" and status == "ok":
+        if descriptor.name == "cu.session_start":
+            raw_nodes = structured_content.get("nodes")
+            dict_nodes: list[dict[str, Any]] = []
+            redacted_nodes: list[dict[str, Any]] = []
+            if isinstance(raw_nodes, list) and raw_nodes:
+                dict_nodes = [n for n in raw_nodes if isinstance(n, dict)]
+                redacted_nodes = redact_ui_tree_nodes(dict_nodes)
+                structured_content["nodes"] = redacted_nodes
+            if status != "ok":
+                return
             previous = await self._cu_session_store.get_active_for_owner(owner_id)
             if previous is not None:
                 await self._end_cu_state(previous, "replaced", now)
@@ -854,22 +1071,27 @@ class Orchestrator:
             raw_mins = clean_args.get("maxMinutes")
             max_mins = min(max(raw_mins if type(raw_mins) is int else 5, 1), MAX_SESSION_MINUTES)
             # `start` ends any other running session of the owner as `replaced`.
-            await self._cu_session_store.start(
-                ComputerUseSessionState(
-                    session_id=session_id,
-                    owner_id=owner_id,
-                    host_id=host_id,
-                    goal=str(clean_args.get("goal", "")),
-                    allowed_apps=apps,
-                    allowed_domains=domains,
-                    max_steps=max_steps,
-                    max_minutes=max_mins,
-                    started_at_utc=now,
-                    last_heartbeat_at=now,
-                    target_alias=target_alias,
-                ),
-                now,
+            new_state = ComputerUseSessionState(
+                session_id=session_id,
+                owner_id=owner_id,
+                host_id=host_id,
+                goal=str(clean_args.get("goal", "")),
+                allowed_apps=apps,
+                allowed_domains=domains,
+                max_steps=max_steps,
+                max_minutes=max_mins,
+                started_at_utc=now,
+                last_heartbeat_at=now,
+                target_alias=target_alias,
             )
+            if dict_nodes:
+                _cache_ui_nodes(new_state, dict_nodes, redacted_nodes)
+            self._record_cu_window_context(
+                new_state,
+                app_id=structured_content.get("foregroundApp"),
+                window_title=structured_content.get("windowTitle"),
+            )
+            await self._cu_session_store.start(new_state, now)
             return
 
         if descriptor.name == "cu.session_end":
@@ -895,6 +1117,24 @@ class Orchestrator:
                 await self._end_cu_state(active_cu, err_code, now)
             return
 
+        if descriptor.name == "window.active_context" and status == "ok":
+            self._record_cu_window_context(
+                active_cu,
+                app_id=structured_content.get("appName"),
+                window_title=structured_content.get("windowTitle"),
+                clear_title_if_app_changed=True,
+            )
+            return
+
+        if descriptor.name == "app.launch" and status == "ok":
+            self._record_cu_window_context(
+                active_cu,
+                app_id=structured_content.get("id") or clean_args.get("id"),
+                window_title=structured_content.get("windowTitle"),
+                clear_title_if_app_changed=True,
+            )
+            return
+
         if descriptor.name in ("ui.inspect", "ui.observe_hybrid") and status == "ok":
             raw_nodes = structured_content.get("nodes")
             if isinstance(raw_nodes, list):
@@ -904,6 +1144,12 @@ class Orchestrator:
                 if active_cu is not None:
                     active_cu.cached_nodes.clear()
                     _cache_ui_nodes(active_cu, dict_nodes, redacted)
+            self._record_cu_window_context(
+                active_cu,
+                app_id=structured_content.get("appId"),
+                window_title=structured_content.get("windowTitle"),
+                clear_title_if_app_changed=True,
+            )
             return
 
         if descriptor.name == "ui.find" and status == "ok":
@@ -916,6 +1162,12 @@ class Orchestrator:
                 structured_content["matches"] = redacted
                 if active_cu is not None:
                     _cache_ui_nodes(active_cu, dict_matches, redacted)
+            self._record_cu_window_context(
+                active_cu,
+                app_id=structured_content.get("appId"),
+                window_title=structured_content.get("windowTitle"),
+                clear_title_if_app_changed=True,
+            )
             return
 
         if descriptor.family == ToolFamily.INPUT and status == "ok":
@@ -1019,7 +1271,367 @@ class Orchestrator:
                 self_host_id=ctx.self_host_id,
             )
 
+        if tool_name == AUTONOMOUS_JOB_TOOL:
+            return await self._handle_autonomous_job_call(call, ctx)
+
         return await self._handle_host_call(tool_name, call, ctx)
+
+    async def _handle_autonomous_job_call(
+        self,
+        call: ToolCall,
+        ctx: ActionContext,
+    ) -> Message:
+        """Handles `autonomous.job` (`start`, `status`, `pause`, `resume`, `steer`, `cancel`)."""
+        runner = self._job_runner
+        if runner is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload(
+                    "failed",
+                    {"errorCode": "executor_not_configured"},
+                ),
+                tool_call_id=call.id,
+            )
+        try:
+            SchemaValidator.validate_arguments(AUTONOMOUS_JOB_SCHEMA, call.arguments)
+        except ArgumentValidationError:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload(
+                    "invalid_args",
+                    {"errorCode": "schema_mismatch"},
+                ),
+                tool_call_id=call.id,
+            )
+
+        action = str(call.arguments.get("action") or "").strip().lower()
+        if action == "start":
+            goal = str(call.arguments.get("goal") or "").strip()
+            if not goal:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_tool_payload(
+                        "invalid_args",
+                        {"errorCode": "missing_goal"},
+                    ),
+                    tool_call_id=call.id,
+                )
+            hosts, _, _, online_ids = await load_owner_host_state(
+                owner_id=ctx.owner_id,
+                host_repo=self._host_repo,
+                hub=self._hub,
+                self_host_id=ctx.self_host_id,
+            )
+            online_hosts = [
+                h for h in hosts if h.status == HostStatus.ACTIVE and str(h.host_id) in online_ids
+            ]
+            if not online_hosts:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_tool_payload(
+                        "not_ready",
+                        {"errorCode": "no_host"},
+                    ),
+                    tool_call_id=call.id,
+                )
+            raw_target = call.arguments.get("target")
+            target_host: Host | None = None
+            if isinstance(raw_target, str) and raw_target.strip():
+                needle = raw_target.strip().lower()
+                matched = [h for h in online_hosts if str(h.alias).lower() == needle]
+                if len(matched) == 1:
+                    target_host = matched[0]
+                else:
+                    return Message(
+                        role=Role.TOOL,
+                        content=_encode_tool_payload(
+                            "ask_target",
+                            {
+                                "errorCode": "host_offline",
+                                "candidates": [str(h.alias) for h in online_hosts],
+                            },
+                        ),
+                        tool_call_id=call.id,
+                    )
+            elif len(online_hosts) == 1:
+                target_host = online_hosts[0]
+            else:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_tool_payload(
+                        "ask_target",
+                        {
+                            "errorCode": "ask_target",
+                            "candidates": [str(h.alias) for h in online_hosts],
+                        },
+                    ),
+                    tool_call_id=call.id,
+                )
+
+            raw_title = call.arguments.get("title")
+            title = (
+                raw_title.strip() if isinstance(raw_title, str) and raw_title.strip() else goal[:60]
+            )
+            raw_max_steps = call.arguments.get("maxSteps")
+            max_steps = (
+                int(raw_max_steps)
+                if isinstance(raw_max_steps, int) and not isinstance(raw_max_steps, bool)
+                else 30
+            )
+            raw_max_mins = call.arguments.get("maxMinutes")
+            max_minutes = (
+                int(raw_max_mins)
+                if isinstance(raw_max_mins, int) and not isinstance(raw_max_mins, bool)
+                else 10
+            )
+            apps_raw = call.arguments.get("apps")
+            apps = [str(a) for a in apps_raw] if isinstance(apps_raw, list) else []
+            domains_raw = call.arguments.get("domains")
+            domains = [str(d) for d in domains_raw] if isinstance(domains_raw, list) else []
+
+            planned_sub_goals = runner.planner.generate_plan(goal, title=title)
+            active_cu = await self._cu_session_store.get_active_for_owner(ctx.owner_id)
+            if (apps or domains) and (
+                active_cu is None or active_cu.host_id != target_host.host_id
+            ):
+                cu_args: dict[str, object] = {
+                    "goal": goal[:200],
+                    "apps": apps if apps else [],
+                    "domains": domains,
+                    "maxSteps": min(max_steps, MAX_SESSION_STEPS),
+                    "maxMinutes": min(max_minutes, MAX_SESSION_MINUTES),
+                    "target": str(target_host.alias),
+                }
+                mission_ctx = ActionContext(
+                    owner_id=ctx.owner_id,
+                    pet_id=ctx.pet_id,
+                    locale=ctx.locale,
+                    client_caps=ctx.client_caps,
+                    board_available=ctx.board_available,
+                    emit_event=ctx.emit_event,
+                    request_id=ctx.request_id,
+                    self_host_id=ctx.self_host_id,
+                    host_defaults=ctx.host_defaults,
+                    host_screen_consent=ctx.host_screen_consent,
+                    cu_template=ctx.cu_template,
+                    mission_envelope={
+                        "goal": goal[:200],
+                        "apps": apps,
+                        "domains": domains,
+                        "maxSteps": min(max_steps, MAX_SESSION_STEPS),
+                        "maxMinutes": min(max_minutes, MAX_SESSION_MINUTES),
+                        "planSteps": [sg.title for sg in planned_sub_goals],
+                    },
+                )
+                cu_call = ToolCall(
+                    id=f"{call.id}-cu-start",
+                    name="cu__session_start",
+                    arguments=cu_args,
+                )
+                cu_msg = await self._handle_host_call("cu.session_start", cu_call, mission_ctx)
+                try:
+                    cu_payload = json.loads(cu_msg.content)
+                except ValueError:
+                    cu_payload = {"status": "failed"}
+                if not isinstance(cu_payload, dict) or cu_payload.get("status") != "ok":
+                    return Message(
+                        role=Role.TOOL,
+                        content=cu_msg.content,
+                        tool_call_id=call.id,
+                    )
+                active_cu = await self._cu_session_store.get_active_for_owner(ctx.owner_id)
+
+            job = await runner.start_job(
+                job_id=uuid.uuid4(),
+                owner_id=ctx.owner_id,
+                pet_id=ctx.pet_id or "xuna_pet",
+                host_id=target_host.host_id,
+                session_id=active_cu.session_id if active_cu is not None else None,
+                title=title,
+                goal=goal,
+                max_steps=max_steps,
+                sub_goals=planned_sub_goals,
+            )
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload(
+                    "ok",
+                    {
+                        "jobId": str(job.job_id),
+                        "state": job.state.value,
+                        "title": job.title,
+                        "goal": job.goal,
+                        "maxSteps": job.max_steps,
+                        "subGoals": [sg.title for sg in job.sub_goals],
+                    },
+                    repeatSafe=False,
+                ),
+                tool_call_id=call.id,
+            )
+
+        raw_job_id = call.arguments.get("jobId")
+        target_job = None
+        if isinstance(raw_job_id, str) and raw_job_id.strip():
+            try:
+                parsed_uuid = uuid.UUID(raw_job_id.strip())
+                candidate_job = await runner.get_job(parsed_uuid)
+                if candidate_job is not None and candidate_job.owner_id == ctx.owner_id:
+                    target_job = candidate_job
+            except ValueError:
+                target_job = None
+        else:
+            target_job = await runner.get_active_for_owner(ctx.owner_id)
+            if target_job is None and action == "status":
+                recent = await runner.list_for_owner(ctx.owner_id, limit=1)
+                if recent:
+                    target_job = recent[0]
+
+        if target_job is None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload(
+                    "failed",
+                    {"errorCode": "job_not_found"},
+                ),
+                tool_call_id=call.id,
+            )
+
+        try:
+            if action == "status":
+                current_job = target_job
+            elif action == "pause":
+                current_job = await runner.pause_job(target_job.job_id)
+            elif action == "resume":
+                if (
+                    target_job.state == AutonomousJobState.AWAITING_R3_CHECKPOINT
+                    and target_job.pending_approval_id is not None
+                ):
+                    prev_req = await self._approval_repo.get(target_job.pending_approval_id)
+                    if prev_req is None:
+                        return Message(
+                            role=Role.TOOL,
+                            content=_encode_tool_payload(
+                                "failed",
+                                {"errorCode": "checkpoint_approval_missing"},
+                            ),
+                            tool_call_id=call.id,
+                        )
+                    now = self._clock()
+                    expires_at = now + timedelta(seconds=APPROVAL_TTL_SECONDS)
+                    target_label = prev_req.target_alias
+                    if prev_req.host_id is not None:
+                        host_obj = await self._host_repo.get_host(prev_req.host_id)
+                        if host_obj is not None:
+                            target_label = str(host_obj.alias)
+                    fresh_req = ApprovalRequest(
+                        approval_id=uuid.uuid4(),
+                        owner_id=ctx.owner_id,
+                        host_id=prev_req.host_id,
+                        target_alias=target_label,
+                        tool=prev_req.tool,
+                        args_sha256=prev_req.args_sha256,
+                        risk=prev_req.risk,
+                        summary=prev_req.summary,
+                        created_at=now,
+                        expires_at=expires_at,
+                    )
+                    await self._approval_repo.save(fresh_req)
+                    await self._approval_broker.create(fresh_req)
+                    await ctx.emit_event(
+                        ActionPendingEvent(
+                            approval_id=str(fresh_req.approval_id),
+                            target=target_label,
+                            summary=prev_req.summary,
+                            risk=fresh_req.risk.value,
+                            expires_in=APPROVAL_TTL_SECONDS,
+                            host_id=(
+                                str(prev_req.host_id) if prev_req.host_id is not None else None
+                            ),
+                            args_sha256=fresh_req.args_sha256,
+                            expires_at=expires_at.astimezone(UTC).isoformat(),
+                        )
+                    )
+                    decision = await self._approval_broker.wait(
+                        fresh_req.approval_id,
+                        timeout_s=float(APPROVAL_TTL_SECONDS),
+                    )
+                    await self._approval_and_board.sync_approval_after_wait(
+                        fresh_req, decision, ctx.request_id
+                    )
+                    if decision != ApprovalState.APPROVED:
+                        rej_code = "rejected" if decision == ApprovalState.REJECTED else "expired"
+                        return Message(
+                            role=Role.TOOL,
+                            content=_encode_tool_payload(
+                                rej_code,
+                                {"errorCode": f"approval_{rej_code}"},
+                            ),
+                            tool_call_id=call.id,
+                        )
+                    current_job = await runner.resume_job(
+                        target_job.job_id,
+                        approval_id=fresh_req.approval_id,
+                    )
+                else:
+                    current_job = await runner.resume_job(target_job.job_id)
+            elif action == "steer":
+                instruction = str(call.arguments.get("instruction") or "").strip()
+                if not instruction:
+                    return Message(
+                        role=Role.TOOL,
+                        content=_encode_tool_payload(
+                            "invalid_args",
+                            {"errorCode": "missing_instruction"},
+                        ),
+                        tool_call_id=call.id,
+                    )
+                current_job = await runner.steer_job(target_job.job_id, instruction)
+            elif action == "cancel":
+                reason = str(call.arguments.get("reason") or "owner_takeover").strip()
+                current_job = await runner.cancel_job(
+                    target_job.job_id,
+                    reason=reason or "owner_takeover",
+                )
+            else:
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_tool_payload(
+                        "invalid_args",
+                        {"errorCode": "invalid_action"},
+                    ),
+                    tool_call_id=call.id,
+                )
+        except ValueError as err:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload(
+                    "failed",
+                    {"errorCode": "invalid_job_transition", "detail": str(err)[:120]},
+                ),
+                tool_call_id=call.id,
+            )
+
+        return Message(
+            role=Role.TOOL,
+            content=_encode_tool_payload(
+                "ok",
+                {
+                    "jobId": str(current_job.job_id),
+                    "state": current_job.state.value,
+                    "title": current_job.title,
+                    "stepsUsed": current_job.steps_used,
+                    "maxSteps": current_job.max_steps,
+                    "activeSubGoalIndex": current_job.active_sub_goal_index,
+                    "subGoals": [
+                        {"title": sg.title, "status": sg.status.value}
+                        for sg in current_job.sub_goals
+                    ],
+                    **({"stopReason": current_job.stop_reason} if current_job.stop_reason else {}),
+                },
+                repeatSafe=(action == "status"),
+            ),
+            tool_call_id=call.id,
+        )
 
     def assign_board_workflow_slot(
         self,
@@ -1130,6 +1742,20 @@ class Orchestrator:
         ctx: ActionContext,
     ) -> Message:
         now = self._clock()
+        normalized_call_args: dict[str, object] = (
+            dict(call.arguments) if isinstance(call.arguments, dict) else call.arguments
+        )
+        if isinstance(normalized_call_args, dict):
+            if tool_name == "app.launch" and isinstance(normalized_call_args.get("id"), str):
+                raw_id = str(normalized_call_args["id"]).strip().lower()
+                normalized_call_args["id"] = "_".join(raw_id.split())
+            elif tool_name in ("cu.session_start", "cu.session_extend"):
+                raw_apps = normalized_call_args.get("apps")
+                if isinstance(raw_apps, list):
+                    normalized_call_args["apps"] = [
+                        "_".join(a.strip().lower().split()) if isinstance(a, str) else a
+                        for a in raw_apps
+                    ]
         hosts = await self._host_repo.list_hosts(ctx.owner_id)
         active_hosts = [h for h in hosts if h.status == HostStatus.ACTIVE]
 
@@ -1137,7 +1763,9 @@ class Orchestrator:
         grants_by_host: dict[HostId, list[Grant]] = {}
         online_hosts_with_tool: list[Host] = []
         eligible_hosts: list[Host] = []
-        reference_descriptor: ToolDescriptor | None = None
+        eligible_descriptors: list[ToolDescriptor] = []
+        online_descriptors: list[ToolDescriptor] = []
+        offline_descriptors: list[ToolDescriptor] = []
 
         for host in active_hosts:
             manifest = await self._host_repo.get_manifest(host.host_id)
@@ -1146,15 +1774,15 @@ class Orchestrator:
             descriptor = manifest.find_tool(tool_name)
             if descriptor is None:
                 continue
-            if reference_descriptor is None:
-                reference_descriptor = descriptor
             is_self = ctx.self_host_id is not None and str(host.host_id) == ctx.self_host_id
             if not self._hub.is_online(str(host.host_id)) and not is_self:
+                offline_descriptors.append(descriptor)
                 continue
             manifests_by_host[host.host_id] = manifest
             grants = await self._host_repo.get_grants(host.host_id)
             grants_by_host[host.host_id] = grants
             online_hosts_with_tool.append(host)
+            online_descriptors.append(descriptor)
             if is_tool_granted(
                 descriptor,
                 grants,
@@ -1162,30 +1790,45 @@ class Orchestrator:
                 host_screen_consent=ctx.host_screen_consent,
             ):
                 eligible_hosts.append(host)
+                eligible_descriptors.append(descriptor)
 
+        candidate_descriptors = eligible_descriptors or online_descriptors or offline_descriptors
+        if not candidate_descriptors:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload("unknown_tool"),
+                tool_call_id=call.id,
+            )
+
+        valid_schema_descriptors: list[ToolDescriptor] = []
+        for cand in candidate_descriptors:
+            try:
+                SchemaValidator.validate_schema_definition(cand.input_schema)
+                valid_schema_descriptors.append(cand)
+            except SchemaDefinitionError:
+                continue
+        if not valid_schema_descriptors:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload("unknown_tool"),
+                tool_call_id=call.id,
+            )
+
+        reference_descriptor: ToolDescriptor | None = None
+        clean_args: dict[str, object] = {}
+        requested_target: str | None = None
+        for cand in valid_schema_descriptors:
+            try:
+                clean_args, requested_target = SchemaValidator.validate_arguments(
+                    cand.input_schema,
+                    normalized_call_args,
+                    allow_target=True,
+                )
+                reference_descriptor = cand
+                break
+            except ArgumentValidationError:
+                continue
         if reference_descriptor is None:
-            return Message(
-                role=Role.TOOL,
-                content=_encode_tool_payload("unknown_tool"),
-                tool_call_id=call.id,
-            )
-
-        try:
-            SchemaValidator.validate_schema_definition(reference_descriptor.input_schema)
-        except SchemaDefinitionError:
-            return Message(
-                role=Role.TOOL,
-                content=_encode_tool_payload("unknown_tool"),
-                tool_call_id=call.id,
-            )
-
-        try:
-            clean_args, requested_target = SchemaValidator.validate_arguments(
-                reference_descriptor.input_schema,
-                call.arguments,
-                allow_target=True,
-            )
-        except ArgumentValidationError:
             return Message(
                 role=Role.TOOL,
                 content=_encode_tool_payload("invalid_args"),
@@ -1284,7 +1927,7 @@ class Orchestrator:
                 SchemaValidator.validate_schema_definition(descriptor.input_schema)
                 clean_args, _ = SchemaValidator.validate_arguments(
                     descriptor.input_schema,
-                    call.arguments,
+                    normalized_call_args,
                     allow_target=True,
                 )
             except (SchemaDefinitionError, ArgumentValidationError):
@@ -1649,6 +2292,92 @@ class Orchestrator:
 
         self._last_target_store.set_last_target(ctx.owner_id, ctx.pet_id, target_alias, now)
 
+        if (
+            descriptor.name == "cu.session_start"
+            and active_cu is not None
+            and ctx.cu_template is None
+        ):
+            raw_req_apps = clean_args.get("apps")
+            req_apps = (
+                {str(a).strip().lower() for a in raw_req_apps if isinstance(a, str) and a.strip()}
+                if isinstance(raw_req_apps, list)
+                else set()
+            )
+            raw_req_domains = clean_args.get("domains")
+            req_domains = (
+                {
+                    str(d).strip().lower()
+                    for d in raw_req_domains
+                    if isinstance(d, str) and d.strip()
+                }
+                if isinstance(raw_req_domains, list)
+                else set()
+            )
+            active_apps = {a.strip().lower() for a in active_cu.allowed_apps if a.strip()}
+            active_domains = {d.strip().lower() for d in active_cu.allowed_domains if d.strip()}
+            if (
+                req_apps
+                and req_apps <= active_apps
+                and req_domains <= active_domains
+                and not any(is_hard_denied_target(app) for app in req_apps)
+            ):
+                reused_output: dict[str, object] = {
+                    "sessionId": active_cu.session_id,
+                    "reused": True,
+                    "apps": list(active_cu.allowed_apps),
+                    "domains": list(active_cu.allowed_domains),
+                }
+                if active_cu.last_app_id is not None:
+                    reused_output["foregroundApp"] = active_cu.last_app_id
+                    norm_last_app = "_".join(active_cu.last_app_id.strip().lower().split())
+                    if (
+                        active_cu.last_app_id.strip().lower() in req_apps
+                        or norm_last_app in req_apps
+                    ):
+                        reused_output["targetAlreadyFocused"] = True
+                if active_cu.last_window_title is not None:
+                    reused_output["windowTitle"] = active_cu.last_window_title
+                reuse_summary = ActionSummary.format_result(
+                    descriptor.name, clean_args, target_alias, "ok", ctx.locale
+                )
+                await self._audit.record(
+                    AuditEvent(
+                        owner_id=ctx.owner_id,
+                        action=AuditAction.HOST_TOOL_INVOKED,
+                        occurred_at=now,
+                        subject=str(host.host_id),
+                        request_id=ctx.request_id,
+                        metadata={
+                            "tool": descriptor.name,
+                            "risk": effective_risk.value,
+                            "status": "ok",
+                            "durationMs": 0,
+                            "platform": host.platform.value,
+                            "reused": True,
+                        },
+                    )
+                )
+                await ctx.emit_event(
+                    ActionResultEvent(
+                        invocation_id=invocation_id,
+                        target=target_alias,
+                        summary=reuse_summary,
+                        status="ok",
+                        gesture=gesture_for_action_status("ok"),
+                    )
+                )
+                await ctx.emit_event(build_session_event(active_cu, now, reuse_summary))
+                reuse_hint = (
+                    "Reused active computer-use session (existing scope and budgets preserved). "
+                    "Do NOT call app__launch if targetAlreadyFocused is true; continue with "
+                    "ui__inspect, ui__observe_hybrid, or ui__find on the current window."
+                )
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_tool_payload("ok", reused_output, hint=reuse_hint),
+                    tool_call_id=call.id,
+                )
+
         raw_launch_id = (
             clean_args.get("id") or clean_args.get("app_id") or clean_args.get("name") or ""
         )
@@ -1660,15 +2389,12 @@ class Orchestrator:
         if active_cu is not None and descriptor.name == "app.launch" and not is_in_scope_app_launch:
             effective_risk = RiskTier.R3
 
-        exempt_by_cu_session = (
-            active_cu is not None
-            and (
-                (
-                    descriptor.family in (ToolFamily.SCREEN, ToolFamily.UI, ToolFamily.INPUT)
-                    and effective_risk == RiskTier.R2
-                )
-                or is_in_scope_app_launch
+        exempt_by_cu_session = active_cu is not None and (
+            (
+                descriptor.family in (ToolFamily.SCREEN, ToolFamily.UI, ToolFamily.INPUT)
+                and effective_risk == RiskTier.R2
             )
+            or is_in_scope_app_launch
         )
 
         approval_req: ApprovalRequest | None = None
@@ -1843,9 +2569,7 @@ class Orchestrator:
                         mission_goal = str(active_cu.goal)
                     apps_raw = clean_args.get("apps")
                     apps_list = (
-                        [str(a) for a in apps_raw]
-                        if isinstance(apps_raw, list | tuple)
-                        else []
+                        [str(a) for a in apps_raw] if isinstance(apps_raw, list | tuple) else []
                     )
                     if (
                         not apps_list
@@ -1866,17 +2590,9 @@ class Orchestrator:
                     ):
                         domains_list = [str(d) for d in active_cu.allowed_domains]
                     max_steps_val = clean_args.get("maxSteps")
-                    max_steps = (
-                        int(max_steps_val)
-                        if isinstance(max_steps_val, int | str)
-                        else 12
-                    )
+                    max_steps = int(max_steps_val) if isinstance(max_steps_val, int | str) else 12
                     max_mins_val = clean_args.get("maxMinutes")
-                    max_mins = (
-                        int(max_mins_val)
-                        if isinstance(max_mins_val, int | str)
-                        else 5
-                    )
+                    max_mins = int(max_mins_val) if isinstance(max_mins_val, int | str) else 5
                     mission_env = {
                         "goal": mission_goal,
                         "apps": apps_list,
@@ -2267,10 +2983,67 @@ class Orchestrator:
                 if isinstance(raw_b64, str):
                     detached_image_b64 = raw_b64
 
+        extra_payload: dict[str, object] = {}
         if status == "ok" and not is_repeat_safe(descriptor):
-            content = _encode_tool_payload(status, structured_content, repeatSafe=False)
-        else:
-            content = _encode_tool_payload(status, structured_content)
+            extra_payload["repeatSafe"] = False
+        if descriptor.name == "cu.session_start" and status == "ok":
+            if structured_content.get("targetAlreadyFocused") is True:
+                raw_nodes_hint = structured_content.get("nodes")
+                has_nodes = isinstance(raw_nodes_hint, list) and len(raw_nodes_hint) > 0
+                if has_nodes:
+                    extra_payload["hint"] = (
+                        "Session opened and target app is already focused in the foreground "
+                        "with an initial UI snapshot (`snapshotId`, `nodes`). Do NOT call "
+                        "app__launch; act directly on the returned element refs or call "
+                        "ui__observe_hybrid / ui__find if you need visual confirmation."
+                    )
+                else:
+                    extra_payload["hint"] = (
+                        "Session opened and target app is already focused in the foreground. "
+                        "Do NOT call app__launch; call ui__inspect or ui__observe_hybrid "
+                        "directly on the current window."
+                    )
+            else:
+                extra_payload["hint"] = (
+                    "Session opened. If the target app is not yet in the foreground, call "
+                    "app__launch(id=...) from `apps` (or web__navigate for web pages) before "
+                    "calling ui__inspect or ui__observe_hybrid."
+                )
+        elif status == "ok" and state_driven_hint(structured_content) is None:
+            if descriptor.name == "input.key" and is_activation_key_combo(
+                str(clean_args.get("combo", ""))
+            ):
+                extra_payload["hint"] = (
+                    "Activation key dispatched (status='ok'), which does NOT prove the goal "
+                    "succeeded (Rule H1: e.g., Enter in a search field only shows results). "
+                    "Check `changes`, `windowTitle`, `media__now_playing`, or call ui__find / "
+                    "ui__inspect / ui__observe_hybrid and activate the target result before "
+                    "reporting completion."
+                )
+            elif descriptor.name == "input.click" and clean_args.get("hover") is True:
+                extra_payload["hint"] = (
+                    "Hover completed (hover=true); no click was sent yet. Read `changes.added` "
+                    "or call ui__inspect / ui__observe_hybrid to click any newly revealed "
+                    "control before reporting completion."
+                )
+            elif descriptor.name == "input.click" and not structured_content.get("changes"):
+                extra_payload["hint"] = (
+                    "Click dispatched (status='ok') without a UI `changes` diff. Rule H1: "
+                    "verify real state via `windowTitle`, `media__now_playing`, or ui__inspect / "
+                    "ui__observe_hybrid before reporting completion."
+                )
+            elif (
+                descriptor.name == "app.launch"
+                and not clean_args.get("openTarget")
+                and not structured_content.get("nodes")
+            ):
+                extra_payload["hint"] = (
+                    "App launch/activation dispatched without `openTarget` or UI `nodes`. "
+                    "Rule H1: focusing an app does not complete an in-app task; verify "
+                    "`windowTitle` via window__active_context or use a CU session to inspect "
+                    "and complete the task."
+                )
+        content = _encode_tool_payload(status, structured_content, **extra_payload)
         return Message(
             role=Role.TOOL,
             content=content,

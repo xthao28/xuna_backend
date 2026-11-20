@@ -8,6 +8,7 @@ secrets or conversation text.
 
 import hashlib
 import json
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from datetime import datetime, timedelta
 from http import HTTPStatus
 from typing import Any
 
-from sqlalchemy import DateTime, Integer, String, delete, select
+from sqlalchemy import DateTime, Integer, String, delete, event, select
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
@@ -24,6 +25,8 @@ from xuna_backend.core.db import Base
 from xuna_backend.core.errors import AppError
 
 TTL = timedelta(hours=24)
+_SWEEP_INTERVAL_S = 60.0
+_last_sweep_monotonic: float = time.monotonic()
 
 
 class IdempotencyRecord(Base):
@@ -65,16 +68,21 @@ async def run_once(
     action: Callable[[], Awaitable[StoredResponse]],
 ) -> StoredResponse:
     """Runs `action` at most once per (owner, key); caller commits the session."""
-    await session.execute(delete(IdempotencyRecord).where(IdempotencyRecord.created_at < now - TTL))
+    global _last_sweep_monotonic
+    cutoff = now - TTL
     existing = await session.scalar(
         select(IdempotencyRecord)
         .where(IdempotencyRecord.owner_id == owner_id, IdempotencyRecord.key == key)
         .with_for_update()
     )
     if existing is not None:
-        if existing.request_hash != fingerprint:
-            raise AppError("idempotency_key_reused", HTTPStatus.CONFLICT)
-        return StoredResponse(HTTPStatus(existing.status_code), existing.body)
+        if existing.created_at < cutoff:
+            await session.delete(existing)
+            await session.flush()
+        else:
+            if existing.request_hash != fingerprint:
+                raise AppError("idempotency_key_reused", HTTPStatus.CONFLICT)
+            return StoredResponse(HTTPStatus(existing.status_code), existing.body)
     response = await action()
     session.add(
         IdempotencyRecord(
@@ -86,4 +94,27 @@ async def run_once(
             created_at=now,
         )
     )
+    mono = time.monotonic()
+    if mono - _last_sweep_monotonic >= _SWEEP_INTERVAL_S:
+        prev_mono = _last_sweep_monotonic
+        await session.execute(
+            delete(IdempotencyRecord).where(IdempotencyRecord.created_at < cutoff)
+        )
+        _last_sweep_monotonic = mono
+        sync_session = getattr(session, "sync_session", None)
+        if sync_session is not None:
+
+            def _on_commit(_sess: Any) -> None:
+                if event.contains(sync_session, "after_rollback", _on_rollback):
+                    event.remove(sync_session, "after_rollback", _on_rollback)
+
+            def _on_rollback(_sess: Any) -> None:
+                global _last_sweep_monotonic
+                if _last_sweep_monotonic == mono:
+                    _last_sweep_monotonic = prev_mono
+                if event.contains(sync_session, "after_commit", _on_commit):
+                    event.remove(sync_session, "after_commit", _on_commit)
+
+            event.listen(sync_session, "after_commit", _on_commit, once=True)
+            event.listen(sync_session, "after_rollback", _on_rollback, once=True)
     return response

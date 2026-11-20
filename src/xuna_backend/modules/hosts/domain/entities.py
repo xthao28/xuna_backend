@@ -297,6 +297,7 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
         family = ToolFamily.WORKFLOW
     elif family_str == "finder":
         family = ToolFamily.FILES
+    # "ui.accessibility_tree" kept for legacy compat with persisted manifests / older host agents.
     elif name in ("tv.launch_app", "ui.accessibility_tree") or family_str in (
         "display",
         "workspace",

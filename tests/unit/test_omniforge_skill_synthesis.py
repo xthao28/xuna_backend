@@ -887,7 +887,7 @@ def test_dynamic_capability_scoped_prompt_and_state_hint() -> None:
         Locale.VI,
         tools=(
             ToolSpec(
-                name="ui__accessibility_tree",
+                name="ui__inspect",
                 description="Inspect UI tree",
                 parameters={"type": "object", "properties": {}},
             ),

@@ -22,6 +22,9 @@ from xuna_backend.modules.actions.domain.schema_validator import (
     SchemaValidator,
 )
 from xuna_backend.modules.actions.domain.tool_names import (
+    AUTONOMOUS_JOB_DESCRIPTION,
+    AUTONOMOUS_JOB_FUNCTION_NAME,
+    AUTONOMOUS_JOB_SCHEMA,
     BOARD_FUNCTION_NAME,
     BOARD_MEDIA_KEY_DESCRIPTION,
     BOARD_MEDIA_KEY_SCHEMA,
@@ -46,7 +49,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     ToolPermissionState,
 )
 
-MAX_CATALOG_TOOLS = 20
+MAX_CATALOG_TOOLS = 36
 CAP_HOST_ACTIONS_V1 = "host_actions_v1"
 CAP_BOARD_HID_V1 = "board_hid_v1"
 CAP_WORKFLOW_TEMPLATES_V1 = "workflow_templates_v1"
@@ -62,12 +65,31 @@ _U5_REQUIRED_FAMILIES: frozenset[ToolFamily] = frozenset(
 
 # Core primitives first: these are the tools sent directly when the catalog must defer.
 _PRIORITY_ORDER: tuple[str, ...] = (
+    # Slots 0..29: guaranteed direct even at worst-case reserved=3 + defer=True (36 - 3 - 3 = 30)
+    # Tier 2 live context & Tier 1 OS Deep Open (0..4)
+    "window.active_context",
     "app.launch",
     "app.list_allowed",
-    "ui.accessibility_tree",
     "url.open",
+    "finder.reveal",
+    # Tier 0 headless OS native, media, workspace, web CDP, MCP, clipboard (5..19)
+    "media.play_pause",
+    "media.next",
+    "media.volume_set",
+    "media.now_playing",
+    "notes.create",
+    "notes.search",
+    "reminders.create",
+    "calendar.list_events",
+    "workspace.open",
+    "workspace.git_summary",
+    "web.navigate",
+    "web.snapshot",
+    "mcp.list_servers",
+    "mcp.call",
+    "clipboard.write",
+    # Tier 2/3 core CU, UI, Input (20..29) — adjacency invariants preserved!
     "cu.session_start",
-    "cu.session_extend",
     "ui.inspect",
     "ui.find",
     "ui.observe_hybrid",
@@ -77,15 +99,27 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "input.key",
     "input.scroll",
     "cu.session_end",
-    "window.active_context",
-    "media.play_search",
-    "media.play_pause",
-    "media.next",
+    # Slots 30..38: direct when reserved <= 1 or fewer tools, else 1-hop tool_search
+    "cu.session_extend",
     "media.previous",
-    "media.volume_set",
-    "media.now_playing",
+    "media.play_search",
+    "clipboard.read",
+    "notes.append",
+    "calendar.create_event",
+    "shortcuts.run",
+    "mail.create_draft",
+    "selection.read",
+    # Remaining web / browser / notifications
+    "web.click",
+    "web.fill",
+    "web.select",
+    "web.extract",
+    "web.wait_for",
+    "browser.read_page",
+    "browser.current_url",
     "notifications.list",
     "notifications.action",
+    # Mobile UI automation (direct when desktop UI tools are absent)
     "ui.inspect_tree",
     "ui.observe",
     "ui.act",
@@ -93,26 +127,15 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "ui.tap_text",
     "ui.set_text",
     "ui.scroll",
+    "ui.long_press",
+    "ui.swipe_drag",
     "app.open_scheme",
+    # Workspace dev & Forge
     "workspace.coding_agent",
     "forge.synthesize_skill",
     "forge.run_skill",
     "forge.list_and_manage",
-    "ui.long_press",
-    "ui.swipe_drag",
-    "workspace.open",
-    "workspace.git_summary",
-    "web.navigate",
-    "web.snapshot",
-    "web.click",
-    "web.fill",
-    "web.select",
-    "web.extract",
-    "web.wait_for",
-    "browser.read_page",
-    "selection.read",
-    "clipboard.read",
-    "clipboard.write",
+    # Remaining host tools
     "host.status",
     "workspace.watch_task",
     "beam.transfer",
@@ -149,10 +172,7 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "canvas.present",
     "pipeline.execute_universal",
     "host.lock_screen",
-    "mcp.call",
-    "mcp.list_servers",
     "display.wake",
-    "browser.current_url",
     "workflow.run",
     "host.notify",
     "workflow.list",
@@ -271,6 +291,9 @@ def collect_eligible_host_tools(
                 if alias_str not in aliases:
                     aliases.append(alias_str)
 
+    if "ui.inspect" in by_tool:
+        by_tool.pop("ui.accessibility_tree", None)
+
     return {
         name: EligibleHostTool(descriptor=by_tool[name][0], aliases=tuple(by_tool[name][1]))
         for name in sorted(by_tool, key=lambda n: _ordering_key(n, usage))
@@ -318,10 +341,11 @@ def build_tool_catalog(
     board_available: bool = False,
     host_screen_consent: bool = False,
     include_workflow_template: bool = False,
+    include_autonomous_job: bool = False,
     now: datetime | None = None,
     usage: Mapping[str, int] | None = None,
 ) -> tuple[ToolSpec, ...]:
-    """Builds at most `MAX_CATALOG_TOOLS` (`20`) `ToolSpec` entries for `ChatRequest.tools`.
+    """Builds at most `MAX_CATALOG_TOOLS` (`36`) `ToolSpec` entries for `ChatRequest.tools`.
 
     - Gated behind `client_caps` (`host_actions_v1` for host tools, `board_hid_v1` for board HID).
     - Eligibility comes from `collect_eligible_host_tools`; order is the owner's own tool
@@ -338,11 +362,8 @@ def build_tool_catalog(
     if not include_host_tools and not include_board_tool:
         return ()
 
-    reserved = (1 if include_board_tool else 0) + (1 if include_wf_template else 0)
-    host_limit = max(MAX_CATALOG_TOOLS - reserved, 0)
-    specs: list[ToolSpec] = []
-
-    if include_host_tools and host_limit > 0:
+    eligible: dict[str, EligibleHostTool] = {}
+    if include_host_tools:
         eligible = collect_eligible_host_tools(
             hosts=hosts,
             manifests_by_host=manifests_by_host,
@@ -352,6 +373,19 @@ def build_tool_catalog(
             now=now,
             usage=usage,
         )
+
+    effective_auto_job = (
+        include_host_tools and include_autonomous_job and ("cu.session_start" in eligible)
+    )
+    reserved = (
+        (1 if include_board_tool else 0)
+        + (1 if include_wf_template else 0)
+        + (1 if effective_auto_job else 0)
+    )
+    host_limit = max(MAX_CATALOG_TOOLS - reserved, 0)
+    specs: list[ToolSpec] = []
+
+    if include_host_tools and host_limit > 0 and eligible:
         if len(eligible) <= host_limit:
             direct_names = list(eligible)
             defer = False
@@ -362,6 +396,15 @@ def build_tool_catalog(
             specs.append(_host_tool_spec(tool_name, eligible[tool_name]))
         if defer:
             specs.extend(build_meta_tool_specs(eligible, frozenset(direct_names)))
+
+    if effective_auto_job:
+        specs.append(
+            ToolSpec(
+                name=AUTONOMOUS_JOB_FUNCTION_NAME,
+                description=AUTONOMOUS_JOB_DESCRIPTION,
+                parameters=copy.deepcopy(AUTONOMOUS_JOB_SCHEMA),
+            )
+        )
 
     if include_wf_template:
         specs.append(
@@ -425,6 +468,7 @@ async def load_tool_catalog_for_owner(
     hub: HostSessionHub,
     self_host_id: str | None = None,
     host_screen_consent: bool = True,
+    include_autonomous_job: bool = False,
     now: datetime | None = None,
     audit: AuditLog | None = None,
 ) -> tuple[ToolSpec, ...]:
@@ -458,6 +502,7 @@ async def load_tool_catalog_for_owner(
         client_caps=client_caps,
         board_available=board_available,
         host_screen_consent=host_screen_consent,
+        include_autonomous_job=include_autonomous_job,
         now=now,
         usage=usage,
     )

@@ -7,6 +7,7 @@ Protocol:
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
@@ -19,7 +20,7 @@ from starlette.status import (
     WS_1008_POLICY_VIOLATION,
 )
 
-from xuna_backend.modules.accounts.application.authenticate import authenticate
+from xuna_backend.modules.accounts.application.authenticate import authenticate_with_status
 from xuna_backend.modules.accounts.application.ports import (
     AuthUnavailableError,
     InvalidTokenError,
@@ -47,6 +48,7 @@ from xuna_backend.modules.actions.domain.entities import (
     LocalActionRequestEvent,
 )
 from xuna_backend.modules.cognition.application.ports import TextGenerator
+from xuna_backend.modules.cognition.domain.language_detector import detect_text_language
 from xuna_backend.modules.cognition.domain.types import (
     ChatFinished,
     Locale,
@@ -60,6 +62,7 @@ from xuna_backend.modules.consent.domain.consent import ConsentClass
 from xuna_backend.modules.conversation.application.chat_turn import (
     MAX_HISTORY_LINE_CHARS,
     MAX_HISTORY_LINES,
+    CuCleanupCallback,
     DetailDelta,
     GestureChosen,
     HistoryLine,
@@ -289,8 +292,11 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
     async with app.state.database.sessions() as db_session:
         try:
-            owner = await authenticate(token, verifier, owner_repo_factory(db_session))
-            await db_session.commit()
+            owner, created = await authenticate_with_status(
+                token, verifier, owner_repo_factory(db_session)
+            )
+            if created:
+                await db_session.commit()
         except (InvalidTokenError, AuthUnavailableError):
             await websocket.send_json({"type": "error", "code": "unauthorized"})
             await websocket.close(code=WS_1008_POLICY_VIOLATION)
@@ -367,6 +373,18 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
     )
 
     active_turn_task: asyncio.Task[None] | None = None
+    active_turn_orch: Orchestrator | None = None
+    ws_closing = False
+
+    def _is_closing() -> bool:
+        return ws_closing
+
+    async def _cancel_active_turn() -> None:
+        nonlocal active_turn_task
+        if active_turn_task is not None and not active_turn_task.done():
+            active_turn_task.cancel()
+            await asyncio.gather(active_turn_task, return_exceptions=True)
+        active_turn_task = None
 
     try:
         while True:
@@ -398,8 +416,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
                 msg_type = payload.get("type")
                 if msg_type == "listen.start":
-                    if active_turn_task and not active_turn_task.done():
-                        active_turn_task.cancel()
+                    await _cancel_active_turn()
                     session.start_listening()
 
                 elif msg_type == "listen.stop":
@@ -412,8 +429,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         await websocket.send_json({"type": "error", "code": err.code})
 
                 elif msg_type == "turn.commit":
-                    if active_turn_task and not active_turn_task.done():
-                        active_turn_task.cancel()
+                    await _cancel_active_turn()
 
                     turn_text = str(payload.get("text", "")).strip()
                     raw_ctx = payload.get("context", {})
@@ -468,6 +484,10 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         hub=app.state.host_session_hub,
                                         self_host_id=turn_self_host_id,
                                         host_screen_consent=turn_host_screen_consent,
+                                        include_autonomous_job=getattr(
+                                            app.state, "job_runner", None
+                                        )
+                                        is not None,
                                         audit=app.state.audit_log(db),
                                     )
                                 except Exception:
@@ -548,13 +568,62 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                             budget = ReplyBudget(max_output_tokens=max_tok, timeout_s=timeout_s)
                             turn_generator = expert_gen or app.state.text_generator
                     else:
-                        budget = ReplyBudget(max_output_tokens=400, timeout_s=30.0)
+                        default_timeout = (
+                            float(settings.text_timeout_s)
+                            if settings is not None and hasattr(settings, "text_timeout_s")
+                            else 30.0
+                        )
+                        budget = ReplyBudget(
+                            max_output_tokens=400, timeout_s=max(30.0, default_timeout)
+                        )
                         turn_generator = app.state.text_generator
 
                     turn_tool_runner: ToolCallRunner | None = None
+                    turn_cu_note: str | None = None
+                    turn_cu_cleanup: CuCleanupCallback | None = None
+                    ended_cu_events: list[ComputerUseSessionEvent] = []
+                    turn_orch: Orchestrator | None = None
                     if turn_caps:
                         stream_orch = build_stream_orchestrator(app.state)
+                        turn_orch = stream_orch
+                        active_turn_orch = stream_orch
                         eff_locale = target_locale or Locale.VI
+                        detected_lang = detect_text_language(turn_text)
+                        prompt_locale = (
+                            Locale.EN
+                            if detected_lang == Locale.EN
+                            else (target_locale or Locale.VI)
+                        )
+                        if turn_tools:
+                            try:
+                                turn_cu_note = await stream_orch.active_cu_session_prompt_note(
+                                    owner.owner_id,
+                                    locale=prompt_locale,
+                                    request_id=session_id,
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "Failed to read active CU session prompt note",
+                                    exc_info=True,
+                                )
+                                turn_cu_note = None
+
+                        async def _cleanup_ws_cu(
+                            reason: str,
+                            *,
+                            _orch: Orchestrator = stream_orch,
+                            _ended: list[ComputerUseSessionEvent] = ended_cu_events,
+                        ) -> ComputerUseSessionEvent | None:
+                            ev = await _orch.cleanup_dangling_cu_session(
+                                owner_id=owner.owner_id,
+                                reason=reason,
+                                request_id=session_id,
+                            )
+                            if ev is not None:
+                                _ended.append(ev)
+                            return ev
+
+                        turn_cu_cleanup = _cleanup_ws_cu
 
                         async def _run_voice_tool(
                             call: ToolCall,
@@ -583,6 +652,8 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                             )
 
                         turn_tool_runner = _run_voice_tool
+                    else:
+                        active_turn_orch = None
 
                     async def run_reply(
                         target_text: str,
@@ -595,6 +666,10 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         v: str | None = None,
                         *,
                         _code_gen: TextGenerator | None = code_gen,
+                        _turn_note: str | None = turn_cu_note,
+                        _cu_cleanup: CuCleanupCallback | None = turn_cu_cleanup,
+                        _orch: Orchestrator | None = turn_orch,
+                        _ended: list[ComputerUseSessionEvent] = ended_cu_events,
                     ) -> None:
                         signals = {
                             "signals": list(
@@ -604,6 +679,22 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         domain_id_str = str(prep.domain_id) if prep.domain_id is not None else None
                         mode_val = prep.decision.mode.value
                         has_detail = False
+                        emitted_cu_ended = False
+
+                        async def _safe_cleanup(reason: str) -> None:
+                            if _cu_cleanup is not None:
+                                with contextlib.suppress(Exception):
+                                    await _cu_cleanup(reason)
+                            elif _orch is not None:
+                                with contextlib.suppress(Exception):
+                                    ev = await _orch.cleanup_dangling_cu_session(
+                                        owner_id=owner.owner_id,
+                                        reason=reason,
+                                        request_id=session_id,
+                                    )
+                                    if ev is not None:
+                                        _ended.append(ev)
+
                         try:
                             if req_mode is not None:
                                 await websocket.send_json(
@@ -624,6 +715,8 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                 code_generator=_code_gen,
                                 tools=tools_arg,
                                 tool_runner=runner_arg,
+                                turn_note=_turn_note,
+                                cu_cleanup=_cu_cleanup,
                             ):
                                 if isinstance(event, GestureChosen):
                                     await websocket.send_json(
@@ -680,6 +773,8 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         act_msg["hostId"] = event.host_id
                                     await websocket.send_json(act_msg)
                                 elif isinstance(event, ComputerUseSessionEvent):
+                                    if event.status == "ended":
+                                        emitted_cu_ended = True
                                     await websocket.send_json(
                                         {"type": "cu_session"} | session_event_payload(event)
                                     )
@@ -725,10 +820,30 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         | signals
                                     )
                         except asyncio.CancelledError:
-                            pass
+                            if _cu_cleanup is not None or _orch is not None:
+                                with contextlib.suppress(BaseException):
+                                    await asyncio.shield(_safe_cleanup("turn_cancelled"))
+                            if not _is_closing() and _ended and not emitted_cu_ended:
+                                with contextlib.suppress(Exception):
+                                    await websocket.send_json(
+                                        {"type": "cu_session"} | session_event_payload(_ended[-1])
+                                    )
                         except Exception:
                             logger.warning("voice_ws_reply_error")
-                            await websocket.send_json({"type": "error", "code": "reply_failed"})
+                            if _cu_cleanup is not None or _orch is not None:
+                                with contextlib.suppress(BaseException):
+                                    await asyncio.shield(_safe_cleanup("turn_failed"))
+                            if not _is_closing():
+                                if _ended and not emitted_cu_ended:
+                                    with contextlib.suppress(Exception):
+                                        await websocket.send_json(
+                                            {"type": "cu_session"}
+                                            | session_event_payload(_ended[-1])
+                                        )
+                                with contextlib.suppress(Exception):
+                                    await websocket.send_json(
+                                        {"type": "error", "code": "reply_failed"}
+                                    )
 
                     active_turn_task = asyncio.create_task(
                         run_reply(
@@ -812,18 +927,37 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         )
 
                 elif msg_type == "abort":
-                    if active_turn_task and not active_turn_task.done():
-                        active_turn_task.cancel()
+                    await _cancel_active_turn()
                     session.abort(str(payload.get("reason", "cancel")))
 
                 elif msg_type == "bye":
-                    if active_turn_task and not active_turn_task.done():
-                        active_turn_task.cancel()
+                    ws_closing = True
+                    was_turn_running = active_turn_task is not None and not active_turn_task.done()
+                    await _cancel_active_turn()
+                    if was_turn_running and active_turn_orch is not None:
+                        with contextlib.suppress(BaseException):
+                            await asyncio.shield(
+                                active_turn_orch.cleanup_dangling_cu_session(
+                                    owner_id=owner.owner_id,
+                                    reason="turn_disconnected",
+                                    request_id=session_id,
+                                )
+                            )
                     await websocket.close()
                     break
 
     except WebSocketDisconnect:
-        pass
+        ws_closing = True
     finally:
-        if active_turn_task and not active_turn_task.done():
-            active_turn_task.cancel()
+        ws_closing = True
+        was_turn_running = active_turn_task is not None and not active_turn_task.done()
+        await _cancel_active_turn()
+        if was_turn_running and active_turn_orch is not None:
+            with contextlib.suppress(BaseException):
+                await asyncio.shield(
+                    active_turn_orch.cleanup_dangling_cu_session(
+                        owner_id=owner.owner_id,
+                        reason="turn_disconnected",
+                        request_id=session_id,
+                    )
+                )

@@ -37,9 +37,20 @@ def sse(*chunks: object) -> bytes:
     return ("".join(lines) + "data: [DONE]\n\n").encode()
 
 
-def run(handler: httpx.MockTransport, request: ChatRequest = REQUEST) -> list[ChatEvent]:
+def run(
+    handler: httpx.MockTransport,
+    request: ChatRequest = REQUEST,
+    *,
+    max_attempts: int = 5,
+    retry_base_delay_s: float = 0.0,
+) -> list[ChatEvent]:
     generator = OpenAICompatibleTextGenerator(
-        "http://ai.internal:8000/v1", "vi-chat", api_key="k", transport=handler
+        "http://ai.internal:8000/v1",
+        "vi-chat",
+        api_key="k",
+        transport=handler,
+        max_attempts=max_attempts,
+        retry_base_delay_s=retry_base_delay_s,
     )
 
     async def collect() -> list[ChatEvent]:
@@ -551,3 +562,193 @@ def test_mid_stream_thought_signature_without_tool_calls_chunk() -> None:
     assert tool.call.extra == {"thought_signature": "chunk1_chunk2_chunk3"}
 
 
+def test_503_recovery_succeeds_on_attempt_5() -> None:
+    attempts = 0
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 4:
+            return httpx.Response(503, content=b'{"error":{"status":"UNAVAILABLE"}}')
+        return httpx.Response(
+            200,
+            content=sse({"choices": [{"delta": {"content": "Recovered!"}}]}),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    events = run(httpx.MockTransport(handle), max_attempts=5, retry_base_delay_s=0.0)
+    assert attempts == 5
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "Recovered!"
+
+
+def test_429_quota_exhausted_fast_fails_without_retry() -> None:
+    attempts = 0
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            429,
+            content=b'{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota exceeded"}}',
+        )
+
+    with pytest.raises(ProviderUnavailableError, match="quota_exhausted"):
+        run(httpx.MockTransport(handle), max_attempts=5, retry_base_delay_s=0.0)
+    assert attempts == 1
+
+
+def test_503_retry_stops_when_timeout_deadline_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    fake_clock = [100.0]
+
+    def fake_perf_counter() -> float:
+        return fake_clock[0]
+
+    async def fake_sleep(seconds: float) -> None:
+        fake_clock[0] += seconds
+
+    monkeypatch.setattr(openai_compatible.time, "perf_counter", fake_perf_counter)
+    monkeypatch.setattr(openai_compatible.asyncio, "sleep", fake_sleep)
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        fake_clock[0] += 3.0  # each attempt consumes 3.0s inside a 4.0s request timeout
+        return httpx.Response(503, content=b"unavailable")
+
+    req = ChatRequest(
+        messages=(Message(Role.USER, "hi"),),
+        timeout_s=4.0,
+    )
+    with pytest.raises(ProviderUnavailableError, match="status 503"):
+        run(httpx.MockTransport(handle), request=req, max_attempts=5, retry_base_delay_s=1.0)
+    assert attempts == 1
+
+
+def test_payload_detaches_tool_image_to_subsequent_user_message() -> None:
+    generator = OpenAICompatibleTextGenerator("http://ai.internal:8000/v1", "m", api_key="k")
+    req = ChatRequest(
+        messages=(
+            Message(Role.USER, "Check screen"),
+            Message(
+                Role.ASSISTANT,
+                "",
+                tool_calls=(ToolCall(id="call_1", name="ui__observe_hybrid", arguments={}),),
+            ),
+            Message(
+                Role.TOOL,
+                '{"status":"ok"}',
+                tool_call_id="call_1",
+                image_base64="aW1hZ2VkYXRh",
+                image_mime_type="image/jpeg",
+            ),
+        )
+    )
+    payload = generator._payload(req)
+    msgs = payload["messages"]
+    assert len(msgs) == 4
+    assert msgs[2] == {"role": "tool", "content": '{"status":"ok"}', "tool_call_id": "call_1"}
+    assert msgs[3]["role"] == "user"
+    assert msgs[3]["content"][1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,aW1hZ2VkYXRh"},
+    }
+
+
+def test_transient_read_timeout_retries_and_recovers() -> None:
+    attempts = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ReadTimeout("timed out", request=request)
+        return httpx.Response(
+            200,
+            content=sse({"choices": [{"delta": {"content": "After timeout"}}]}),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    events = run(httpx.MockTransport(handle), max_attempts=3, retry_base_delay_s=0.0)
+    assert attempts == 2
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "After timeout"
+
+
+def test_mid_stream_read_timeout_after_text_delta_does_not_retry_or_duplicate() -> None:
+    attempts = 0
+
+    class _PartialStream(httpx.AsyncByteStream):
+        def __init__(self, req: httpx.Request) -> None:
+            self._req = req
+
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            chunk = json.dumps({"choices": [{"delta": {"content": "Hello "}}]})
+            yield f"data: {chunk}\n\n".encode()
+            raise httpx.ReadTimeout("stream dropped mid-flight", request=self._req)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200,
+            stream=_PartialStream(request),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    emitted: list[str] = []
+
+    async def _collect() -> None:
+        gen = OpenAICompatibleTextGenerator(
+            "http://ai.internal:8000/v1",
+            "m",
+            api_key="k",
+            transport=httpx.MockTransport(handle),
+            max_attempts=3,
+            retry_base_delay_s=0.0,
+        )
+        async for ev in gen.stream(REQUEST):
+            if isinstance(ev, TextDelta):
+                emitted.append(ev.text)
+
+    with pytest.raises(ProviderUnavailableError, match="ReadTimeout"):
+        asyncio.run(_collect())
+    assert attempts == 1
+    assert emitted == ["Hello "]
+
+
+def test_429_quota_exhausted_over_1kb_fast_fails_on_attempt_1() -> None:
+    attempts = 0
+    padding = "x" * 1500
+    body = f'{{"error":{{"pad":"{padding}","status":"RESOURCE_EXHAUSTED"}}}}'.encode()
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(429, content=body)
+
+    with pytest.raises(ProviderUnavailableError, match="quota_exhausted"):
+        run(httpx.MockTransport(handle), max_attempts=4, retry_base_delay_s=0.0)
+    assert attempts == 1
+
+
+def test_connect_error_and_remote_protocol_error_recover_when_nothing_emitted() -> None:
+    attempts = 0
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("connect failed", request=request)
+        if attempts == 2:
+            raise httpx.RemoteProtocolError("peer reset", request=request)
+        return httpx.Response(
+            200,
+            content=sse({"choices": [{"delta": {"content": "RecoveredNet"}}]}),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    events = run(httpx.MockTransport(handle), max_attempts=4, retry_base_delay_s=0.0)
+    assert attempts == 3
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "RecoveredNet"

@@ -157,7 +157,7 @@ def available_capabilities(tools: Iterable[str], *, allow_typing: bool) -> list[
         caps.append("clipboard_roundtrip")
     if "app.launch" in have and "window.active_context" in have:
         caps.append("open_app")
-    if allow_typing and {"app.launch", "ui.accessibility_tree"} <= have:
+    if allow_typing and {"app.launch", "window.active_context"} <= have:
         caps.append("type_in_app")
     if "browser.current_url" in have:
         caps.append("read_browser_url")
@@ -224,8 +224,8 @@ def verify_open_app(task: Task, structured: dict[str, Any]) -> tuple[bool, str]:
 
 
 def verify_typed(task: Task, structured: dict[str, Any]) -> tuple[bool, str]:
-    tree = str(structured.get("compactUiTree", ""))
-    return bool(task.probe) and str(task.probe) in tree, f"tree_chars={len(tree)}"
+    surface_text = str(structured.get("visibleSummary") or structured.get("compactUiTree") or "")
+    return bool(task.probe) and str(task.probe) in surface_text, f"text_chars={len(surface_text)}"
 
 
 def verify_url_in_reply(reply: str, structured: dict[str, Any]) -> tuple[bool, str]:
@@ -415,12 +415,12 @@ def run_task(
                 task, _structured(client.invoke(host_id, "window.active_context", {}))
             )
         elif task.capability == "type_in_app":
-            tree = client.invoke(
+            context = client.invoke(
                 host_id,
-                "ui.accessibility_tree",
-                {"action": "inspect_window", "windowTitle": task.app or "", "maxNodes": 60},
+                "window.active_context",
+                {"maxChars": 1200},
             )
-            outcome.verified, outcome.verify_detail = verify_typed(task, _structured(tree))
+            outcome.verified, outcome.verify_detail = verify_typed(task, _structured(context))
         elif task.capability == "read_browser_url":
             outcome.verified, outcome.verify_detail = verify_url_in_reply(
                 outcome.reply, _structured(client.invoke(host_id, "browser.current_url", {}))

@@ -153,9 +153,7 @@ def _make_manifest(
             description="Play or pause media.",
             input_schema={
                 "type": "object",
-                "properties": {
-                    "mode": {"type": "string", "enum": ["toggle", "play", "pause"]}
-                },
+                "properties": {"mode": {"type": "string", "enum": ["toggle", "play", "pause"]}},
                 "additionalProperties": False,
             },
             output_schema={
@@ -167,7 +165,7 @@ def _make_manifest(
             risk=RiskTier.R1,
             observes=False,
             reversible=True,
-             platform=platform.value,
+            platform=platform.value,
         ),
         ToolDescriptor(
             name="app.launch",
@@ -271,6 +269,31 @@ def test_s71_grant_expiry_and_suspension() -> None:
         if g.enabled:
             assert g.suspended_at == now
             assert g.is_active(now) is False
+
+    # Explicitly enabling/applying a profile to a single family (suspended=None, as sent by mobile)
+    # clears suspended_at on that family while keeping other families suspended.
+    single_resumed = asyncio.run(
+        set_grants(
+            repo,
+            audit,
+            owner_id,
+            host.host_id,
+            [
+                GrantUpdateSpec(
+                    family=ToolFamily.MEDIA,
+                    max_risk=RiskTier.R1,
+                    enabled=True,
+                    suspended=None,
+                )
+            ],
+            now + timedelta(minutes=2),
+            "req-2b",
+        )
+    )
+    by_fam_single = {g.family: g for g in single_resumed}
+    assert by_fam_single[ToolFamily.MEDIA].suspended_at is None
+    assert by_fam_single[ToolFamily.MEDIA].is_active(now + timedelta(minutes=2)) is True
+    assert by_fam_single[ToolFamily.APP].suspended_at == now
 
     # Unsuspend all ("Bật lại quyền")
     resumed_list = asyncio.run(
@@ -413,13 +436,13 @@ def test_s72_50_requests_multihost_targeting_zero_wrong_host() -> None:
                 wrong_host_executions += 1
             last_alias = res.host.alias.value
             last_at = now
-        assert res.status == exp_status, (
-            f"step {idx} ({tool}, {explicit}): {res.status} != {exp_status}"
-        )
+        assert (
+            res.status == exp_status
+        ), f"step {idx} ({tool}, {explicit}): {res.status} != {exp_status}"
         if exp_host is not None and res.host is not None:
-            assert res.host.host_id == exp_host.host_id, (
-                f"step {idx}: wrong host {res.host.alias.value}"
-            )
+            assert (
+                res.host.host_id == exp_host.host_id
+            ), f"step {idx}: wrong host {res.host.alias.value}"
 
     assert wrong_host_executions == 0
 
@@ -570,6 +593,7 @@ def test_s71_s73_s75_orchestrator_15m_scope_signed_r3_and_emergency_stop() -> No
             emit_event=_sink,
             request_id="req-orch",
         )
+
         def runner(call: ToolCall) -> object:
             return orch.handle_call(call, ctx)
 
@@ -616,10 +640,7 @@ def test_s71_s73_s75_orchestrator_15m_scope_signed_r3_and_emergency_stop() -> No
         assert r3_approval_meta["scope"] == "once"
         assert "signature" in r3_approval_meta
         assert "publicKey" in r3_approval_meta
-        assert (
-            base64.b64decode(r3_approval_meta["publicKey"])
-            == phone_device.public_key
-        )
+        assert base64.b64decode(r3_approval_meta["publicKey"]) == phone_device.public_key
 
         # 4. S7.3 Emergency Stop: suspends R2+ grants, sends xuna/stop, clears 15m scopes, audits
         stop_summary = await orch.emergency_stop(

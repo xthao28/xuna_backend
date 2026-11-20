@@ -261,7 +261,8 @@ class TestEphemeralMultimodalVisionPipeline:
     @pytest.mark.anyio
     async def test_chat_turn_delivers_ephemeral_image_to_generator_in_next_round(self) -> None:
         fake_jpeg_b64 = (
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "+A8AAQUBAScY42YAAAAASUVORK5CYII="
         )
 
         class MockVisionGenerator:
@@ -619,13 +620,14 @@ class TestRuleH5GenericLayerCompliance:
             r"\b(spotify|chrome|safari|zalo|figma|slack|notion|telegram)\b",
             re.IGNORECASE,
         )
+        backend_root = Path(__file__).resolve().parents[2]
         files_to_scan = [
-            Path("backend/src/xuna_backend/modules/actions/application/prompts.py"),
-            Path("backend/src/xuna_backend/modules/actions/application/catalog.py"),
-            Path("backend/src/xuna_backend/modules/actions/application/orchestrator.py"),
-            Path("backend/src/xuna_backend/modules/actions/application/computer_use.py"),
+            backend_root / "src/xuna_backend/modules/actions/application/prompts.py",
+            backend_root / "src/xuna_backend/modules/actions/application/catalog.py",
+            backend_root / "src/xuna_backend/modules/actions/application/orchestrator.py",
+            backend_root / "src/xuna_backend/modules/actions/application/computer_use.py",
         ]
-        conv_dir = Path("backend/src/xuna_backend/modules/conversation/application")
+        conv_dir = backend_root / "src/xuna_backend/modules/conversation/application"
         if conv_dir.exists():
             for p in conv_dir.rglob("*.py"):
                 files_to_scan.append(p)
@@ -644,3 +646,89 @@ class TestRuleH5GenericLayerCompliance:
                         )
 
         assert not violations, "Rule H5 violations found:\n" + "\n".join(violations)
+
+    def test_udc19_universal_hints_menu_risk_and_summaries(self) -> None:
+        from xuna_backend.modules.actions.application.prompts import state_driven_hint
+        from xuna_backend.modules.actions.domain.action_summary import ActionSummary
+
+        # 1. Changed action with disposition.retry="unsafe" must NOT emit stale_ref hint
+        ok_changed = state_driven_hint(
+            {"effect": "changed", "uiChanged": True, "disposition": {"retry": "unsafe"}}
+        )
+        assert ok_changed is None
+
+        # 2. Action with effect="no_change" guides visual/gesture verification
+        no_change_hint = state_driven_hint(
+            {"effect": "no_change", "uiChanged": False, "disposition": {"retry": "unsafe"}}
+        )
+        assert no_change_hint is not None
+        assert "ui__observe_hybrid" in no_change_hint
+        assert "clickCount=2" in no_change_hint
+
+        # 3. Missing or ambiguous home target produces clear hints
+        not_found_hint = state_driven_hint({"errorCode": "target_not_found"})
+        assert not_found_hint is not None
+        assert "openTarget" in not_found_hint
+
+        # 4. Orchestrator._declared_risk_floor elevates destructive menuPath to R3
+        click_desc = ToolDescriptor(
+            name="input.click",
+            family=ToolFamily.INPUT,
+            risk=RiskTier.R2,
+            description="click",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            output_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        )
+        assert (
+            Orchestrator._declared_risk_floor(click_desc, {"menuPath": "File > Open Folder..."})
+            == RiskTier.R2
+        )
+        assert (
+            Orchestrator._declared_risk_floor(click_desc, {"menuPath": "File > Quit"})
+            == RiskTier.R3
+        )
+        assert (
+            Orchestrator._declared_risk_floor(click_desc, {"menuPath": "Message > Send"})
+            == RiskTier.R3
+        )
+
+        # 5. ActionSummary formats openTarget, menuPath, double-click, and hover accurately
+        assert "xuna_pet" in ActionSummary.format_pending(
+            "app.launch", {"id": "editor", "openTarget": "xuna_pet"}, "Mac", Locale.VI
+        )
+        assert "File > Open" in ActionSummary.format_pending(
+            "input.click", {"menuPath": "File > Open"}, "Mac", Locale.EN
+        )
+        assert "Nhấp đúp" in ActionSummary.format_pending(
+            "input.click", {"elementName": "Row 1", "clickCount": 2}, "Mac", Locale.VI
+        )
+        assert "Hover" in ActionSummary.format_pending(
+            "input.click", {"elementName": "Row 1", "hover": True}, "Mac", Locale.EN
+        )
+
+        # 6. Verbose desktop ui.inspect nodes are compacted so >= 75 controls fit in 6144 B
+        verbose_nodes = [
+            {
+                "id": f"ui_{i}",
+                "ref": f"@s00000001:e{i}",
+                "role": "row" if i > 20 else "button",
+                "name": f"Item {i} · Artist · 04:12",
+                "enabled": True,
+                "visible": True,
+                "editable": False,
+                "isPassword": False,
+                "bounds": {"x": 240, "y": 40 + i * 24, "width": 600, "height": 24},
+            }
+            for i in range(1, 90)
+        ]
+        packed = json.loads(
+            encode_tool_payload(
+                "ok",
+                {"appId": "player", "windowTitle": "Library", "nodes": verbose_nodes},
+            )
+        )
+        kept = packed["output"]["nodes"]
+        assert len(kept) >= 72
+        assert kept[25]["ref"] == "@s00000001:e26"
+        assert "bounds" not in kept[25]
+        assert "enabled" not in kept[25]

@@ -170,3 +170,52 @@ def test_a_rerun_turn_carries_the_note_with_this_owners_computer() -> None:
     bad = {**_template_body(str(mac.host_id)), "apps": ["Not An Id"]}
     assert _turn(client, token, bad) == 422
     assert len(llm.requests) == calls
+
+
+def test_followup_sse_turn_injects_active_cu_session_note_and_combines_with_template() -> None:
+    from datetime import UTC, datetime
+
+    from xuna_backend.modules.actions.application.computer_use import ComputerUseSessionState
+
+    llm = _ScriptedLLM([[TextDelta("Được"), _done(5)]] * 3)
+    client, issuer, owner, host_repo, _, _ = _build_test_harness(llm)
+    mac = _online_mac(client, host_repo, owner.owner_id)
+    token = issuer.token("owner-1")
+    cu_store = client.app.state.cu_session_store  # type: ignore[union-attr]
+    now_utc = datetime.now(UTC)
+
+    asyncio.run(
+        cu_store.start(
+            ComputerUseSessionState(
+                session_id="cu-sse-followup",
+                owner_id=owner.owner_id,
+                host_id=mac.host_id,
+                goal="Draft note",
+                allowed_apps=("notes",),
+                allowed_domains=("docs.example.com",),
+                max_steps=20,
+                max_minutes=10,
+                started_at_utc=now_utc,
+                last_heartbeat_at=now_utc,
+                target_alias="Mac",
+                last_window={"appId": "notes", "windowTitle": "Weekly Plan"},
+            ),
+            now_utc,
+        )
+    )
+
+    assert _turn(client, token, None) == 200
+    sys_prompt = llm.requests[-1].messages[0].content
+    assert "cu-sse-followup" in sys_prompt
+    assert "Weekly Plan" in sys_prompt
+
+    # Combines cleanly with cuTemplate when both are present
+    assert _turn(client, token, _template_body(str(mac.host_id))) == 200
+    combined = llm.requests[-1].messages[0].content
+    assert "chạy lại mẫu đã lưu 'Báo cáo tuần'" in combined
+    assert "cu-sse-followup" in combined
+
+    # Absent once the CU session ends
+    asyncio.run(cu_store.mark_ended("cu-sse-followup", "completed", now_utc))
+    assert _turn(client, token, None) == 200
+    assert "cu-sse-followup" not in llm.requests[-1].messages[0].content

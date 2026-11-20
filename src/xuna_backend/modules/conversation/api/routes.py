@@ -4,6 +4,7 @@ phone voice V1: `POST /v1/speech/transcriptions` plus spoken replies (`speak`)."
 import asyncio
 import base64
 import binascii
+import contextlib
 import json
 import logging
 import time
@@ -24,7 +25,11 @@ from xuna_backend.modules.actions.api.routes import build_stream_orchestrator
 from xuna_backend.modules.actions.application.catalog import load_tool_catalog_for_owner
 from xuna_backend.modules.actions.application.computer_use import session_event_payload
 from xuna_backend.modules.actions.application.cu_template import CuTemplatePin
-from xuna_backend.modules.actions.application.orchestrator import ActionContext, EventSink
+from xuna_backend.modules.actions.application.orchestrator import (
+    ActionContext,
+    EventSink,
+    Orchestrator,
+)
 from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
@@ -39,6 +44,7 @@ from xuna_backend.modules.cognition.application.ports import (
     SpeechSynthesizer,
     TextGenerator,
 )
+from xuna_backend.modules.cognition.domain.language_detector import detect_text_language
 from xuna_backend.modules.cognition.domain.types import (
     ChatFinished,
     Locale,
@@ -57,6 +63,7 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     MAX_HISTORY_LINE_CHARS,
     MAX_HISTORY_LINES,
     MAX_INPUT_CHARS,
+    CuCleanupCallback,
     DetailDelta,
     GestureChosen,
     HistoryLine,
@@ -459,12 +466,13 @@ async def turn(
                 hub=hub,
                 self_host_id=self_host_id,
                 host_screen_consent=host_screen_consent,
+                include_autonomous_job=getattr(request.app.state, "job_runner", None) is not None,
                 audit=state(request, "audit_log")(session),
             )
         except Exception:
             _logger.debug("Failed to load tool catalog for turn", exc_info=True)
             tools = ()
-    turn_note: Callable[[Locale], str] | None = None
+    template_note: Callable[[Locale], str] | None = None
     if cu_template is not None and tools:
         # The computer's current alias, read for this owner only; the pin itself is by id.
         template_alias: str | None = None
@@ -480,9 +488,47 @@ async def turn(
         def _template_note(locale: Locale) -> str:
             return pin.prompt_note(locale, template_alias)
 
-        turn_note = _template_note
+        template_note = _template_note
 
     await session.close()  # release the DB connection before a long provider call
+
+    raw_rid = getattr(request.state, "request_id", "")
+    request_id_str = str(raw_rid) if isinstance(raw_rid, str) else ""
+    stream_orch: Orchestrator | None = (
+        build_stream_orchestrator(request.app.state) if client_caps else None
+    )
+    cu_note: str | None = None
+    if stream_orch is not None and tools:
+        detected = detect_text_language(body.text)
+        eff_locale = detected if detected == Locale.EN else (body.locale or Locale.VI)
+        try:
+            cu_note = await stream_orch.active_cu_session_prompt_note(
+                owner.owner_id,
+                locale=eff_locale,
+                request_id=request_id_str,
+            )
+        except Exception:
+            _logger.debug("Failed to read active CU session prompt note", exc_info=True)
+            cu_note = None
+
+    turn_note: Callable[[Locale], str] | None = None
+    if template_note is not None and cu_note:
+        tpl_fn = template_note
+        cu_text = cu_note
+
+        def _combined_note(locale: Locale) -> str:
+            return f"{tpl_fn(locale)}{cu_text}"
+
+        turn_note = _combined_note
+    elif template_note is not None:
+        turn_note = template_note
+    elif cu_note:
+        cu_only_text = cu_note
+
+        def _cu_only_note(_locale: Locale) -> str:
+            return cu_only_text
+
+        turn_note = _cu_only_note
 
     settings = state(request, "settings")
     chosen_mode = prepared.decision.mode
@@ -535,13 +581,12 @@ async def turn(
     domain_id_str = str(prepared.domain_id) if prepared.domain_id is not None else None
 
     tool_runner: ToolCallRunner | None = None
-    if client_caps:
-        stream_orch = build_stream_orchestrator(request.app.state)
-        raw_rid = getattr(request.state, "request_id", "")
-        request_id_str = str(raw_rid) if isinstance(raw_rid, str) else ""
+    cu_cleanup: CuCleanupCallback | None = None
+    if stream_orch is not None:
+        _sse_orch = stream_orch
 
         async def _run_tool(call: ToolCall, emit: EventSink) -> Message:
-            return await stream_orch.handle_call(
+            return await _sse_orch.handle_call(
                 call,
                 ActionContext(
                     owner_id=owner.owner_id,
@@ -557,7 +602,15 @@ async def turn(
                 ),
             )
 
+        async def _cleanup_sse_cu(reason: str) -> ComputerUseSessionEvent | None:
+            return await _sse_orch.cleanup_dangling_cu_session(
+                owner_id=owner.owner_id,
+                reason=reason,
+                request_id=request_id_str,
+            )
+
         tool_runner = _run_tool
+        cu_cleanup = _cleanup_sse_cu
 
     async def events() -> AsyncIterator[str]:
         if body.mode is not None:
@@ -576,6 +629,7 @@ async def turn(
             locale_vi=(chat_request.locale == Locale.VI),
             tool_runner=tool_runner,
             code_generator=code_gen,
+            cu_cleanup=cu_cleanup,
         )
         stream: AsyncIterator[SpokenTurnEvent] = (
             spoken_turn(text_events, synthesizer, body.locale, voice=body.voice)
@@ -583,6 +637,7 @@ async def turn(
             else text_events
         )
         has_detail = False
+        stream_completed = False
         event_queue: asyncio.Queue[SpokenTurnEvent | BaseException | None] = asyncio.Queue()
 
         async def _pump_stream() -> None:
@@ -592,6 +647,10 @@ async def turn(
             except BaseException as exc:
                 await event_queue.put(exc)
             finally:
+                aclose = getattr(stream, "aclose", None)
+                if callable(aclose):
+                    with contextlib.suppress(BaseException):
+                        await aclose()
                 await event_queue.put(None)
 
         pump_task = asyncio.create_task(_pump_stream())
@@ -603,6 +662,7 @@ async def turn(
                     yield ": keepalive\n\n"
                     continue
                 if item is None:
+                    stream_completed = True
                     break
                 if isinstance(item, BaseException):
                     raise item
@@ -709,6 +769,15 @@ async def turn(
             if not pump_task.done():
                 pump_task.cancel()
                 await asyncio.gather(pump_task, return_exceptions=True)
+            if stream_orch is not None and not stream_completed:
+                with contextlib.suppress(BaseException):
+                    await asyncio.shield(
+                        stream_orch.cleanup_dangling_cu_session(
+                            owner_id=owner.owner_id,
+                            reason="turn_disconnected",
+                            request_id=request_id_str,
+                        )
+                    )
 
     return StreamingResponse(
         events(), media_type="text/event-stream", headers={"Cache-Control": "no-store"}

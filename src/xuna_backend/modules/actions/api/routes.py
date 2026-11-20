@@ -360,6 +360,7 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
             else None
         ),
         cu_session_store=cu_store,
+        job_runner=getattr(app_state, "job_runner", None),
     )
 
 
@@ -443,9 +444,7 @@ async def decide_action_approval(
     runner = getattr(request.app.state, "job_runner", None)
     if runner is not None:
         try:
-            await runner.on_approval_resolved(
-                approval_id, updated.state == ApprovalState.APPROVED
-            )
+            await runner.on_approval_resolved(approval_id, updated.state == ApprovalState.APPROVED)
         except Exception as err:
             _logger.debug("Failed notifying job runner of approval %s: %s", approval_id, err)
     return {

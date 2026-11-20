@@ -19,6 +19,7 @@ from xuna_backend.modules.actions.application.orchestrator import (
     tool_system_prompt,
 )
 from xuna_backend.modules.actions.domain.entities import (
+    APPROVAL_TTL_SECONDS,
     MAX_CALLS_PER_ROUND,
     MAX_TOOL_ROUNDS,
     TURN_BUDGET_SECONDS,
@@ -484,6 +485,27 @@ TurnEvent = (
 )
 
 ToolCallRunner = Callable[[ToolCall, EventSink], Awaitable[Message]]
+CuCleanupCallback = Callable[[str], Awaitable[ComputerUseSessionEvent | None]]
+
+
+async def _shielded_cu_cleanup(
+    cu_cleanup: CuCleanupCallback | None, reason: str
+) -> ComputerUseSessionEvent | None:
+    if cu_cleanup is None:
+        return None
+
+    async def _run() -> ComputerUseSessionEvent | None:
+        try:
+            return await cu_cleanup(reason)
+        except Exception:
+            return None
+
+    task = asyncio.ensure_future(_run())
+    try:
+        return await asyncio.shield(task)
+    except BaseException:
+        return None
+
 
 # A third identical call that already failed twice with the same result is blocked before
 # execution (OpenClaw-style loop guard); the model must change approach or answer.
@@ -579,6 +601,7 @@ async def chat_turn(
     locale_vi: bool = True,
     tool_runner: ToolCallRunner | None = None,
     code_generator: TextGenerator | None = None,
+    cu_cleanup: CuCleanupCallback | None = None,
 ) -> AsyncIterator[TurnEvent]:
     """Streams the reply with gesture tags removed, splits say/detail when `sections=True`,
     and executes up to `MAX_TOOL_ROUNDS` x `MAX_CALLS_PER_ROUND` tool calls when
@@ -605,13 +628,19 @@ async def chat_turn(
     emitted_any_text = False
     last_action_summary: str | None = None
     active_generator: TextGenerator = generator
-    active_max_tokens: int = request.max_output_tokens
+    active_max_tokens: int = (
+        max(request.max_output_tokens, 2048) if request.tools else request.max_output_tokens
+    )
+    retried_empty_length = False
+    timed_out = False
 
     try:
-        for round_idx in range(MAX_TOOL_ROUNDS + 1):
+        round_idx = 0
+        while round_idx <= MAX_TOOL_ROUNDS:
             elapsed = time.monotonic() - turn_started
             remaining_budget = TURN_BUDGET_SECONDS - elapsed
             if remaining_budget <= 0:
+                timed_out = True
                 break
 
             allow_tools_this_round = round_idx < MAX_TOOL_ROUNDS and bool(request.tools)
@@ -634,6 +663,7 @@ async def chat_turn(
                 req: ChatRequest = round_request,
                 text_parts: list[str] = round_text_parts,
                 calls: list[ToolCall] = round_calls,
+                started: float = turn_started,
             ) -> AsyncIterator[ChatEvent]:
                 nonlocal active_generator, active_max_tokens
                 try:
@@ -648,7 +678,15 @@ async def chat_turn(
                     ):
                         active_generator = code_generator
                         active_max_tokens = max(active_max_tokens, 3000)
-                        async for ev in active_generator.stream(req):
+                        remaining_after = TURN_BUDGET_SECONDS - (time.monotonic() - started)
+                        fallback_req = ChatRequest(
+                            messages=req.messages,
+                            locale=req.locale,
+                            max_output_tokens=active_max_tokens,
+                            timeout_s=min(req.timeout_s, max(remaining_after, 1.0)),
+                            tools=req.tools,
+                        )
+                        async for ev in active_generator.stream(fallback_req):
                             yield ev
                     else:
                         raise
@@ -705,10 +743,26 @@ async def chat_turn(
                     case _:
                         yield event
 
+            if (
+                allow_tools_this_round
+                and not round_calls
+                and not "".join(round_text_parts).strip()
+                and round_finished is not None
+                and round_finished.output_tokens >= active_max_tokens - 32
+                and not retried_empty_length
+            ):
+                retried_empty_length = True
+                active_max_tokens = min(max(active_max_tokens * 2, 3072), 4096)
+                continue
+
             if not round_calls or not allow_tools_this_round:
                 if not emitted_any_text and last_action_summary:
                     emitted_any_text = True
                     yield TextDelta(last_action_summary)
+                if round_idx >= MAX_TOOL_ROUNDS and bool(request.tools):
+                    cu_ev = await _shielded_cu_cleanup(cu_cleanup, "turn_max_rounds")
+                    if cu_ev is not None:
+                        yield cu_ev
                 if round_finished is not None:
                     yield round_finished
                 return
@@ -723,10 +777,14 @@ async def chat_turn(
             )
 
             tool_messages: list[Message] = []
+            approval_wait_box: list[float] = [0.0]
+            timed_out_box: list[bool] = [False]
             async for item in _execute_round_tool_calls(
                 round_calls,
                 guarded_runner,
                 remaining_budget=max(TURN_BUDGET_SECONDS - (time.monotonic() - turn_started), 0.5),
+                approval_wait_out=approval_wait_box,
+                timed_out_out=timed_out_box,
             ):
                 if isinstance(item, Message):
                     tool_messages.append(item)
@@ -734,6 +792,10 @@ async def chat_turn(
                     if isinstance(item, ActionResultEvent) and item.summary:
                         last_action_summary = item.summary
                     yield item
+            turn_started += approval_wait_box[0]
+            if timed_out_box[0]:
+                timed_out = True
+                break
 
             messages.extend(tool_messages)
             if code_generator is not None and any(
@@ -741,19 +803,39 @@ async def chat_turn(
             ):
                 active_generator = code_generator
                 active_max_tokens = max(active_max_tokens, 3000)
+            round_idx += 1
 
         if not emitted_any_text and last_action_summary:
             emitted_any_text = True
             yield TextDelta(last_action_summary)
+        if timed_out or round_idx > MAX_TOOL_ROUNDS:
+            cleanup_reason = "turn_timeout" if timed_out else "turn_max_rounds"
+            cu_ev = await _shielded_cu_cleanup(cu_cleanup, cleanup_reason)
+            if cu_ev is not None:
+                yield cu_ev
         if last_finished is not None:
             yield last_finished
     except ProviderUnavailableError:
         if not emitted_any_text and last_action_summary:
             yield TextDelta(last_action_summary)
+            cu_ev = await _shielded_cu_cleanup(cu_cleanup, "turn_provider_error")
+            if cu_ev is not None:
+                yield cu_ev
             if last_finished is not None:
                 yield last_finished
             return
+        cu_ev = await _shielded_cu_cleanup(cu_cleanup, "turn_provider_error")
+        if cu_ev is not None:
+            yield cu_ev
         yield ProviderFailed()
+    except (asyncio.CancelledError, GeneratorExit):
+        await _shielded_cu_cleanup(cu_cleanup, "turn_cancelled")
+        raise
+    except Exception:
+        cu_ev = await _shielded_cu_cleanup(cu_cleanup, "turn_failed")
+        if cu_ev is not None:
+            yield cu_ev
+        raise
 
 
 async def _execute_round_tool_calls(
@@ -761,10 +843,14 @@ async def _execute_round_tool_calls(
     tool_runner: ToolCallRunner,
     *,
     remaining_budget: float,
+    approval_wait_out: list[float] | None = None,
+    timed_out_out: list[bool] | None = None,
 ) -> AsyncIterator[ActionStreamEvent | Message]:
     """Runs up to `MAX_CALLS_PER_ROUND` tool calls sequentially while streaming
     any `ActionStreamEvent`s (`ActionPendingEvent`, `BoardHidRequestEvent`,
-    `ActionResultEvent`) in real time."""
+    `ActionResultEvent`) in real time. Human approval wait time (`ActionPendingEvent`)
+    is credited back via `approval_wait_out` so FaceID/review time does not consume
+    XUNA's compute budget."""
     queue: asyncio.Queue[ActionStreamEvent | Message | BaseException | None] = asyncio.Queue()
 
     async def emit(ev: ActionStreamEvent) -> None:
@@ -790,16 +876,36 @@ async def _execute_round_tool_calls(
             await queue.put(None)
 
     task = asyncio.create_task(worker())
+    compute_deadline = time.monotonic() + remaining_budget
+    pending_approval_since: float | None = None
+    total_approval_wait = 0.0
     try:
-        async with asyncio.timeout(remaining_budget):
-            while True:
-                item = await queue.get()
-                if item is None:
-                    break
-                if isinstance(item, BaseException):
-                    raise item
-                yield item
+        while True:
+            now_mono = time.monotonic()
+            if pending_approval_since is not None:
+                wait_limit = max(
+                    float(APPROVAL_TTL_SECONDS) + 5.0 - (now_mono - pending_approval_since), 0.5
+                )
+            else:
+                wait_limit = compute_deadline - now_mono
+                if wait_limit <= 0:
+                    raise TimeoutError
+            item = await asyncio.wait_for(queue.get(), timeout=wait_limit)
+            if pending_approval_since is not None:
+                waited = max(0.0, time.monotonic() - pending_approval_since)
+                total_approval_wait += waited
+                compute_deadline += waited
+                pending_approval_since = None
+            if item is None:
+                break
+            if isinstance(item, BaseException):
+                raise item
+            if isinstance(item, ActionPendingEvent):
+                pending_approval_since = time.monotonic()
+            yield item
     except TimeoutError:
+        if timed_out_out is not None:
+            timed_out_out[0] = True
         task.cancel()
         # Drain any remaining calls as timeout tool messages so message history stays valid
         for call in calls:
@@ -809,6 +915,8 @@ async def _execute_round_tool_calls(
                 tool_call_id=call.id,
             )
     finally:
+        if approval_wait_out is not None:
+            approval_wait_out[0] = total_approval_wait
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

@@ -128,15 +128,11 @@ def code_text_generator(settings: Settings) -> TextGenerator | None:
     openai_compatible.register(registry)
     options = {
         "base_url": (
-            settings.text_code_base_url
-            or settings.text_expert_base_url
-            or settings.text_base_url
+            settings.text_code_base_url or settings.text_expert_base_url or settings.text_base_url
         ),
         "model": settings.text_code_model or settings.text_expert_model or settings.text_model,
         "api_key": (
-            settings.text_code_api_key
-            or settings.text_expert_api_key
-            or settings.text_api_key
+            settings.text_code_api_key or settings.text_expert_api_key or settings.text_api_key
         ),
         "api_key_header": (
             settings.text_code_api_key_header
@@ -222,6 +218,15 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.database = Database(resolved.database_url)
+        try:
+            await app.state.database.warm_pool()
+        except Exception as exc:
+            # Readiness (/readyz) surfaces real DB outages; startup stays non-fatal in unit tests.
+            import logging
+
+            logging.getLogger("xuna.startup").warning(
+                "database.warm_pool_skipped error=%s", type(exc).__name__
+            )
         try:
             yield
         finally:

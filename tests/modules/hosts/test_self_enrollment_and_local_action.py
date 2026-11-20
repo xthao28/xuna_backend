@@ -451,13 +451,10 @@ def test_same_device_execution_r1_and_r2_without_background_ws() -> None:
         assert '"status":"ok"' in msg1.content
         assert '"package":"com.spotify.music"' in msg1.content
         assert any(
-            isinstance(e, LocalActionRequestEvent) and e.tool == "media.play_pause"
-            for e in emitted
+            isinstance(e, LocalActionRequestEvent) and e.tool == "media.play_pause" for e in emitted
         )
         assert any(
-            isinstance(e, ActionResultEvent)
-            and e.status == "ok"
-            and e.gesture == "bounce_play"
+            isinstance(e, ActionResultEvent) and e.status == "ok" and e.gesture == "bounce_play"
             for e in emitted
         )
 
@@ -558,9 +555,7 @@ def test_http_self_enroll_and_action_result_with_output() -> None:
             payload=code_bytes,
         )
         sig_b64 = base64.urlsafe_b64encode(phone_key.sign(proof_msg)).rstrip(b"=").decode("ascii")
-        pub_b64 = (
-            base64.urlsafe_b64encode(phone_key.public_key).rstrip(b"=").decode("ascii")
-        )
+        pub_b64 = base64.urlsafe_b64encode(phone_key.public_key).rstrip(b"=").decode("ascii")
 
         enroll_res = client.post(
             "/v1/hosts/self",
@@ -850,5 +845,124 @@ def test_ios_self_enroll_and_unsupported_tools_filtered_and_rejected() -> None:
         )
         assert '"status":"unsupported"' in msg.content
         assert any(isinstance(e, ActionResultEvent) and e.status == "unsupported" for e in emitted)
+
+        # Regression: an older iOS host (`app_id`) must not poison `app__launch(id=...)`
+        # destined for a newer online macOS host (`id`).
+        from xuna_backend.modules.actions.application.computer_use import ComputerUseSessionState
+        from xuna_backend.modules.hosts.domain.entities import (
+            Host,
+            HostAlias,
+            HostStatus,
+            Manifest,
+        )
+
+        mac_id = HostId.generate()
+        host_repo.hosts[mac_id.value] = Host(
+            host_id=mac_id,
+            owner_id=owner_id,
+            alias=HostAlias("Xuans MacBook Pro"),
+            platform=HostPlatform.MACOS,
+            hostname="macbook-pro",
+            os_version="12.6",
+            agent_version="0.1.0",
+            public_key=SimulatedDevice().public_key,
+            status=HostStatus.ACTIVE,
+            created_at=now,
+            last_seen_at=now,
+        )
+        mac_app_launch = ToolDescriptor.from_wire(
+            {
+                "name": "app.launch",
+                "description": "Launch an allowlisted application by id.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string", "pattern": "^[a-z0-9_.-]{1,64}$"}},
+                    "required": ["id"],
+                    "additionalProperties": False,
+                },
+                "outputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+                "_meta": {
+                    "xuna/policy": {
+                        "version": 1,
+                        "family": "app",
+                        "risk": "R2",
+                        "observes": False,
+                        "reversible": False,
+                        "permission": "granted",
+                    }
+                },
+            }
+        )
+        await host_repo.save_manifest(
+            Manifest(host_id=mac_id, tools=(mac_app_launch,), updated_at=now)
+        )
+        await set_grants(
+            host_repo,
+            audit,
+            owner_id,
+            mac_id,
+            [(ToolFamily.APP, RiskTier.R3, True)],
+            now,
+        )
+
+        class _MacOnlineHub:
+            def is_online(self, hid: str) -> bool:
+                return hid == str(mac_id)
+
+            async def send_request(
+                self, hid: str, method: str, params: dict[str, object], timeout_s: float = 5.0
+            ) -> dict[str, object]:
+                assert hid == str(mac_id)
+                assert method == "tools/call"
+                assert params["name"] == "app.launch"
+                assert params["arguments"] == {"id": "spotify"}
+                return {
+                    "content": [{"type": "text", "text": "Đã mở Spotify."}],
+                    "structuredContent": {"id": "spotify"},
+                    "isError": False,
+                    "_meta": {"xuna/status": "ok", "xuna/durationMs": 42},
+                }
+
+        cu_store = InMemoryComputerUseSessionStore()
+        await cu_store.start(
+            ComputerUseSessionState(
+                session_id="cu-mac-1",
+                owner_id=owner_id,
+                host_id=mac_id,
+                goal="Mở Spotify",
+                allowed_apps=("spotify",),
+                allowed_domains=(),
+                max_steps=10,
+                max_minutes=5,
+                started_at_utc=now,
+                last_heartbeat_at=now,
+                target_alias="Xuans MacBook Pro",
+            ),
+            now,
+        )
+        orch_mac = Orchestrator(
+            host_repo=host_repo,
+            hub=_MacOnlineHub(),  # type: ignore[arg-type]
+            approval_repo=_FakeApprovalRepository(),
+            approval_broker=InMemoryApprovalBroker(),
+            local_result_broker=InMemoryLocalResultBroker(),
+            last_target_store=InMemoryLastTargetStore(),
+            cu_session_store=cu_store,
+            audit=audit,
+            clock=lambda: now,
+        )
+        mac_msg = await orch_mac.handle_call(
+            ToolCall(id="c-mac-launch", name="app__launch", arguments={"id": "Spotify"}),
+            ActionContext(
+                owner_id=owner_id,
+                pet_id="pet-1",
+                locale=Locale.VI,
+                client_caps=(CAP_HOST_ACTIONS_V1,),
+                board_available=False,
+                emit_event=on_event,
+                self_host_id=str(host.host_id),
+            ),
+        )
+        assert '"status":"ok"' in mac_msg.content
 
     asyncio.run(_run())

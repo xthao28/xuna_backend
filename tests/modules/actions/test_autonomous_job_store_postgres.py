@@ -59,16 +59,18 @@ async def _seed(db: Database) -> tuple[uuid.UUID, uuid.UUID]:
                 created_at=NOW,
             )
         )
+        await session.flush()
         session.add(
             HostModel(
                 host_id=host,
                 owner_id=owner,
                 alias="pc",
-                device_type="desktop",
                 platform="windows",
-                status="online",
-                version="1.0.0",
+                hostname="pc-host",
+                os_version="11",
+                agent_version="1.0.0",
                 public_key=KEY,
+                status="active",
                 created_at=NOW,
                 last_seen_at=NOW,
             )

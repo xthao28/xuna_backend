@@ -1,6 +1,6 @@
 """Ports for owner authentication. The OIDC vendor is not chosen (ADR-0009)."""
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from xuna_backend.modules.accounts.domain.owner import Owner, OwnerClaims
 
@@ -19,3 +19,8 @@ class TokenVerifier(Protocol):
 
 class OwnerRepository(Protocol):
     async def get_or_create(self, claims: OwnerClaims) -> Owner: ...
+
+
+@runtime_checkable
+class OwnerRepositoryWithStatus(Protocol):
+    async def get_or_create_with_status(self, claims: OwnerClaims) -> tuple[Owner, bool]: ...

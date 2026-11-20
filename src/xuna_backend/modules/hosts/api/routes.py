@@ -1,8 +1,10 @@
 """HTTP routes for `/v1/hosts` enrollment, management and dev invocation (UDC-3 §5.4, UDC-7)."""
 
 import base64
+import logging
 import secrets
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -16,12 +18,19 @@ from xuna_backend.core.db import commit_or_conflict
 from xuna_backend.core.errors import AppError
 from xuna_backend.core.idempotency import StoredResponse, parse_key, request_hash, run_once
 from xuna_backend.modules.accounts.api.dependencies import CurrentOwner, Session, state
+from xuna_backend.modules.actions.application.computer_use import (
+    MAX_SESSION_MINUTES,
+    MAX_SESSION_STEPS,
+    ComputerUseSessionState,
+)
+from xuna_backend.modules.actions.application.ports import ComputerUseSessionStore
 from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.hosts.api.host_socket import router as socket_router
 from xuna_backend.modules.hosts.api.schemas import (
     ClaimHostRequest,
     ConfirmHostRequest,
     DevInvokeToolRequest,
+    DevPreflightRequest,
     SelfEnrollHostRequest,
     SetHostGrantsRequest,
     SetHostPolicyRequest,
@@ -34,6 +43,7 @@ from xuna_backend.modules.hosts.application.ports import (
 )
 from xuna_backend.modules.hosts.application.use_cases import (
     ClaimEnrollmentCommand,
+    DevApprovalInput,
     GrantUpdateSpec,
     HostError,
     HostSummaryView,
@@ -44,6 +54,7 @@ from xuna_backend.modules.hosts.application.use_cases import (
     invoke_tool,
     list_hosts,
     owner_phone_public_keys_b64,
+    preflight_tool,
     revoke_host,
     self_enroll_host,
     set_grants,
@@ -125,9 +136,7 @@ def _grant_body(grant: Grant) -> dict[str, Any]:
         "enabled": grant.enabled,
         "updatedAt": grant.updated_at.astimezone(UTC).isoformat(),
         "expiresAt": (
-            grant.expires_at.astimezone(UTC).isoformat()
-            if grant.expires_at is not None
-            else None
+            grant.expires_at.astimezone(UTC).isoformat() if grant.expires_at is not None else None
         ),
         "suspendedAt": (
             grant.suspended_at.astimezone(UTC).isoformat()
@@ -237,9 +246,7 @@ async def self_enroll_host_endpoint(
         pub_bytes = _b64url_decode(body.publicKey, PUBLIC_KEY_SIZE)
         sig_bytes = _b64url_decode(body.proof, SIGNATURE_SIZE)
     except ValueError as error:
-        raise AppError(
-            "validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, str(error)
-        ) from error
+        raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, str(error)) from error
 
     command = SelfEnrollHostCommand(
         platform=body.parsed_platform(),
@@ -598,17 +605,23 @@ async def set_host_policy_endpoint(
         raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
     now = datetime.now(UTC)
 
+    xtp_payload = body.to_xtp_payload()
+
     async def action() -> StoredResponse:
+        repo = _host_repo(request, session)
+        hub = _hub(request)
         res = await set_host_policy(
-            _host_repo(request, session),
-            _hub(request),
+            repo,
+            hub,
             _audit(request, session),
             owner.owner_id,
             parsed_id,
-            body.model_dump(mode="json"),
+            xtp_payload,
             now,
             request_id=getattr(request.state, "request_id", ""),
         )
+        if "trustPreset" not in res:
+            res = await get_host_policy(repo, hub, owner.owner_id, parsed_id)
         return StoredResponse(HTTPStatus.OK, res)
 
     try:
@@ -618,7 +631,7 @@ async def set_host_policy_endpoint(
             key=parse_key(idempotency_key),
             fingerprint=request_hash(
                 "set_host_policy",
-                {"hostId": str(parsed_id), **body.model_dump(mode="json")},
+                {"hostId": str(parsed_id), **xtp_payload},
             ),
             now=now,
             action=action,
@@ -628,6 +641,51 @@ async def set_host_policy_endpoint(
         raise _problem(error) from error
     await commit_or_conflict(session)
     return _json(response)
+
+
+@router.post("/hosts/{host_id}/tools:preflight")
+async def dev_preflight_host_tool_endpoint(
+    host_id: str,
+    body: DevPreflightRequest,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+) -> JSONResponse:
+    """Dev/test `xuna/preflight` endpoint enabled only when `XUNA_DEV_HOST_TOOLS=1`."""
+    settings: Settings = state(request, "settings")
+    if not settings.dev_host_tools:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND)
+    try:
+        parsed_id = HostId.from_str(host_id)
+    except ValueError as error:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
+    try:
+        result = await preflight_tool(
+            _host_repo(request, session),
+            _hub(request),
+            owner.owner_id,
+            parsed_id,
+            body.tool,
+            body.arguments,
+            deadline_ms=body.deadlineMs,
+        )
+    except HostError as error:
+        raise _problem(error) from error
+    return JSONResponse(
+        status_code=HTTPStatus.OK,
+        content={
+            "tool": result.tool_name,
+            "status": result.status,
+            "effectiveRisk": (
+                result.effective_risk.value if result.effective_risk is not None else None
+            ),
+            "reasonCode": result.reason_code,
+            "errorCode": result.error_code,
+            "elementRole": result.element_role,
+            "elementName": result.element_name,
+            "durationMs": result.duration_ms,
+        },
+    )
 
 
 @router.post("/hosts/{host_id}/tools:invoke")
@@ -649,9 +707,29 @@ async def dev_invoke_host_tool_endpoint(
         raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
     now = datetime.now(UTC)
 
+    dev_approval: DevApprovalInput | None = None
+    if any(
+        val is not None
+        for val in (
+            body.approvalId,
+            body.expiresAt,
+            body.scope,
+            body.signature,
+            body.publicKey,
+        )
+    ):
+        dev_approval = DevApprovalInput(
+            approval_id=body.approvalId,
+            expires_at=body.expiresAt,
+            scope=body.scope,
+            signature=body.signature,
+            public_key=body.publicKey,
+        )
+
     async def action() -> StoredResponse:
+        repo = _host_repo(request, session)
         result = await invoke_tool(
-            _host_repo(request, session),
+            repo,
             _hub(request),
             _audit(request, session),
             owner.owner_id,
@@ -661,8 +739,23 @@ async def dev_invoke_host_tool_endpoint(
             now,
             deadline_ms=body.deadlineMs,
             include_dev_approval=body.approve,
+            dev_approval=dev_approval,
             request_id=getattr(request.state, "request_id", ""),
         )
+        cu_store: ComputerUseSessionStore | None = getattr(
+            request.app.state, "cu_session_store", None
+        )
+        if cu_store is not None and result.status == "ok":
+            await _mirror_dev_cu_lifecycle(
+                cu_store=cu_store,
+                host_repo=repo,
+                owner_id=owner.owner_id,
+                host_id=parsed_id,
+                tool_name=body.tool,
+                arguments=body.arguments,
+                structured_content=result.structured_content,
+                now=now,
+            )
         return StoredResponse(
             HTTPStatus.OK,
             {
@@ -695,3 +788,75 @@ async def dev_invoke_host_tool_endpoint(
         raise _problem(error) from error
     await commit_or_conflict(session)
     return _json(response)
+
+
+async def _mirror_dev_cu_lifecycle(
+    *,
+    cu_store: ComputerUseSessionStore,
+    host_repo: HostRepository,
+    owner_id: uuid.UUID,
+    host_id: HostId,
+    tool_name: str,
+    arguments: dict[str, object],
+    structured_content: dict[str, object],
+    now: datetime,
+) -> None:
+    """Mirrors dev `tools:invoke` CU start/end into `cu_session_store` for follow-up turns."""
+    try:
+        if tool_name == "cu.session_start":
+            raw_sid = structured_content.get("sessionId")
+            session_id = (
+                raw_sid.strip()
+                if isinstance(raw_sid, str) and raw_sid.strip()
+                else str(uuid.uuid4())
+            )
+            raw_apps = arguments.get("apps")
+            apps = (
+                tuple(str(a).strip().lower() for a in raw_apps if str(a).strip())
+                if isinstance(raw_apps, list)
+                else ()
+            )
+            raw_domains = arguments.get("domains")
+            domains = (
+                tuple(str(d).strip().lower() for d in raw_domains if str(d).strip())
+                if isinstance(raw_domains, list)
+                else ()
+            )
+            raw_steps = arguments.get("maxSteps")
+            max_steps = min(max(raw_steps if type(raw_steps) is int else 12, 1), MAX_SESSION_STEPS)
+            raw_mins = arguments.get("maxMinutes")
+            max_mins = min(max(raw_mins if type(raw_mins) is int else 5, 1), MAX_SESSION_MINUTES)
+            host_obj = await host_repo.get_host(host_id)
+            target_alias = host_obj.alias.value if host_obj is not None else ""
+            new_state = ComputerUseSessionState(
+                session_id=session_id,
+                owner_id=owner_id,
+                host_id=host_id,
+                goal=str(arguments.get("goal", "")),
+                allowed_apps=apps,
+                allowed_domains=domains,
+                max_steps=max_steps,
+                max_minutes=max_mins,
+                started_at_utc=now,
+                last_heartbeat_at=now,
+                target_alias=target_alias,
+            )
+            fg_app = structured_content.get("foregroundApp")
+            if isinstance(fg_app, str) and fg_app.strip():
+                new_state.last_app_id = fg_app
+            win_title = structured_content.get("windowTitle")
+            if isinstance(win_title, str) and win_title.strip():
+                new_state.last_window_title = win_title
+            await cu_store.start(new_state, now)
+        elif tool_name == "cu.session_end":
+            outcome = str(arguments.get("outcome") or "completed")
+            raw_sid = arguments.get("sessionId")
+            if isinstance(raw_sid, str) and raw_sid.strip():
+                named = await cu_store.get(raw_sid.strip())
+                if named is not None and named.owner_id == owner_id:
+                    await cu_store.mark_ended(named.session_id, outcome, now)
+            active = await cu_store.get_active_for_owner(owner_id)
+            if active is not None and active.host_id == host_id:
+                await cu_store.mark_ended(active.session_id, outcome, now)
+    except Exception:
+        logging.getLogger(__name__).debug("Failed to mirror dev CU lifecycle", exc_info=True)

@@ -40,7 +40,9 @@ class Database:
     def __init__(self, url: str) -> None:
         self.engine: AsyncEngine = create_async_engine(
             url,
-            pool_pre_ping=True,
+            pool_recycle=1800,
+            pool_size=12,
+            max_overflow=12,
             # Every session in UTC: API times are RFC 3339 UTC (contract §1).
             connect_args={"options": "-c timezone=UTC"},
         )
@@ -53,6 +55,18 @@ class Database:
     async def ping(self) -> None:
         async with self.engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
+
+    async def warm_pool(self, connections: int = 10) -> None:
+        """Pre-opens pooled DB connections at startup to avoid first-burst fork latency."""
+        if self.engine.url.get_backend_name() == "sqlite":
+            return
+        conns = []
+        try:
+            for _ in range(max(1, min(connections, 12))):
+                conns.append(await self.engine.connect())
+        finally:
+            for conn in conns:
+                await conn.close()
 
     async def dispose(self) -> None:
         await self.engine.dispose()

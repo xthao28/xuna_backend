@@ -409,3 +409,87 @@ def test_set_host_policy_success_and_audit() -> None:
     assert ev.request_id == "req-123"
     assert ev.metadata["trustPreset"] == "autopilot"
     assert ev.metadata["allowAppsCount"] == 2
+
+
+def test_put_policy_accepts_mobile_discovered_apps_echo_and_returns_updated_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mobile `HostPolicyModel.toJson()` echoes `discoveredApps` and parses the response
+    with `HostPolicyModel.fromJson()` requiring `trustPreset` + policy arrays."""
+    owner_id = uuid.uuid4()
+    host_repo = FakeHostRepository()
+    audit_log = MemoryAuditLog()
+    issuer = LocalIssuer()
+
+    host_id = HostId.generate()
+    now = datetime.now(UTC)
+    host_repo.hosts[host_id.value] = Host(
+        host_id=host_id,
+        owner_id=owner_id,
+        alias=HostAlias("Xuans MacBook Pro"),
+        platform=HostPlatform.MACOS,
+        hostname="macbook-pro",
+        os_version="12.6",
+        agent_version="0.1.0",
+        public_key=SimulatedDevice().public_key,
+        status=HostStatus.ACTIVE,
+        created_at=now,
+        last_seen_at=now,
+    )
+
+    sent_rpc: list[tuple[str, dict[str, object]]] = []
+
+    class _OnlineHub:
+        def is_online(self, hid: str) -> bool:
+            return hid == str(host_id)
+
+        async def send_request(
+            self,
+            hid: str,
+            method: str,
+            params: dict[str, object],
+            timeout_s: float = 5.0,
+        ) -> dict[str, object]:
+            sent_rpc.append((method, dict(params)))
+            if method == "xuna/set_policy":
+                return {"schemaVersion": 1, "status": "ok"}
+            if method == "xuna/get_policy":
+                return {
+                    "schemaVersion": 1,
+                    "trustPreset": "autopilot",
+                    "allowApps": ["spotify", "notes"],
+                    "denyApps": [],
+                    "allowDomains": ["spotify.com"],
+                    "denyDomains": [],
+                    "discoveredApps": ["spotify", "notes", "safari"],
+                }
+            raise AssertionError(f"unexpected method: {method}")
+
+    client, token = _setup_app(owner_id, host_repo, audit_log, issuer)
+    with client:
+        monkeypatch.setattr(client.app.state, "host_session_hub", _OnlineHub())
+        res = client.put(
+            f"/v1/hosts/{host_id}/policy",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Idempotency-Key": str(uuid.uuid4()),
+            },
+            json={
+                "schemaVersion": 1,
+                "trustPreset": "autopilot",
+                "allowApps": ["spotify", "notes"],
+                "denyApps": [],
+                "allowDomains": ["spotify.com"],
+                "denyDomains": [],
+                "discoveredApps": ["spotify", "notes", "safari"],
+            },
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["trustPreset"] == "autopilot"
+        assert body["allowApps"] == ["spotify", "notes"]
+        assert body["discoveredApps"] == ["spotify", "notes", "safari"]
+        assert sent_rpc[0][0] == "xuna/set_policy"
+        assert "discoveredApps" not in sent_rpc[0][1]
+        assert sent_rpc[1][0] == "xuna/get_policy"
+

@@ -4,11 +4,11 @@ Every call opens its own short session and commits, so a long-lived chat stream 
 a connection. Counters change with single `UPDATE ... RETURNING` statements, and a partial
 unique index keeps one running session per owner across workers.
 
-The last UI tree (`cached_nodes`) and draft text (`typed_since_commit`) are never written to
-the database. They live in this process only, attached by session id to every state this
-store returns, and are dropped when the session ends here. After a restart or on another
-worker they start empty; `typed_count` is stored so the next commit card can say that text
-was typed.
+The last UI tree (`cached_nodes`), draft text (`typed_since_commit`), and last observed window
+(`last_window`) are never written to the database. They live in this process only, attached
+by session id to every state this store returns, and are dropped when the session ends here.
+After a restart or on another worker they start empty; `typed_count` is stored so the next
+commit card can say that text was typed.
 """
 
 import uuid
@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from xuna_backend.modules.actions.application.computer_use import ComputerUseSessionState
@@ -34,6 +34,7 @@ _MAX_SCRATCH_ENTRIES = 1000
 class _Scratch:
     cached_nodes: dict[str, dict[str, Any]] = field(default_factory=dict)
     typed_since_commit: list[str] = field(default_factory=list)
+    last_window: dict[str, str] = field(default_factory=dict)
 
 
 class SqlComputerUseSessionStore:
@@ -70,6 +71,7 @@ class SqlComputerUseSessionStore:
             steps_used=row.steps_used,
             cached_nodes=scratch.cached_nodes,
             typed_since_commit=scratch.typed_since_commit,
+            last_window=scratch.last_window,
             typed_count=row.typed_count,
             owner_prompts=row.owner_prompts,
             active=row.active,
@@ -104,9 +106,15 @@ class SqlComputerUseSessionStore:
                 delete(CuSessionModel).where(
                     CuSessionModel.owner_id == state.owner_id,
                     CuSessionModel.active.is_(False),
-                    CuSessionModel.ended_at < now - _ENDED_ROW_RETENTION,
+                    or_(
+                        CuSessionModel.ended_at < now - _ENDED_ROW_RETENTION,
+                        CuSessionModel.session_id == state.session_id,
+                    ),
                 )
             )
+            existing = await s.get(CuSessionModel, state.session_id)
+            if existing is not None:
+                state.session_id = f"{state.session_id[:36]}-{uuid.uuid4().hex[:12]}"
             s.add(
                 CuSessionModel(
                     session_id=state.session_id,
@@ -132,6 +140,7 @@ class SqlComputerUseSessionStore:
         scratch = self._scratch_for(state.session_id)
         scratch.cached_nodes = state.cached_nodes
         scratch.typed_since_commit = state.typed_since_commit
+        scratch.last_window = state.last_window
 
     async def mark_ended(
         self, session_id: str, reason: str, now: datetime

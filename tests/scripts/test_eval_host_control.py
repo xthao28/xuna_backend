@@ -19,7 +19,6 @@ _ALL_TOOLS = {
     "selection.read",
     "app.launch",
     "window.active_context",
-    "ui.accessibility_tree",
     "browser.current_url",
 }
 
@@ -72,7 +71,9 @@ def test_verifiers() -> None:
     assert ev.verify_open_app(app_task, {"appName": "Microsoft Excel"})[0]
     assert not ev.verify_open_app(app_task, {"appName": "Finder"})[0]
     typed = ev.Task("t", "type_in_app", "p", app="Zalo", probe="xunaqq")
+    assert ev.verify_typed(typed, {"visibleSummary": "Search field = xunaqq"})[0]
     assert ev.verify_typed(typed, {"compactUiTree": '[ref=ui_2] <AXTextField> "Tìm" = xunaqq'})[0]
+    assert not ev.verify_typed(typed, {"visibleSummary": "no probe here"})[0]
     assert ev.verify_url_in_reply("Bạn đang xem vnexpress.net nè", {"host": "www.vnexpress.net"})[0]
     assert not ev.verify_url_in_reply("Mình không rõ", {"url": "https://vnexpress.net/a"})[0]
 

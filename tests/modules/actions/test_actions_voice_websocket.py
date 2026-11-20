@@ -390,3 +390,244 @@ def test_voice_websocket_r2_approval_and_board_hid_flow() -> None:
         assert events[2]["gesture"] == "bounce_play"
 
         ws.send_json({"type": "bye"})
+
+
+def test_voice_session_stream_turn_reply_turn_note_and_ws_cu_lifecycle() -> None:
+    """Covers VoiceSession turn_note, WS follow-up note, barge-in cleanup, reply_failed, and bye."""
+    from datetime import timedelta
+
+    from xuna_backend.modules.actions.application.computer_use import ComputerUseSessionState
+    from xuna_backend.modules.cognition.domain.types import Role, ToolSpec
+    from xuna_backend.modules.conversation.application.chat_turn import TurnContext
+    from xuna_backend.modules.conversation.application.voice_session import VoiceSession
+    from xuna_backend.modules.identity.domain.pet_id import PetId
+
+    # 1. Direct VoiceSession.stream_turn_reply accepts str, Callable, and None turn_note
+    async def run_direct() -> None:
+        llm_direct = _ScriptedLLM([[TextDelta("Ok"), _done(5)]] * 3)
+        vs = VoiceSession(
+            session_id="vs-1",
+            pet_id=PetId(PET_HEX),
+            owner_id=uuid.uuid4(),
+            recognizer=None,
+            generator=llm_direct,
+            synthesizer=None,
+            speak=False,
+        )
+        tool = ToolSpec(
+            name="ui__inspect",
+            description="Inspect",
+            parameters={"type": "object", "properties": {}, "additionalProperties": False},
+        )
+        ctx = TurnContext(local_time=NOW)
+        _ = [
+            ev
+            async for ev in vs.stream_turn_reply(
+                "Tiếp tục", ctx, tools=(tool,), turn_note="\n- NOTE_STR"
+            )
+        ]
+        assert llm_direct.requests[-1].messages[0].content.endswith("\n- NOTE_STR")
+
+        _ = [
+            ev
+            async for ev in vs.stream_turn_reply(
+                "Please continue doing this for me",
+                ctx,
+                tools=(tool,),
+                turn_note=lambda loc: f"\n- NOTE_{loc.value}",
+            )
+        ]
+        assert llm_direct.requests[-1].messages[0].content.endswith("\n- NOTE_en")
+
+    asyncio.run(run_direct())
+
+    def _seed_ws_cu(
+        client: TestClient, host_repo: _FakeHostRepo, owner_id: uuid.UUID, sid: str
+    ) -> Host:
+        host = Host(
+            host_id=HostId.generate(),
+            owner_id=owner_id,
+            alias=HostAlias("Mac"),
+            platform=HostPlatform.MACOS,
+            hostname="mac-host",
+            os_version="15.0",
+            agent_version="0.1.0",
+            public_key=FAKE_PUBKEY,
+            status=HostStatus.ACTIVE,
+            created_at=NOW,
+        )
+        asyncio.run(host_repo.save_host(host))
+        asyncio.run(
+            host_repo.save_manifest(
+                Manifest(
+                    host_id=host.host_id,
+                    tools=(
+                        ToolDescriptor(
+                            name="media.play_pause",
+                            description="Toggle media playback.",
+                            input_schema={
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                            output_schema={
+                                "type": "object",
+                                "properties": {},
+                                "additionalProperties": False,
+                            },
+                            family=ToolFamily.MEDIA,
+                            risk=RiskTier.R1,
+                        ),
+                    ),
+                    updated_at=NOW,
+                )
+            )
+        )
+        asyncio.run(
+            host_repo.set_grants(
+                host.host_id,
+                [Grant(host.host_id, ToolFamily.MEDIA, RiskTier.R1, True, NOW)],
+            )
+        )
+        hub = client.app.state.host_session_hub  # type: ignore[union-attr]
+
+        async def noop(*_: object) -> None:
+            return None
+
+        asyncio.run(hub.open_session(str(host.host_id), object(), noop, noop, noop))
+        now_utc = datetime.now(UTC)
+        asyncio.run(
+            client.app.state.cu_session_store.start(  # type: ignore[union-attr]
+                ComputerUseSessionState(
+                    session_id=sid,
+                    owner_id=owner_id,
+                    host_id=host.host_id,
+                    goal="Work",
+                    allowed_apps=("notes",),
+                    allowed_domains=(),
+                    max_steps=20,
+                    max_minutes=10,
+                    started_at_utc=now_utc - timedelta(seconds=1),
+                    last_heartbeat_at=now_utc,
+                    target_alias="Mac",
+                    last_window={"appId": "notes", "windowTitle": "Voice Note"},
+                ),
+                now_utc,
+            )
+        )
+        return host
+
+    # 2. WS follow-up injects prompt note + abort mid-turn emits cu_session(ended)
+    turn1_started = asyncio.Event()
+
+    async def ws_stream(_req: Any, idx: int) -> AsyncIterator[Any]:
+        if idx == 0:
+            yield TextDelta("Sẵn sàng.")
+            yield _done(5)
+        else:
+            yield TextDelta("Đang làm...")
+            turn1_started.set()
+            await asyncio.sleep(5.0)
+            yield _done(5)
+
+    llm_ws = _ScriptedLLM(ws_stream)
+    c_ws, i_ws, o_ws, hr_ws, _, _ = _build_voice_harness(llm_ws)
+    _seed_ws_cu(c_ws, hr_ws, o_ws.owner_id, "cu-ws-barge")
+    token = i_ws.token("owner-1")
+
+    with c_ws.websocket_connect("/v1/voice") as ws:
+        ws.send_json(
+            {
+                "type": "hello",
+                "schemaVersion": 1,
+                "auth": {"token": token},
+                "petId": PET_HEX,
+                "speak": False,
+                "clientCapabilities": ["host_actions_v1"],
+            }
+        )
+        assert ws.receive_json()["type"] == "hello.ok"
+
+        # Turn 1 completes normally -> follow-up prompt note injected & CU session kept alive
+        ws.send_json({"type": "turn.commit", "text": "Tiếp tục ghi chú"})
+        while True:
+            ev = ws.receive_json()
+            if ev["type"] == "reply.finished":
+                break
+        assert llm_ws.requests[0].messages[0].role == Role.SYSTEM
+        assert "cu-ws-barge" in llm_ws.requests[0].messages[0].content
+        assert (
+            asyncio.run(c_ws.app.state.cu_session_store.get_active_for_owner(o_ws.owner_id))  # type: ignore[union-attr]
+            is not None
+        )
+
+        # Turn 2 aborted mid-flight -> emits cu_session(ended) and ends store session
+        ws.send_json({"type": "turn.commit", "text": "Làm tiếp đi"})
+        first_delta = ws.receive_json()
+        assert first_delta["type"] == "reply.delta"
+        ws.send_json({"type": "abort", "reason": "cancel"})
+        ended_msg = ws.receive_json()
+        assert ended_msg["type"] == "cu_session"
+        assert ended_msg["status"] == "ended"
+        assert ended_msg["endReason"] == "turn_cancelled"
+        assert (
+            asyncio.run(c_ws.app.state.cu_session_store.get_active_for_owner(o_ws.owner_id))  # type: ignore[union-attr]
+            is None
+        )
+        ws.send_json({"type": "bye"})
+
+    # 3. WS reply_failed emits cu_session(ended) BEFORE error(reply_failed)
+    async def crash_stream(_req: Any, _idx: int) -> AsyncIterator[Any]:
+        if False:
+            yield _done()
+        raise RuntimeError("boom")
+
+    c_err, i_err, o_err, hr_err, _, _ = _build_voice_harness(_ScriptedLLM(crash_stream))
+    _seed_ws_cu(c_err, hr_err, o_err.owner_id, "cu-ws-crash")
+    with c_err.websocket_connect("/v1/voice") as ws:
+        ws.send_json(
+            {
+                "type": "hello",
+                "schemaVersion": 1,
+                "auth": {"token": i_err.token("owner-1")},
+                "petId": PET_HEX,
+                "speak": False,
+                "clientCapabilities": ["host_actions_v1"],
+            }
+        )
+        assert ws.receive_json()["type"] == "hello.ok"
+        ws.send_json({"type": "turn.commit", "text": "Chạy"})
+        ev1 = ws.receive_json()
+        ev2 = ws.receive_json()
+        assert ev1["type"] == "cu_session" and ev1["status"] == "ended"
+        assert ev1["endReason"] == "turn_failed"
+        assert ev2 == {"type": "error", "code": "reply_failed"}
+        ws.send_json({"type": "bye"})
+
+    # 4. WS bye mid-turn cleans up CU session without crashing
+    async def hang_stream(_req: Any, _idx: int) -> AsyncIterator[Any]:
+        yield TextDelta("Đợi")
+        await asyncio.sleep(5.0)
+        yield _done()
+
+    c_bye, i_bye, o_bye, hr_bye, _, _ = _build_voice_harness(_ScriptedLLM(hang_stream))
+    _seed_ws_cu(c_bye, hr_bye, o_bye.owner_id, "cu-ws-bye")
+    with c_bye.websocket_connect("/v1/voice") as ws:
+        ws.send_json(
+            {
+                "type": "hello",
+                "schemaVersion": 1,
+                "auth": {"token": i_bye.token("owner-1")},
+                "petId": PET_HEX,
+                "speak": False,
+                "clientCapabilities": ["host_actions_v1"],
+            }
+        )
+        assert ws.receive_json()["type"] == "hello.ok"
+        ws.send_json({"type": "turn.commit", "text": "Chạy"})
+        assert ws.receive_json()["type"] == "reply.delta"
+        ws.send_json({"type": "bye"})
+    assert (
+        asyncio.run(c_bye.app.state.cu_session_store.get_active_for_owner(o_bye.owner_id))  # type: ignore[union-attr]
+        is None
+    )

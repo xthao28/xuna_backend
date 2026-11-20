@@ -1606,6 +1606,10 @@ def test_state_driven_hint_covers_consent_and_host_approval() -> None:
     assert consent_hint is not None and "consent" in consent_hint
     approval_hint = state_driven_hint({"errorCode": "approval_required"})
     assert approval_hint is not None and "ui__inspect" in approval_hint
+    outside_hint = state_driven_hint({"errorCode": "target_outside_allowlist"})
+    assert outside_hint is not None and "app__launch" in outside_hint
+    denylisted_hint = state_driven_hint({"errorCode": "denylisted_target_forbidden"})
+    assert denylisted_hint is not None and "app__launch" in denylisted_hint
     assert state_driven_hint({"errorCode": "grant_denied"}) is None
 
 
@@ -1625,6 +1629,18 @@ def test_state_driven_hint_covers_consent_and_host_approval() -> None:
         "com.apple.systemsettings",
         "systemsettings",
         "system settings",
+        "system_preferences",
+        "System-Preferences.app",
+        "keychain_access",
+        "Keychain-Access",
+        "credential_manager",
+        "sudo",
+        "SUDO -i",
+        "sudo_i",
+        "system.settings",
+        "sh -c ls",
+        "cmd /c whoami",
+        "/usr/bin/sudo",
         "cmd.exe",
         "powershell",
         "1password",
@@ -1641,10 +1657,12 @@ def test_standard_apps_not_hard_denied() -> None:
     assert is_hard_denied_target("safari") is False
     assert is_hard_denied_target("calculator") is False
     assert is_hard_denied_target("calendar") is False
+    assert is_hard_denied_target("sudoku") is False
+    assert is_hard_denied_target("pseudocode") is False
+    assert is_hard_denied_target("Visual Studio Code") is False
 
 
 def test_hard_denied_target_fails_closed_on_empty_and_none() -> None:
     assert is_hard_denied_target("") is True
     assert is_hard_denied_target("   ") is True
     assert is_hard_denied_target(None) is True
-

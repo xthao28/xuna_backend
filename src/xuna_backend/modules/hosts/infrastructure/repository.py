@@ -75,6 +75,10 @@ def _to_grant(row: HostGrantModel) -> Grant:
     )
 
 
+_MANIFEST_CACHE: dict[tuple[uuid.UUID, datetime, int], Manifest] = {}
+_MANIFEST_CACHE_MAX = 128
+
+
 class SqlEnrollmentRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -209,9 +213,7 @@ class SqlHostRepository:
             )
         await self._session.flush()
 
-    async def suspend_r2_plus_grants_for_owner(
-        self, owner_id: uuid.UUID, now: datetime
-    ) -> int:
+    async def suspend_r2_plus_grants_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int:
         hosts = await self.list_hosts(owner_id)
         suspended_count = 0
         for host in hosts:
@@ -242,16 +244,44 @@ class SqlHostRepository:
         return suspended_count
 
     async def get_manifest(self, host_id: HostId) -> Manifest | None:
-        row = await self._session.get(HostManifestModel, host_id.value)
-        if row is None:
+        meta = (
+            await self._session.execute(
+                select(
+                    HostManifestModel.updated_at,
+                    HostManifestModel.schema_version,
+                ).where(HostManifestModel.host_id == host_id.value)
+            )
+        ).one_or_none()
+        if meta is None:
             return None
-        tools = tuple(ToolDescriptor.from_wire(item) for item in row.tools_json)
-        return Manifest(
-            host_id=HostId(row.host_id),
+        updated_at, schema_version = meta
+        cache_key = (host_id.value, updated_at, schema_version)
+        cached = _MANIFEST_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+        row = (
+            await self._session.execute(
+                select(
+                    HostManifestModel.updated_at,
+                    HostManifestModel.schema_version,
+                    HostManifestModel.tools_json,
+                ).where(HostManifestModel.host_id == host_id.value)
+            )
+        ).one_or_none()
+        if row is None or row[2] is None:
+            return None
+        row_updated_at, row_schema_version, tools_json = row
+        tools = tuple(ToolDescriptor.from_wire(item) for item in tools_json)
+        manifest = Manifest(
+            host_id=host_id,
             tools=tools,
-            updated_at=row.updated_at,
-            schema_version=row.schema_version,
+            updated_at=row_updated_at,
+            schema_version=row_schema_version,
         )
+        if len(_MANIFEST_CACHE) >= _MANIFEST_CACHE_MAX:
+            _MANIFEST_CACHE.clear()
+        _MANIFEST_CACHE[(host_id.value, row_updated_at, row_schema_version)] = manifest
+        return manifest
 
     async def save_manifest(self, manifest: Manifest) -> None:
         row = await self._session.get(HostManifestModel, manifest.host_id.value)
@@ -270,3 +300,5 @@ class SqlHostRepository:
             row.tools_json = tools_payload
             row.updated_at = manifest.updated_at
         await self._session.flush()
+        for key in [k for k in _MANIFEST_CACHE if k[0] == manifest.host_id.value]:
+            _MANIFEST_CACHE.pop(key, None)
