@@ -26,6 +26,13 @@ from typing import TYPE_CHECKING, Any
 from xuna_backend.modules.actions.application.approval_and_board_service import (
     ApprovalAndBoardService,
 )
+from xuna_backend.modules.actions.application.autopilot_policy import (
+    autopilot_input_risk,
+    cu_session_risk_for_autopilot,
+    declared_risk_floor,
+    is_consequential_web_action,
+    resolve_host_trust_preset,
+)
 from xuna_backend.modules.actions.application.catalog import (
     CAP_BOARD_HID_V1,
     CAP_HOST_ACTIONS_V1,
@@ -774,55 +781,9 @@ class Orchestrator:
         return node
 
     @staticmethod
-    def _is_consequential_web_action(args: dict[str, object]) -> bool:
+    def _is_consequential_web_action(args: dict[str, object], *, autopilot: bool = False) -> bool:
         """Checks whether a browser action targets a consequential or sensitive element."""
-        for key in ("ref", "selector", "targetText", "elementName", "text", "value"):
-            val = args.get(key)
-            if isinstance(val, str) and val.strip():
-                # Split camelCase identifiers (e.g. payNow -> pay Now, deleteItem -> delete Item)
-                decomposed = re.sub(r"([a-z])([A-Z])", r"\1 \2", val)
-                if is_consequential_element_name(val) or is_consequential_element_name(decomposed):
-                    return True
-                normalized = decomposed.replace("_", " ").replace("-", " ").lower()
-                if is_consequential_element_name(normalized):
-                    return True
-                words = set(re.findall(r"[\w]+", normalized))
-                # Word-boundary sensitive matches (prevent false positives on
-                # spin, opinion, wildcard, cardigan)
-                sensitive_tokens = ("pin", "card", "credit", "token", "secret", "wire", "thẻ")
-                if any(w in words for w in sensitive_tokens):
-                    return True
-                if (
-                    "checkout" in normalized
-                    or "check out" in normalized
-                    or any(
-                        tok in normalized
-                        for tok in (
-                            "password",
-                            "passwd",
-                            "cvv",
-                            "cvc",
-                            "payment",
-                            "checkout",
-                            "check out",
-                            "transfer",
-                            "chuyen khoan",
-                            "thanh toan",
-                            "dat hang",
-                            "xoa",
-                            "mua ngay",
-                            "xac nhan",
-                            "mật khẩu",
-                            "mat khau",
-                            "the tin dung",
-                            "the visa",
-                            "the mastercard",
-                            "the atm",
-                        )
-                    )
-                ):
-                    return True
-        return False
+        return is_consequential_web_action(args, autopilot=autopilot)
 
     @classmethod
     def _effective_tool_risk(
@@ -830,15 +791,33 @@ class Orchestrator:
         descriptor: ToolDescriptor,
         clean_args: dict[str, object],
         active_cu: ComputerUseSessionState | None,
+        *,
+        autopilot: bool = False,
     ) -> RiskTier:
         if descriptor.name == "mail.send":
             return RiskTier.R3
         if descriptor.name == "mail.create_draft":
             return RiskTier.R2
+        if descriptor.name in ("cu.session_start", "cu.session_extend"):
+            return cu_session_risk_for_autopilot(clean_args) if autopilot else descriptor.risk
         if descriptor.name in ("web.click", "web.fill"):
-            if cls._is_consequential_web_action(clean_args):
+            if cls._is_consequential_web_action(clean_args, autopilot=autopilot):
                 return RiskTier.R3
             return descriptor.risk
+        if autopilot and descriptor.name in (
+            "input.click",
+            "input.drag",
+            "input.key",
+            "input.type_text",
+            "input.scroll",
+            "app.launch",
+        ):
+            cached = (
+                cls._lookup_cached_cu_node(active_cu, clean_args)
+                if descriptor.name == "input.click"
+                else None
+            )
+            return autopilot_input_risk(descriptor, clean_args, active_cu, cached_node=cached)
         if descriptor.name == "input.click":
             x_norm = clean_args.get("xNorm")
             y_norm = clean_args.get("yNorm")
@@ -971,53 +950,19 @@ class Orchestrator:
         return descriptor.risk
 
     @staticmethod
-    def _declared_risk_floor(descriptor: ToolDescriptor, clean_args: dict[str, object]) -> RiskTier:
-        """Risk implied by the call's own arguments.
+    def _declared_risk_floor(
+        descriptor: ToolDescriptor,
+        clean_args: dict[str, object],
+        *,
+        autopilot: bool = False,
+    ) -> RiskTier:
+        """Risk implied by the call's own arguments, combined with host preflight answers."""
+        return declared_risk_floor(descriptor, clean_args, autopilot=autopilot)
 
-        Used together with a host preflight answer: it can raise that answer (a model that
-        names its target "Send" gets R3), never lower it. Activation keys are not raised
-        here: whether Enter/Space is safe depends on the live focus, which only the host
-        sees (ADR-0015 D2). The legacy estimate for hosts without preflight still treats
-        them as R3.
-        """
-        if descriptor.name == "mail.send":
-            return RiskTier.R3
-        if descriptor.name == "mail.create_draft":
-            return RiskTier.R2
-        if descriptor.name in ("web.click", "web.fill"):
-            if Orchestrator._is_consequential_web_action(clean_args):
-                return RiskTier.R3
-            return descriptor.risk
-        if descriptor.name == "input.click":
-            name = clean_args.get("elementName")
-            if isinstance(name, str) and is_consequential_element_name(name):
-                return RiskTier.R3
-            menu_path = clean_args.get("menuPath")
-            if isinstance(menu_path, str):
-                lower_menu = menu_path.strip().lower()
-                destructive_menu_tokens = (
-                    "quit",
-                    "exit",
-                    "empty trash",
-                    "sign out",
-                    "log out",
-                    "logout",
-                    "uninstall",
-                    "format",
-                    "thoát",
-                    "đăng xuất",
-                    "dọn sạch thùng rác",
-                )
-                if is_consequential_element_name(menu_path) or any(
-                    tok in lower_menu for tok in destructive_menu_tokens
-                ):
-                    return RiskTier.R3
-        elif descriptor.name == "input.drag":
-            for k in ("elementName", "fromElementName", "toElementName"):
-                name = clean_args.get(k)
-                if isinstance(name, str) and is_consequential_element_name(name):
-                    return RiskTier.R3
-        return descriptor.risk
+    async def _resolve_host_trust_preset(self, host: Host, *, is_self_host: bool) -> str:
+        return await resolve_host_trust_preset(
+            self._hub, str(host.host_id), host.platform, is_self_host=is_self_host
+        )
 
     async def _host_preflight(
         self, host_id: HostId, tool_name: str, clean_args: dict[str, object]
@@ -2107,6 +2052,12 @@ class Orchestrator:
         # backend only ever raises that answer. Hosts that predate preflight keep the legacy
         # estimate; the local self-host path has no preflight round trip.
         is_self_host = ctx.self_host_id is not None and str(host.host_id) == ctx.self_host_id
+        is_autopilot = False
+        if descriptor.risk.level >= RiskTier.R2.level or descriptor.name in _PREFLIGHT_TOOLS:
+            is_autopilot = (
+                await self._resolve_host_trust_preset(host, is_self_host=is_self_host)
+                == "autopilot"
+            )
         preflight: HostPreflight | None = None
         if (
             descriptor.name in _PREFLIGHT_TOOLS
@@ -2116,7 +2067,9 @@ class Orchestrator:
             preflight = await self._host_preflight(host.host_id, descriptor.name, clean_args)
         live_label: str | None = None
         if preflight is None:
-            effective_risk = self._effective_tool_risk(descriptor, clean_args, active_cu)
+            effective_risk = self._effective_tool_risk(
+                descriptor, clean_args, active_cu, autopilot=is_autopilot
+            )
         elif preflight.status != "ok":
             # The host would refuse this call: tell the model why, do not ask the owner.
             refusal_code = preflight.error_code or "policy_blocked"
@@ -2156,11 +2109,16 @@ class Orchestrator:
                 tool_call_id=call.id,
             )
         else:
+            effective_base_risk = (
+                RiskTier.R2
+                if is_autopilot and descriptor.name in ("cu.session_start", "cu.session_extend")
+                else descriptor.risk
+            )
             effective_risk = max(
                 (
-                    descriptor.risk,
+                    effective_base_risk,
                     preflight.effective_risk or RiskTier.R3,
-                    self._declared_risk_floor(descriptor, clean_args),
+                    self._declared_risk_floor(descriptor, clean_args, autopilot=is_autopilot),
                 ),
                 key=lambda tier: tier.level,
             )
@@ -2447,7 +2405,12 @@ class Orchestrator:
             and descriptor.name == "app.launch"
             and str(raw_launch_id).strip().lower() in active_cu.allowed_apps
         )
-        if active_cu is not None and descriptor.name == "app.launch" and not is_in_scope_app_launch:
+        if (
+            active_cu is not None
+            and descriptor.name == "app.launch"
+            and not is_in_scope_app_launch
+            and not is_autopilot
+        ):
             effective_risk = RiskTier.R3
 
         exempt_by_cu_session = active_cu is not None and (
@@ -2457,9 +2420,14 @@ class Orchestrator:
             )
             or is_in_scope_app_launch
         )
+        exempt_by_autopilot = is_autopilot and effective_risk == RiskTier.R2
 
         approval_req: ApprovalRequest | None = None
-        if effective_risk.level >= RiskTier.R2.level and not exempt_by_cu_session:
+        if (
+            effective_risk.level >= RiskTier.R2.level
+            and not exempt_by_cu_session
+            and not exempt_by_autopilot
+        ):
             # ADR-0014 D1: an owner approval given in advance for exactly this call. The grant
             # check above already ran, so suspended grants (and E-Stop, which suspends them)
             # make a standing approval inert. Eligibility is re-checked against the manifest as

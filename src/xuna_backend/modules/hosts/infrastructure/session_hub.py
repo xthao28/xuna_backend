@@ -120,6 +120,9 @@ class InMemoryHostSessionHub:
     def update_resources(self, host_id: str, resources: HostResources) -> HostTwin | None:
         return self._twin_store.update_resources(host_id, resources)
 
+    def update_trust_preset(self, host_id: str, trust_preset: str) -> HostTwin | None:
+        return self._twin_store.update_trust_preset(host_id, trust_preset)
+
     def get_focus_state(self, owner_id: uuid.UUID) -> HostFocusState | None:
         return self._twin_store.get_focus(owner_id)
 

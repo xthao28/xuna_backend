@@ -708,6 +708,7 @@ class SimulatedXtpHost:
         self.received_frames: list[dict[str, Any]] = []
         self.close_code: int | None = None
         self.close_reason: str | None = None
+        self.trust_preset: str = "standard"
         self._bg_tasks: set[asyncio.Task[None]] = set()
 
     def _allocate_id(self) -> int:
@@ -918,6 +919,26 @@ class SimulatedXtpHost:
 
         if method == "xuna/stop":
             self.received_stops.append(params)
+            return
+
+        if method == "xuna/get_policy":
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "result": {
+                            "schemaVersion": 1,
+                            "trustPreset": self.trust_preset,
+                            "allowApps": [],
+                            "denyApps": [],
+                            "allowDomains": [],
+                            "denyDomains": [],
+                            "discoveredApps": [],
+                        },
+                    }
+                )
+            )
             return
 
         if method == "xuna/preflight":

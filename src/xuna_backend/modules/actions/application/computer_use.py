@@ -120,6 +120,20 @@ _CONSEQUENTIAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
+# High-impact action patterns enforced even under `trustPreset == "autopilot"`
+# (ADR-0015 Autopilot amendment 2026-11-22): financial/payment, destructive/account,
+# and external outbound send/publish actions ALWAYS stay R3 phone-signed.
+_HIGH_IMPACT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(send|post|publish|delete|erase|empty\s+trash|format|uninstall|sign\s*out|log\s*out|logout|buy|pay|payment|checkout|check\s*out|purchase|transfer|wire|confirm\s+payment|place\s+order)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?<!\w)(gửi|xuất\s*bản|xóa|xoá|gỡ\s*cài\s*đặt|hủy\s*tài\s*khoản|xóa\s*tài\s*khoản|xoá\s*tài\s*khoản|dọn\s*sạch\s*thùng\s*rác|đăng\s*xuất|mua|thanh\s*toán|chuyển\s*khoản|đặt\s*hàng|đăng(?!\s*(?:nhập|nhap|ký|ky)\b))(?!\w)",
+        re.IGNORECASE,
+    ),
+)
+
 _PROMPT_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"(ignore\s+(all\s+)?(?:(?:previous|prior)\s+)?instructions|system\s*override|new\s+instruction|open\s+terminal|run\s+powershell|send\s+email\s+to|type\s+password|disable\s+firewall)",
@@ -144,6 +158,18 @@ def is_consequential_element_name(label: str) -> bool:
     if not trimmed:
         return False
     return any(p.search(trimmed) is not None for p in _CONSEQUENTIAL_PATTERNS)
+
+
+def is_high_impact_element_name(label: str) -> bool:
+    """True when `label` names a high-impact action (financial, destructive/account,
+    or external send/publish) that MUST stay R3 even under `trustPreset == 'autopilot'`."""
+    trimmed = label.strip()
+    if not trimmed:
+        return False
+    decomposed = re.sub(r"([a-z])([A-Z])", r"\1 \2", trimmed)
+    if "checkout" in re.sub(r"[\s_\-]+", "", decomposed.lower()):
+        return True
+    return any(p.search(decomposed) is not None for p in _HIGH_IMPACT_PATTERNS)
 
 
 _ACTIVATION_KEYS: frozenset[str] = frozenset({"enter", "return", "space"})

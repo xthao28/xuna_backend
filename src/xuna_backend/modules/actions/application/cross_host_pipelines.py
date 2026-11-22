@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from xuna_backend.modules.actions.application.approval_and_board_service import (
     ApprovalAndBoardService,
 )
+from xuna_backend.modules.actions.application.autopilot_policy import resolve_host_trust_preset
 from xuna_backend.modules.actions.application.catalog import is_tool_granted
 from xuna_backend.modules.actions.application.mesh_prober import (
     MeshProber,
@@ -106,6 +107,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     Grant,
     Host,
     HostId,
+    HostPlatform,
     HostStatus,
     Manifest,
     RiskTier,
@@ -797,6 +799,20 @@ class CrossHostPipelineRunner:
                 return approved_req
         return None
 
+    async def _all_mission_hosts_autopilot(
+        self, mission: MissionEnvelope, primary_host: Host
+    ) -> bool:
+        checked: dict[str, HostPlatform] = {}
+        for step in mission.steps:
+            if step.risk.level >= RiskTier.R2.level:
+                checked[step.host_id] = step.platform
+        if not checked:
+            checked[str(primary_host.host_id)] = primary_host.platform
+        for hid, plat in checked.items():
+            if await resolve_host_trust_preset(self._hub, hid, plat) != "autopilot":
+                return False
+        return True
+
     async def _request_mission_approval(
         self,
         *,
@@ -818,6 +834,8 @@ class CrossHostPipelineRunner:
         digest = args_sha256(approval_args)
         expires_at = now + timedelta(seconds=APPROVAL_TTL_SECONDS)
         if risk == RiskTier.R2:
+            if await self._all_mission_hosts_autopilot(mission, primary_host):
+                return True, None, "ok"
             pre_auth = await self._try_authorize_r2_without_prompt(
                 ctx=ctx,
                 host=primary_host,

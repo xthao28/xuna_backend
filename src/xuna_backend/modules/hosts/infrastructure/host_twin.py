@@ -71,6 +71,14 @@ class InMemoryHostTwinStore:
         self._twins[host_id] = updated
         return updated
 
+    def update_trust_preset(self, host_id: str, trust_preset: str) -> HostTwin | None:
+        current = self._twins.get(host_id)
+        if current is None:
+            return None
+        updated = replace(current, trust_preset=trust_preset)
+        self._twins[host_id] = updated
+        return updated
+
     def get_focus(self, owner_id: uuid.UUID) -> HostFocusState | None:
         return self._focus_states.get(owner_id)
 

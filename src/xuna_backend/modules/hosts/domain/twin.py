@@ -17,6 +17,7 @@ _APP_ID_RE = re.compile(r"[a-z0-9_.-]{1,64}")
 _WORKSPACE_ID_RE = re.compile(r"[a-zA-Z0-9_.-]{1,64}")
 _CAP_VERSION_RE = re.compile(r"[a-zA-Z0-9_.-]{1,32}")
 _FOCUS_SOURCES = frozenset({"app", "slash_cmd", "hotkey", "tray", "follow_me", "system", "revoked"})
+_TRUST_PRESETS = frozenset({"strict", "standard", "autopilot"})
 _MAX_INSTALLED_APPS = 256
 _MAX_WORKSPACES = 128
 
@@ -116,6 +117,11 @@ class HostTwin:
     owner_id: uuid.UUID | None = None
     presence: HostPresence | None = None
     resources: HostResources | None = None
+    trust_preset: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.trust_preset is not None and self.trust_preset not in _TRUST_PRESETS:
+            raise ValueError(f"unsupported trust_preset: {self.trust_preset!r}")
 
 
 @dataclass(frozen=True, slots=True)

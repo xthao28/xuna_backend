@@ -1278,6 +1278,12 @@ async def get_host_policy(
             raise HostError("host_offline") from exc
         raise HostError("policy_blocked", msg) from exc
 
+    raw_preset = raw_result.get("trustPreset")
+    if isinstance(raw_preset, str) and raw_preset in ("strict", "standard", "autopilot"):
+        updater = getattr(hub, "update_trust_preset", None)
+        if callable(updater):
+            updater(str(host_id), raw_preset)
+
     return raw_result
 
 
@@ -1316,6 +1322,10 @@ async def set_host_policy(
         raise HostError("policy_blocked", msg) from exc
 
     preset_val = str(policy_data.get("trustPreset") or "standard")
+    if preset_val in ("strict", "standard", "autopilot"):
+        updater = getattr(hub, "update_trust_preset", None)
+        if callable(updater):
+            updater(str(host_id), preset_val)
     allow_apps = policy_data.get("allowApps")
     allow_apps_count = len(allow_apps) if isinstance(allow_apps, list) else 0
 
