@@ -752,3 +752,162 @@ def test_connect_error_and_remote_protocol_error_recover_when_nothing_emitted() 
     events = run(httpx.MockTransport(handle), max_attempts=4, retry_base_delay_s=0.0)
     assert attempts == 3
     assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "RecoveredNet"
+
+
+def test_daily_quota_cooldown_skips_network_until_expiry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    fake_mono = [1000.0]
+
+    monkeypatch.setattr(openai_compatible.time, "monotonic", lambda: fake_mono[0])
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            body = (
+                b'{"error":{"code":429,"message":"You exceeded your current quota. '
+                b"Generate content requests per day limit exceeded. "
+                b'Please retry in 17h4m31s.","status":"RESOURCE_EXHAUSTED"}}'
+            )
+            return httpx.Response(429, content=body)
+        return httpx.Response(
+            200,
+            content=sse({"choices": [{"delta": {"content": "BackOnline"}}]}),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    gen = OpenAICompatibleTextGenerator(
+        "http://ai.internal:8000/v1",
+        "m",
+        api_key="k",
+        transport=httpx.MockTransport(handle),
+        max_attempts=3,
+        retry_base_delay_s=0.0,
+    )
+
+    async def _call() -> list[object]:
+        return [ev async for ev in gen.stream(REQUEST)]
+
+    with pytest.raises(ProviderUnavailableError, match="quota_exhausted"):
+        asyncio.run(_call())
+    assert attempts == 1
+
+    # Immediate subsequent call fails fast in 0ms without touching the network
+    fake_mono[0] += 60.0
+    with pytest.raises(ProviderUnavailableError, match="cooldown active"):
+        asyncio.run(_call())
+    assert attempts == 1
+
+    # After capped daily cooldown (1800s) expires, primary probes network again
+    fake_mono[0] += 1800.0
+    events = asyncio.run(_call())
+    assert attempts == 2
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "BackOnline"
+
+
+def test_minute_quota_cooldown_uses_short_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    fake_mono = [2000.0]
+
+    monkeypatch.setattr(openai_compatible.time, "monotonic", lambda: fake_mono[0])
+
+    def handle(_request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            body = (
+                b'{"error":{"code":429,"message":"You exceeded your current quota. '
+                b"Generate content requests per minute limit exceeded. "
+                b'Please retry in 16.5s.","status":"RESOURCE_EXHAUSTED"}}'
+            )
+            return httpx.Response(429, content=body)
+        return httpx.Response(
+            200,
+            content=sse({"choices": [{"delta": {"content": "RecoveredRpm"}}]}),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    gen = OpenAICompatibleTextGenerator(
+        "http://ai.internal:8000/v1",
+        "m",
+        api_key="k",
+        transport=httpx.MockTransport(handle),
+        max_attempts=3,
+        retry_base_delay_s=0.0,
+    )
+
+    async def _call() -> list[object]:
+        return [ev async for ev in gen.stream(REQUEST)]
+
+    with pytest.raises(ProviderUnavailableError, match="quota_exhausted"):
+        asyncio.run(_call())
+    assert attempts == 1
+
+    fake_mono[0] += 10.0
+    with pytest.raises(ProviderUnavailableError, match="cooldown active"):
+        asyncio.run(_call())
+    assert attempts == 1
+
+    fake_mono[0] += 7.0
+    events = asyncio.run(_call())
+    assert attempts == 2
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "RecoveredRpm"
+
+
+def test_large_timeout_splits_attempt_0_so_read_timeout_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    observed_read_timeouts: list[float | None] = []
+    fake_clock = [500.0]
+
+    monkeypatch.setattr(openai_compatible.time, "perf_counter", lambda: fake_clock[0])
+
+    async def fake_sleep(seconds: float) -> None:
+        fake_clock[0] += seconds
+
+    monkeypatch.setattr(openai_compatible.asyncio, "sleep", fake_sleep)
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        timeout_ext = request.extensions.get("timeout", {})
+        if isinstance(timeout_ext, dict):
+            observed_read_timeouts.append(timeout_ext.get("read"))
+        if attempts == 1:
+            fake_clock[0] += 35.0
+            raise httpx.ReadTimeout("stalled socket", request=request)
+        return httpx.Response(
+            200,
+            content=sse({"choices": [{"delta": {"content": "RecoveredAfterVpnStall"}}]}),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    slow_request = ChatRequest(
+        messages=(Message(Role.USER, "disconnect vpn"),),
+        locale=REQUEST.locale,
+        timeout_s=60.0,
+    )
+    gen = OpenAICompatibleTextGenerator(
+        "http://ai.internal:8000/v1",
+        "m",
+        api_key="k",
+        transport=httpx.MockTransport(handle),
+        max_attempts=3,
+        retry_base_delay_s=0.0,
+    )
+
+    async def _collect() -> list[object]:
+        return [ev async for ev in gen.stream(slow_request)]
+
+    events = asyncio.run(_collect())
+    assert attempts == 2
+    assert observed_read_timeouts[0] == pytest.approx(35.0)
+    assert observed_read_timeouts[1] is not None and observed_read_timeouts[1] == pytest.approx(
+        25.0
+    )
+    assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "RecoveredAfterVpnStall"

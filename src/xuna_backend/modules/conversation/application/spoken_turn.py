@@ -18,8 +18,10 @@ from typing import cast
 from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
+    ActionTargetRequiredEvent,
     BoardHidRequestEvent,
     ComputerUseSessionEvent,
+    HostFocusChangedNotice,
     HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
@@ -88,11 +90,13 @@ SpokenTurnEvent = (
     | GestureChosen
     | DetailDelta
     | ActionPendingEvent
+    | ActionTargetRequiredEvent
     | BoardHidRequestEvent
     | LocalActionRequestEvent
     | HostWakeRequestEvent
     | ActionResultEvent
     | ComputerUseSessionEvent
+    | HostFocusChangedNotice
     | SpokenAudio
     | SpeechUnavailable
     | SpokenFinished

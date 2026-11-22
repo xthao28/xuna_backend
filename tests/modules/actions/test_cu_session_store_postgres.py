@@ -19,7 +19,10 @@ from sqlalchemy.exc import IntegrityError
 
 from xuna_backend.core.db import Database
 from xuna_backend.modules.accounts.infrastructure.models import OwnerRow
-from xuna_backend.modules.actions.application.computer_use import ComputerUseSessionState
+from xuna_backend.modules.actions.application.computer_use import (
+    ComputerUseSessionState,
+    InMemoryComputerUseSessionStore,
+)
 from xuna_backend.modules.actions.infrastructure.cu_session_store import (
     SqlComputerUseSessionStore,
 )
@@ -286,6 +289,153 @@ def test_restarted_host_reusing_session_id_and_cross_owner_collision_do_not_fail
             # First owner's active session remains untouched
             still_live = await store.get_active_for_owner(owner)
             assert still_live is not None and still_live.session_id == "cu-session-1"
+        finally:
+            await db.dispose()
+
+    asyncio.run(run())
+
+
+def test_in_memory_per_host_cu_lanes() -> None:
+    async def run() -> None:
+        store = InMemoryComputerUseSessionStore()
+        owner = uuid.uuid4()
+        other = uuid.uuid4()
+        host_a = uuid.uuid4()
+        host_b = uuid.uuid4()
+
+        s_a = _session("cu-a", owner, host_a)
+        s_b = _session("cu-b", owner, host_b)
+        s_b.started_at_utc = NOW + timedelta(seconds=5)
+
+        await store.start(s_a, NOW)
+        await store.start(s_b, NOW + timedelta(seconds=5))
+
+        lanes = await store.list_active_for_owner(owner)
+        assert [s.session_id for s in lanes] == ["cu-b", "cu-a"]
+        assert (await store.get_active_for_owner(owner, host_id=HostId(host_a))) is s_a
+        assert (await store.get_active_for_owner(owner, host_id=HostId(host_b))) is s_b
+        assert (await store.get_active_for_owner(owner)) is s_b
+
+        # Replace only host_a
+        s_a2 = _session("cu-a2", owner, host_a)
+        s_a2.started_at_utc = NOW + timedelta(seconds=10)
+        await store.start(s_a2, NOW + timedelta(seconds=10))
+        assert not s_a.active and s_a.stop_reason == "replaced"
+        assert s_b.active
+
+        # Selective stop vs global stop vs wrong-owner no-op
+        assert await store.stop_all_for_owner(other, "owner_app", NOW, host_id=HostId(host_a)) == 0
+        assert await store.stop_all_for_owner(owner, "owner_app", NOW, host_id=HostId(host_a)) == 1
+        assert not s_a2.active and s_b.active
+        assert await store.stop_all_for_owner(owner, "owner_app", NOW) == 1
+        assert not s_b.active
+
+    asyncio.run(run())
+
+
+def test_postgres_concurrent_per_host_cu_lanes_and_isolated_stop(db_url: str) -> None:
+    async def run() -> None:
+        db = Database(db_url)
+        try:
+            owner, other, host_a = await _seed(db)
+            host_b = uuid.uuid4()
+            async with db.sessions() as session:
+                session.add(
+                    HostModel(
+                        host_id=host_b,
+                        owner_id=owner,
+                        alias="WinPC",
+                        platform="windows",
+                        hostname="win-pc",
+                        os_version="11",
+                        agent_version="1.0.0",
+                        public_key=KEY,
+                        status="active",
+                        created_at=NOW,
+                        alias_folded="winpc",
+                    )
+                )
+                await session.commit()
+
+            store = SqlComputerUseSessionStore(db.sessions)
+            mac_s = _session("cu-mac", owner, host_a)
+            win_s = _session("cu-win", owner, host_b)
+            win_s.started_at_utc = NOW + timedelta(seconds=1)
+            win_s.target_alias = "WinPC"
+
+            await store.start(mac_s, NOW)
+            await store.start(win_s, NOW + timedelta(seconds=1))
+
+            # Both lanes remain active concurrently
+            lanes = await store.list_active_for_owner(owner)
+            assert [s.session_id for s in lanes] == ["cu-win", "cu-mac"]
+            got_mac = await store.get_active_for_owner(owner, host_id=HostId(host_a))
+            got_win = await store.get_active_for_owner(owner, host_id=HostId(host_b))
+            assert got_mac is not None and got_mac.session_id == "cu-mac"
+            assert got_win is not None and got_win.session_id == "cu-win"
+
+            # Isolated _Scratch and counters across concurrent lanes
+            got_mac.cached_nodes["@m1"] = {"role": "button", "name": "MacBtn"}
+            got_mac.typed_since_commit.append("mac-draft")
+            got_win.cached_nodes["@w1"] = {"role": "button", "name": "WinBtn"}
+            await store.set_typed_count("cu-win", 3)
+            assert await store.record_step("cu-win") == 1
+
+            # Starting cu-mac-2 replaces ONLY host_a; host_b keeps active state, steps & _Scratch
+            mac_s2 = _session("cu-mac-2", owner, host_a)
+            mac_s2.started_at_utc = NOW + timedelta(seconds=2)
+            await store.start(mac_s2, NOW + timedelta(seconds=2))
+            old_mac = await store.get("cu-mac")
+            assert old_mac is not None and not old_mac.active
+            assert old_mac.stop_reason == "replaced"
+            win_after = await store.get_active_for_owner(owner, host_id=HostId(host_b))
+            assert win_after is not None and win_after.active
+            assert win_after.steps_used == 1
+            assert win_after.typed_count == 3
+            assert "@w1" in win_after.cached_nodes
+            assert "@m1" not in win_after.cached_nodes
+
+            # DB enforces uq_cu_sessions_owner_host_active per (owner_id, host_id)
+            async with db.sessions() as session:
+                session.add(
+                    CuSessionModel(
+                        session_id="cu-win-dup",
+                        owner_id=owner,
+                        host_id=host_b,
+                        target_alias="WinPC",
+                        goal="dup",
+                        apps=["notes"],
+                        domains=[],
+                        max_steps=1,
+                        max_minutes=1,
+                        steps_used=0,
+                        typed_count=0,
+                        started_at=NOW,
+                        last_heartbeat_at=NOW,
+                        active=True,
+                    )
+                )
+                with pytest.raises(IntegrityError):
+                    await session.commit()
+
+            # Survives restart (new store instance)
+            restarted = SqlComputerUseSessionStore(db.sessions)
+            assert len(await restarted.list_active_for_owner(owner)) == 2
+
+            # Other owner stop returns 0; per-host stop ends only host_a; global stop ends host_b
+            assert (
+                await restarted.stop_all_for_owner(other, "owner_app", NOW, host_id=HostId(host_a))
+                == 0
+            )
+            assert (
+                await restarted.stop_all_for_owner(owner, "owner_app", NOW, host_id=HostId(host_a))
+                == 1
+            )
+            assert await restarted.get_active_for_owner(owner, host_id=HostId(host_a)) is None
+            assert await restarted.record_step("cu-mac-2") is None
+            assert await restarted.record_step("cu-win") == 2
+            assert await restarted.stop_all_for_owner(owner, "owner_app", NOW) == 1
+            assert await restarted.list_active_for_owner(owner) == []
         finally:
             await db.dispose()
 

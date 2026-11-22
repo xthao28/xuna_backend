@@ -8,20 +8,26 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from http import HTTPStatus
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.accounts.api.dependencies import CurrentOwner, Session, state
 from xuna_backend.modules.actions.application.computer_use import session_event_payload
+from xuna_backend.modules.actions.application.mesh_prober import MeshProber
+from xuna_backend.modules.actions.application.mesh_router import (
+    MeshPreRouter,
+    PendingIntentStore,
+)
 from xuna_backend.modules.actions.application.orchestrator import Orchestrator
 from xuna_backend.modules.actions.application.ports import (
     ApprovalBroker,
     ApprovalRepository,
     ApprovalScopeStore,
     ComputerUseSessionStore,
+    HabitRepository,
     LastTargetStore,
     LocalResultBroker,
     StandingApprovalRepository,
@@ -39,6 +45,10 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalScope,
     ApprovalState,
 )
+from xuna_backend.modules.actions.domain.habits import (
+    HostDefaultRecord,
+    HostRoutingHabit,
+)
 from xuna_backend.modules.actions.domain.standing_approval import (
     StandingApproval,
     StandingApprovalError,
@@ -50,10 +60,14 @@ from xuna_backend.modules.hosts.domain.entities import (
     Grant,
     Host,
     HostId,
+    HostStatus,
     Manifest,
     RiskTier,
+    validate_non_zero_uuid,
 )
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
+
+NonZeroHostUuid = Annotated[uuid.UUID, AfterValidator(validate_non_zero_uuid)]
 
 _logger = logging.getLogger(__name__)
 
@@ -89,6 +103,7 @@ class EmergencyStopBody(BaseModel):
 
     schemaVersion: Literal[1] = 1
     reason: Literal["owner_app", "owner_host", "owner_board", "revoked"] = "owner_app"
+    hostId: NonZeroHostUuid | None = None
 
 
 class ReportActionResultBody(BaseModel):
@@ -235,9 +250,16 @@ class _SessionPerCallApprovalRepository:
         async with _open_short_session(self._state) as s:
             return await self._repo(s).get(approval_id)
 
-    async def reject_pending_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int:
+    async def reject_pending_for_owner(
+        self, owner_id: uuid.UUID, now: datetime, host_id: HostId | None = None
+    ) -> int:
         async with _open_short_session(self._state) as s:
-            count = await self._repo(s).reject_pending_for_owner(owner_id, now)
+            repo = self._repo(s)
+            count = (
+                await repo.reject_pending_for_owner(owner_id, now, host_id=host_id)
+                if host_id is not None
+                else await repo.reject_pending_for_owner(owner_id, now)
+            )
             if s is not None:
                 await s.commit()
             return count
@@ -321,6 +343,152 @@ class _SessionPerCallAuditLog:
             return await self._log(s).recent(owner_id, limit)
 
 
+class _SessionPerCallHabitRepository:
+    """Short-lived DB session adapter for `HabitRepository` in long-lived streams."""
+
+    def __init__(self, app_state: Any) -> None:
+        self._state = app_state
+
+    def _repo(self, session: Any) -> HabitRepository | None:
+        factory: Callable[[Any], HabitRepository] = self._state.habit_repository
+        if session is not None and not hasattr(session, "execute") and isinstance(factory, type):
+            return None
+        return factory(session)
+
+    async def get_habit(
+        self,
+        owner_id: uuid.UUID,
+        pet_id: str,
+        context_key: str,
+        host_id: HostId,
+    ) -> HostRoutingHabit | None:
+        async with _open_short_session(self._state) as s:
+            repo = self._repo(s)
+            if repo is None:
+                return None
+            return await repo.get_habit(owner_id, pet_id, context_key, host_id)
+
+    async def get_habit_by_id(
+        self,
+        owner_id: uuid.UUID,
+        habit_id: uuid.UUID,
+    ) -> HostRoutingHabit | None:
+        async with _open_short_session(self._state) as s:
+            repo = self._repo(s)
+            if repo is None:
+                return None
+            return await repo.get_habit_by_id(owner_id, habit_id)
+
+    async def list_habits(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        pet_id: str | None = None,
+        context_key: str | None = None,
+    ) -> list[HostRoutingHabit]:
+        async with _open_short_session(self._state) as s:
+            repo = self._repo(s)
+            if repo is None:
+                return []
+            return await repo.list_habits(owner_id, pet_id=pet_id, context_key=context_key)
+
+    async def upsert_habit(self, habit: HostRoutingHabit) -> HostRoutingHabit:
+        async with _open_short_session(self._state) as s:
+            repo = self._repo(s)
+            if repo is None:
+                return habit
+            saved = await repo.upsert_habit(habit)
+            if s is not None:
+                await s.commit()
+            return saved
+
+    async def delete_habit(self, owner_id: uuid.UUID, habit_id: uuid.UUID) -> bool:
+        async with _open_short_session(self._state) as s:
+            repo = self._repo(s)
+            if repo is None:
+                return False
+            deleted = await repo.delete_habit(owner_id, habit_id)
+            if s is not None:
+                await s.commit()
+            return deleted
+
+    async def delete_all_habits(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        pet_id: str | None = None,
+    ) -> int:
+        async with _open_short_session(self._state) as s:
+            repo = self._repo(s)
+            if repo is None:
+                return 0
+            count = await repo.delete_all_habits(owner_id, pet_id=pet_id)
+            if s is not None:
+                await s.commit()
+            return count
+
+    async def get_default(
+        self,
+        owner_id: uuid.UUID,
+        pet_id: str,
+        scope_key: str,
+    ) -> HostDefaultRecord | None:
+        async with _open_short_session(self._state) as s:
+            repo = self._repo(s)
+            if repo is None:
+                return None
+            return await repo.get_default(owner_id, pet_id, scope_key)
+
+    async def list_defaults(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        pet_id: str | None = None,
+    ) -> list[HostDefaultRecord]:
+        async with _open_short_session(self._state) as s:
+            repo = self._repo(s)
+            if repo is None:
+                return []
+            return await repo.list_defaults(owner_id, pet_id=pet_id)
+
+    async def upsert_default(self, default: HostDefaultRecord) -> HostDefaultRecord:
+        async with _open_short_session(self._state) as s:
+            repo = self._repo(s)
+            if repo is None:
+                return default
+            saved = await repo.upsert_default(default)
+            if s is not None:
+                await s.commit()
+            return saved
+
+    async def delete_default(self, owner_id: uuid.UUID, pet_id: str, scope_key: str) -> bool:
+        async with _open_short_session(self._state) as s:
+            repo = self._repo(s)
+            if repo is None:
+                return False
+            deleted = await repo.delete_default(owner_id, pet_id, scope_key)
+            if s is not None:
+                await s.commit()
+            return deleted
+
+
+def build_short_session_habit_repository(app_state: Any) -> HabitRepository | None:
+    """Short-lived DB session adapter for `HabitRepository` when wired on `app.state`."""
+    if getattr(app_state, "habit_repository", None) is None:
+        return None
+    return _SessionPerCallHabitRepository(app_state)
+
+
+def build_mesh_pre_router(app_state: Any) -> MeshPreRouter:
+    """Builds a `MeshPreRouter` backed by `app.state` pending store and short-session habits."""
+    pending_store: PendingIntentStore | None = getattr(app_state, "pending_intent_store", None)
+    return MeshPreRouter(
+        pending_store=pending_store,
+        habit_repo=build_short_session_habit_repository(app_state),
+        wake_queue=getattr(app_state, "wake_queue", None),
+    )
+
+
 def build_short_session_host_repository(app_state: Any) -> HostRepository:
     """Short-lived DB session per read for long-lived streams and detached jobs."""
     return _SessionPerCallHostRepository(app_state)
@@ -343,6 +511,8 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
         app_state, "expert_text_generator", None
     )
     cu_store: ComputerUseSessionStore | None = getattr(app_state, "cu_session_store", None)
+    mesh_prober: MeshProber | None = getattr(app_state, "mesh_prober", None)
+    pending_store: PendingIntentStore | None = getattr(app_state, "pending_intent_store", None)
     return Orchestrator(
         host_repo=_SessionPerCallHostRepository(app_state),
         hub=hub,
@@ -361,6 +531,10 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
         ),
         cu_session_store=cu_store,
         job_runner=getattr(app_state, "job_runner", None),
+        habit_repo=build_short_session_habit_repository(app_state),
+        pending_intent_store=pending_store,
+        mesh_prober=mesh_prober,
+        wake_queue=getattr(app_state, "wake_queue", None),
     )
 
 
@@ -597,8 +771,24 @@ async def emergency_stop_actions(
     )
 
     cu_store: ComputerUseSessionStore | None = getattr(request.app.state, "cu_session_store", None)
+    host_repo = host_factory(session)
+    target_host_id: HostId | None = None
+    if body is not None and body.hostId is not None:
+        try:
+            target_host_id = HostId(body.hostId)
+        except ValueError as error:
+            raise AppError(
+                "validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "hostId"
+            ) from error
+        target_host = await host_repo.get_host(target_host_id)
+        if (
+            target_host is None
+            or target_host.owner_id != owner.owner_id
+            or target_host.status != HostStatus.ACTIVE
+        ):
+            raise AppError("not_found", HTTPStatus.NOT_FOUND)
     orch = Orchestrator(
-        host_repo=host_factory(session),
+        host_repo=host_repo,
         hub=hub,
         approval_repo=approval_factory(session),
         approval_broker=approval_broker,
@@ -607,25 +797,25 @@ async def emergency_stop_actions(
         audit=audit_factory(session),
         scope_store=scope_store,
         cu_session_store=cu_store,
+        wake_queue=getattr(request.app.state, "wake_queue", None),
     )
     reason = body.reason if body is not None else "owner_app"
     summary = await orch.emergency_stop(
         owner_id=owner.owner_id,
         reason=reason,
         request_id=_request_id(request),
+        host_id=target_host_id,
     )
     await session.commit()
     runner = getattr(request.app.state, "job_runner", None)
     if runner is not None:
-        try:
-            await runner.cancel_all_for_owner(owner.owner_id, reason=reason)
-        except Exception as err:
-            _logger.debug("Failed cancelling autonomous jobs on emergency stop: %s", err)
+        await runner.cancel_all_for_owner(owner.owner_id, reason=reason, host_id=target_host_id)
     return {
         "stopped": summary.stopped,
         "hostsNotified": summary.hosts_notified,
         "approvalsCancelled": summary.approvals_cancelled,
         "grantsSuspended": summary.grants_suspended,
+        "hostId": summary.host_id,
     }
 
 

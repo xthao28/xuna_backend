@@ -26,8 +26,10 @@ from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
     ActionStreamEvent,
+    ActionTargetRequiredEvent,
     BoardHidRequestEvent,
     ComputerUseSessionEvent,
+    HostFocusChangedNotice,
     HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
@@ -431,6 +433,7 @@ def build_request(
     budget: ReplyBudget | None = None,
     tools: tuple[ToolSpec, ...] = (),
     turn_note: Callable[[Locale], str] | None = None,
+    host_roster: str | None = None,
 ) -> ChatRequest:
     """`turn_note`, when given, adds one line for this turn only after the tool guidance
     (UDC-17 S17.5: the scope of a template being rerun). Ignored without tools."""
@@ -451,7 +454,10 @@ def build_request(
         system = " ".join(parts)
 
     if tools:
-        system = f"{system}{tool_system_prompt(effective_locale, tools=tools)}"
+        system = (
+            f"{system}"
+            f"{tool_system_prompt(effective_locale, tools=tools, host_roster=host_roster)}"
+        )
         if turn_note is not None:
             system = f"{system}{turn_note(effective_locale)}"
 
@@ -477,11 +483,13 @@ TurnEvent = (
     | GestureChosen
     | DetailDelta
     | ActionPendingEvent
+    | ActionTargetRequiredEvent
     | BoardHidRequestEvent
     | LocalActionRequestEvent
     | HostWakeRequestEvent
     | ActionResultEvent
     | ComputerUseSessionEvent
+    | HostFocusChangedNotice
 )
 
 ToolCallRunner = Callable[[ToolCall, EventSink], Awaitable[Message]]
@@ -601,6 +609,7 @@ async def chat_turn(
     locale_vi: bool = True,
     tool_runner: ToolCallRunner | None = None,
     code_generator: TextGenerator | None = None,
+    code_timeout_s: float | None = None,
     cu_cleanup: CuCleanupCallback | None = None,
 ) -> AsyncIterator[TurnEvent]:
     """Streams the reply with gesture tags removed, splits say/detail when `sections=True`,
@@ -616,6 +625,7 @@ async def chat_turn(
             sections=sections,
             locale_vi=locale_vi,
             code_generator=code_generator,
+            code_timeout_s=code_timeout_s,
         ):
             yield ev
         return
@@ -628,6 +638,7 @@ async def chat_turn(
     emitted_any_text = False
     last_action_summary: str | None = None
     active_generator: TextGenerator = generator
+    active_timeout_s: float = request.timeout_s
     active_max_tokens: int = (
         max(request.max_output_tokens, 2048) if request.tools else request.max_output_tokens
     )
@@ -648,7 +659,7 @@ async def chat_turn(
                 messages=tuple(messages),
                 locale=request.locale,
                 max_output_tokens=active_max_tokens,
-                timeout_s=min(request.timeout_s, max(remaining_budget, 1.0)),
+                timeout_s=min(active_timeout_s, max(remaining_budget, 1.0)),
                 tools=request.tools if allow_tools_this_round else (),
             )
 
@@ -665,7 +676,7 @@ async def chat_turn(
                 calls: list[ToolCall] = round_calls,
                 started: float = turn_started,
             ) -> AsyncIterator[ChatEvent]:
-                nonlocal active_generator, active_max_tokens
+                nonlocal active_generator, active_max_tokens, active_timeout_s
                 try:
                     async for ev in active_generator.stream(req):
                         yield ev
@@ -678,12 +689,14 @@ async def chat_turn(
                     ):
                         active_generator = code_generator
                         active_max_tokens = max(active_max_tokens, 3000)
+                        if code_timeout_s is not None and code_timeout_s > active_timeout_s:
+                            active_timeout_s = code_timeout_s
                         remaining_after = TURN_BUDGET_SECONDS - (time.monotonic() - started)
                         fallback_req = ChatRequest(
                             messages=req.messages,
                             locale=req.locale,
                             max_output_tokens=active_max_tokens,
-                            timeout_s=min(req.timeout_s, max(remaining_after, 1.0)),
+                            timeout_s=min(active_timeout_s, max(remaining_after, 1.0)),
                             tools=req.tools,
                         )
                         async for ev in active_generator.stream(fallback_req):
@@ -803,6 +816,8 @@ async def chat_turn(
             ):
                 active_generator = code_generator
                 active_max_tokens = max(active_max_tokens, 3000)
+                if code_timeout_s is not None and code_timeout_s > active_timeout_s:
+                    active_timeout_s = code_timeout_s
             round_idx += 1
 
         if not emitted_any_text and last_action_summary:
@@ -929,6 +944,7 @@ async def _single_round_chat_turn(
     sections: bool = False,
     locale_vi: bool = True,
     code_generator: TextGenerator | None = None,
+    code_timeout_s: float | None = None,
 ) -> AsyncIterator[TurnEvent]:
     tags = GestureTagFilter()
     sec_filter = ReplySectionFilter() if sections else None
@@ -944,7 +960,19 @@ async def _single_round_chat_turn(
         except ProviderUnavailableError:
             if code_generator is not None and active_gen is not code_generator and not emitted_any:
                 active_gen = code_generator
-                async for ev in active_gen.stream(request):
+                fallback_timeout = (
+                    max(request.timeout_s, code_timeout_s)
+                    if code_timeout_s is not None
+                    else request.timeout_s
+                )
+                fallback_req = ChatRequest(
+                    messages=request.messages,
+                    locale=request.locale,
+                    max_output_tokens=request.max_output_tokens,
+                    timeout_s=fallback_timeout,
+                    tools=request.tools,
+                )
+                async for ev in active_gen.stream(fallback_req):
                     yield ev
             else:
                 raise

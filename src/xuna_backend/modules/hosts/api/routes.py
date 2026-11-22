@@ -1,6 +1,8 @@
 """HTTP routes for `/v1/hosts` enrollment, management and dev invocation (UDC-3 §5.4, UDC-7)."""
 
 import base64
+import contextlib
+import inspect
 import logging
 import secrets
 import time
@@ -31,6 +33,7 @@ from xuna_backend.modules.hosts.api.schemas import (
     ConfirmHostRequest,
     DevInvokeToolRequest,
     DevPreflightRequest,
+    PatchHostRequest,
     SelfEnrollHostRequest,
     SetHostGrantsRequest,
     SetHostPolicyRequest,
@@ -47,6 +50,7 @@ from xuna_backend.modules.hosts.application.use_cases import (
     GrantUpdateSpec,
     HostError,
     HostSummaryView,
+    PatchHostCommand,
     SelfEnrollHostCommand,
     claim_enrollment,
     confirm_enrollment,
@@ -54,6 +58,7 @@ from xuna_backend.modules.hosts.application.use_cases import (
     invoke_tool,
     list_hosts,
     owner_phone_public_keys_b64,
+    patch_host,
     preflight_tool,
     revoke_host,
     self_enroll_host,
@@ -80,6 +85,7 @@ from xuna_backend.modules.hosts.domain.session import (
     HostRateLimiter,
     SelfEnrollmentChallengeStore,
 )
+from xuna_backend.modules.hosts.domain.twin import HostFocusChangedNotice, HostPresence
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
 
 router = APIRouter(prefix="/v1", tags=["hosts"])
@@ -146,12 +152,29 @@ def _grant_body(grant: Grant) -> dict[str, Any]:
     }
 
 
+def _presence_body(presence: HostPresence | None) -> dict[str, Any] | None:
+    if presence is None:
+        return None
+    return {
+        "idleSeconds": presence.idle_seconds,
+        "screenLocked": presence.screen_locked,
+        "mediaPlaying": presence.media_playing,
+        "batteryPercent": presence.battery_percent,
+        "isCharging": presence.is_charging,
+        "foregroundAppId": presence.foreground_app_id,
+        "subnetHash": presence.subnet_hash,
+        "updatedAt": presence.updated_at.astimezone(UTC).isoformat(),
+    }
+
+
 def _host_body(
     host: Host,
     grants: list[Grant],
     *,
     online: bool = False,
     manifest: Manifest | None = None,
+    focused: bool = False,
+    presence: HostPresence | None = None,
 ) -> dict[str, Any]:
     return {
         "hostId": str(host.host_id),
@@ -172,6 +195,12 @@ def _host_body(
         ),
         "grants": [_grant_body(g) for g in grants],
         "tools": [t.to_wire() for t in manifest.tools] if manifest is not None else [],
+        "hostKind": host.host_kind.value,
+        "place": host.place,
+        "nicknames": list(host.nicknames),
+        "wolMac": host.wol_mac,
+        "focused": focused,
+        "presence": _presence_body(presence),
     }
 
 
@@ -181,6 +210,8 @@ def _summary_body(view: HostSummaryView) -> dict[str, Any]:
         view.grants,
         online=view.online,
         manifest=view.manifest,
+        focused=view.focused,
+        presence=view.presence,
     )
 
 
@@ -462,6 +493,59 @@ async def list_hosts_endpoint(
     return {"items": [_summary_body(v) for v in views]}
 
 
+@router.patch("/hosts/{host_id}", status_code=HTTPStatus.OK)
+async def patch_host_endpoint(
+    host_id: str,
+    body: PatchHostRequest,
+    request: Request,
+    owner: CurrentOwner,
+    session: Session,
+    idempotency_key: IdempotencyKey = None,
+) -> JSONResponse:
+    try:
+        parsed_id = HostId.from_str(host_id)
+    except ValueError as error:
+        raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
+    now = datetime.now(UTC)
+    hub = _hub(request)
+
+    async def action() -> StoredResponse:
+        view = await patch_host(
+            _host_repo(request, session),
+            hub,
+            _audit(request, session),
+            owner.owner_id,
+            parsed_id,
+            PatchHostCommand(
+                alias=body.alias,
+                place=body.place,
+                nicknames=body.nicknames,
+                host_kind=body.hostKind,
+                wol_mac=body.wolMac,
+            ),
+            now,
+            getattr(request.state, "request_id", ""),
+        )
+        return StoredResponse(HTTPStatus.OK, _summary_body(view))
+
+    try:
+        response = await run_once(
+            session,
+            owner_id=owner.owner_id,
+            key=parse_key(idempotency_key),
+            fingerprint=request_hash(
+                "patch_host",
+                {"hostId": str(parsed_id), **body.model_dump(mode="json")},
+            ),
+            now=now,
+            action=action,
+        )
+    except HostError as error:
+        raise _problem(error) from error
+    await commit_or_conflict(session)
+    return _json(response)
+
+
 @router.delete("/hosts/{host_id}", status_code=HTTPStatus.NO_CONTENT)
 async def revoke_host_endpoint(
     host_id: str,
@@ -475,11 +559,14 @@ async def revoke_host_endpoint(
     except ValueError as error:
         raise AppError("not_found", HTTPStatus.NOT_FOUND) from error
     now = datetime.now(UTC)
+    hub = _hub(request)
+    focus_fn = getattr(hub, "get_focus_state", None)
+    focus_before = focus_fn(owner.owner_id) if callable(focus_fn) else None
 
     async def action() -> StoredResponse:
         await revoke_host(
             _host_repo(request, session),
-            _hub(request),
+            hub,
             _audit(request, session),
             owner.owner_id,
             parsed_id,
@@ -500,6 +587,22 @@ async def revoke_host_endpoint(
     except HostError as error:
         raise _problem(error) from error
     await commit_or_conflict(session)
+    if focus_before is not None and focus_before.focused_host_id == parsed_id:
+        on_focus = getattr(request.app.state, "on_host_focus_changed", None)
+        if callable(on_focus):
+            notice = HostFocusChangedNotice(
+                owner_id=owner.owner_id,
+                host_id=None,
+                alias=None,
+                platform=None,
+                follow_me=focus_before.follow_me,
+                source="revoked",
+                updated_at=now,
+            )
+            with contextlib.suppress(Exception):
+                maybe = on_focus(notice)
+                if inspect.isawaitable(maybe):
+                    await maybe
     return Response(status_code=HTTPStatus.NO_CONTENT)
 
 
@@ -855,7 +958,7 @@ async def _mirror_dev_cu_lifecycle(
                 named = await cu_store.get(raw_sid.strip())
                 if named is not None and named.owner_id == owner_id:
                     await cu_store.mark_ended(named.session_id, outcome, now)
-            active = await cu_store.get_active_for_owner(owner_id)
+            active = await cu_store.get_active_for_owner(owner_id, host_id=host_id)
             if active is not None and active.host_id == host_id:
                 await cu_store.mark_ended(active.session_id, outcome, now)
     except Exception:

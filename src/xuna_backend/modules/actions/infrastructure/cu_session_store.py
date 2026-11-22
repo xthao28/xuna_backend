@@ -1,8 +1,8 @@
-"""PostgreSQL `ComputerUseSessionStore` (UDC-17 S17.6, table `cu_sessions`).
+"""PostgreSQL `ComputerUseSessionStore` (UDC-17 S17.6, Spatial Mesh §5.1.2, table `cu_sessions`).
 
 Every call opens its own short session and commits, so a long-lived chat stream never holds
 a connection. Counters change with single `UPDATE ... RETURNING` statements, and a partial
-unique index keeps one running session per owner across workers.
+unique index keeps one running session per `(owner_id, host_id)` lane across workers.
 
 The last UI tree (`cached_nodes`), draft text (`typed_since_commit`), and last observed window
 (`last_window`) are never written to the database. They live in this process only, attached
@@ -84,19 +84,38 @@ class SqlComputerUseSessionStore:
             row = await s.get(CuSessionModel, session_id)
             return self._to_state(row) if row is not None else None
 
-    async def get_active_for_owner(self, owner_id: uuid.UUID) -> ComputerUseSessionState | None:
+    async def get_active_for_owner(
+        self, owner_id: uuid.UUID, host_id: HostId | None = None
+    ) -> ComputerUseSessionState | None:
         async with self._sessions() as s:
-            stmt = select(CuSessionModel).where(
-                CuSessionModel.owner_id == owner_id, CuSessionModel.active.is_(True)
+            conditions = [CuSessionModel.owner_id == owner_id, CuSessionModel.active.is_(True)]
+            if host_id is not None:
+                conditions.append(CuSessionModel.host_id == host_id.value)
+            stmt = (
+                select(CuSessionModel).where(*conditions).order_by(CuSessionModel.started_at.desc())
             )
             row = (await s.execute(stmt)).scalars().first()
             return self._to_state(row) if row is not None else None
+
+    async def list_active_for_owner(self, owner_id: uuid.UUID) -> list[ComputerUseSessionState]:
+        async with self._sessions() as s:
+            stmt = (
+                select(CuSessionModel)
+                .where(CuSessionModel.owner_id == owner_id, CuSessionModel.active.is_(True))
+                .order_by(CuSessionModel.started_at.desc())
+            )
+            rows = (await s.execute(stmt)).scalars().all()
+            return [self._to_state(row) for row in rows]
 
     async def start(self, state: ComputerUseSessionState, now: datetime) -> None:
         async with self._sessions() as s:
             replaced = await s.execute(
                 update(CuSessionModel)
-                .where(CuSessionModel.owner_id == state.owner_id, CuSessionModel.active.is_(True))
+                .where(
+                    CuSessionModel.owner_id == state.owner_id,
+                    CuSessionModel.host_id == state.host_id.value,
+                    CuSessionModel.active.is_(True),
+                )
                 .values(active=False, stop_reason="replaced", ended_at=now, goal="")
                 .returning(CuSessionModel.session_id)
             )
@@ -156,11 +175,20 @@ class SqlComputerUseSessionStore:
             self._scratch.pop(session_id, None)
             return self._to_state(row) if row is not None else None
 
-    async def stop_all_for_owner(self, owner_id: uuid.UUID, reason: str, now: datetime) -> int:
+    async def stop_all_for_owner(
+        self,
+        owner_id: uuid.UUID,
+        reason: str,
+        now: datetime,
+        host_id: HostId | None = None,
+    ) -> int:
         async with self._sessions() as s:
+            conditions = [CuSessionModel.owner_id == owner_id, CuSessionModel.active.is_(True)]
+            if host_id is not None:
+                conditions.append(CuSessionModel.host_id == host_id.value)
             result = await s.execute(
                 update(CuSessionModel)
-                .where(CuSessionModel.owner_id == owner_id, CuSessionModel.active.is_(True))
+                .where(*conditions)
                 .values(active=False, stop_reason=reason[:64], ended_at=now, goal="", typed_count=0)
                 .returning(CuSessionModel.session_id)
             )

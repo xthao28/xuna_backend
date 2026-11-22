@@ -56,6 +56,8 @@ class AuditAction(StrEnum):
     HOST_PREAPPROVAL_CREATED = "host.preapproval_created"
     HOST_PREAPPROVAL_USED = "host.preapproval_used"
     HOST_PREAPPROVAL_REVOKED = "host.preapproval_revoked"
+    HOST_UPDATED = "host.updated"
+    HOST_HABIT_DELETED = "host.habit_deleted"
     BOARD_HID_REQUESTED = "board.hid_requested"
 
 

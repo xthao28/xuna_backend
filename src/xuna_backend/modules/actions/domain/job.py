@@ -18,6 +18,7 @@ class AutonomousJobState(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     AWAITING_R3_CHECKPOINT = "awaiting_r3_checkpoint"
+    WAITING_WAKE = "waiting_wake"
     PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -41,12 +42,19 @@ _VALID_TRANSITIONS: dict[AutonomousJobState, set[AutonomousJobState]] = {
     },
     AutonomousJobState.RUNNING: {
         AutonomousJobState.AWAITING_R3_CHECKPOINT,
+        AutonomousJobState.WAITING_WAKE,
         AutonomousJobState.PAUSED,
         AutonomousJobState.COMPLETED,
         AutonomousJobState.FAILED,
         AutonomousJobState.CANCELLED,
     },
     AutonomousJobState.AWAITING_R3_CHECKPOINT: {
+        AutonomousJobState.RUNNING,
+        AutonomousJobState.PAUSED,
+        AutonomousJobState.CANCELLED,
+        AutonomousJobState.FAILED,
+    },
+    AutonomousJobState.WAITING_WAKE: {
         AutonomousJobState.RUNNING,
         AutonomousJobState.PAUSED,
         AutonomousJobState.CANCELLED,
@@ -92,19 +100,13 @@ class SubGoal:
         started_at = (
             datetime.fromisoformat(data["startedAt"])
             if data.get("startedAt")
-            else (
-                datetime.fromisoformat(data["started_at"])
-                if data.get("started_at")
-                else None
-            )
+            else (datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None)
         )
         completed_at = (
             datetime.fromisoformat(data["completedAt"])
             if data.get("completedAt")
             else (
-                datetime.fromisoformat(data["completed_at"])
-                if data.get("completed_at")
-                else None
+                datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None
             )
         )
         status_val = data.get("status", SubGoalStatus.PENDING)
@@ -126,7 +128,7 @@ class SubGoal:
 class JobStepOutcome:
     """Outcome of executing a single autonomous step."""
 
-    kind: Literal["progress", "await_r3", "completed", "failed"]
+    kind: Literal["progress", "await_r3", "waiting_wake", "completed", "failed"]
     sub_goals: tuple[SubGoal, ...] | None = None
     active_sub_goal_index: int | None = None
     checkpoint_data: dict[str, Any] | None = None
@@ -167,6 +169,7 @@ class AutonomousJob:
             AutonomousJobState.QUEUED,
             AutonomousJobState.RUNNING,
             AutonomousJobState.AWAITING_R3_CHECKPOINT,
+            AutonomousJobState.WAITING_WAKE,
             AutonomousJobState.PAUSED,
         }
 

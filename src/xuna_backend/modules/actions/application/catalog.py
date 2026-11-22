@@ -13,8 +13,12 @@ from collections.abc import Collection, Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 
 from xuna_backend.modules.actions.application.tool_discovery import (
+    MESH_META_TOOL_COUNT,
+    MESH_PIPELINE_TOOL_COUNT,
     META_TOOL_COUNT,
     EligibleHostTool,
+    build_mesh_pipeline_tool_specs,
+    build_mesh_tool_specs,
     build_meta_tool_specs,
 )
 from xuna_backend.modules.actions.domain.schema_validator import (
@@ -244,19 +248,23 @@ def collect_eligible_host_tools(
     host_screen_consent: bool,
     now: datetime | None = None,
     usage: Mapping[str, int] | None = None,
+    pinned_host_id: HostId | None = None,
 ) -> dict[str, EligibleHostTool]:
     """Returns every host tool the owner may use this turn, most used first (`usage`, from
     `tool_usage_counts`), then in the default `_PRIORITY_ORDER`.
 
     A tool is eligible on a host when the host is active and online, the tool is not
     forbidden, `is_tool_granted` passes (grant, risk, U5 consent) and its schema and
-    function name are valid. The catalog and the `tool_*` meta tools share this rule, so
-    deferral can never reach a tool the catalog would have refused.
+    function name are valid. When `pinned_host_id` is set, only that host is included.
     """
     check_now = now or datetime.now(UTC)
     by_tool: dict[str, tuple[ToolDescriptor, list[str]]] = {}
     active_online_hosts = [
-        h for h in hosts if h.status == HostStatus.ACTIVE and str(h.host_id) in online_host_ids
+        h
+        for h in hosts
+        if h.status == HostStatus.ACTIVE
+        and str(h.host_id) in online_host_ids
+        and (pinned_host_id is None or h.host_id == pinned_host_id)
     ]
     active_online_hosts.sort(key=lambda h: str(h.alias).lower())
 
@@ -344,15 +352,17 @@ def build_tool_catalog(
     include_autonomous_job: bool = False,
     now: datetime | None = None,
     usage: Mapping[str, int] | None = None,
+    pinned_host_id: HostId | None = None,
+    include_mesh_tools: bool = False,
 ) -> tuple[ToolSpec, ...]:
     """Builds at most `MAX_CATALOG_TOOLS` (`36`) `ToolSpec` entries for `ChatRequest.tools`.
 
     - Gated behind `client_caps` (`host_actions_v1` for host tools, `board_hid_v1` for board HID).
     - Eligibility comes from `collect_eligible_host_tools`; order is the owner's own tool
       usage, then `_PRIORITY_ORDER` as the cold-start default.
-    - When eligible host tools exceed the slots, the first ones are sent directly and the
-      `tool_search` / `tool_describe` / `tool_invoke` meta tools make the rest reachable.
-    - Injects optional `target` enum (`[eligible_aliases]`) into each direct host tool.
+    - When `pinned_host_id` is set, only that host's tools are included.
+    - When `include_mesh_tools` is enabled with `pinned_host_id is None` and `>= 2` active hosts
+      (at least one online), appends `mesh__status` and `mesh__find_resource`.
     """
     include_host_tools = CAP_HOST_ACTIONS_V1 in client_caps
     include_board_tool = CAP_BOARD_HID_V1 in client_caps and board_available
@@ -372,8 +382,23 @@ def build_tool_catalog(
             host_screen_consent=host_screen_consent,
             now=now,
             usage=usage,
+            pinned_host_id=pinned_host_id,
         )
 
+    active_host_count = sum(1 for h in hosts if h.status == HostStatus.ACTIVE)
+    effective_mesh_tools = (
+        include_host_tools
+        and include_mesh_tools
+        and pinned_host_id is None
+        and bool(online_host_ids)
+        and active_host_count >= 2
+    )
+    effective_mesh_pipelines = (
+        include_host_tools
+        and include_mesh_tools
+        and bool(online_host_ids)
+        and active_host_count >= 2
+    )
     effective_auto_job = (
         include_host_tools and include_autonomous_job and ("cu.session_start" in eligible)
     )
@@ -381,6 +406,8 @@ def build_tool_catalog(
         (1 if include_board_tool else 0)
         + (1 if include_wf_template else 0)
         + (1 if effective_auto_job else 0)
+        + (MESH_META_TOOL_COUNT if effective_mesh_tools else 0)
+        + (MESH_PIPELINE_TOOL_COUNT if effective_mesh_pipelines else 0)
     )
     host_limit = max(MAX_CATALOG_TOOLS - reserved, 0)
     specs: list[ToolSpec] = []
@@ -396,6 +423,11 @@ def build_tool_catalog(
             specs.append(_host_tool_spec(tool_name, eligible[tool_name]))
         if defer:
             specs.extend(build_meta_tool_specs(eligible, frozenset(direct_names)))
+
+    if effective_mesh_tools:
+        specs.extend(build_mesh_tool_specs())
+    if effective_mesh_pipelines:
+        specs.extend(build_mesh_pipeline_tool_specs())
 
     if effective_auto_job:
         specs.append(
@@ -471,6 +503,8 @@ async def load_tool_catalog_for_owner(
     include_autonomous_job: bool = False,
     now: datetime | None = None,
     audit: AuditLog | None = None,
+    pinned_host_id: HostId | None = None,
+    include_mesh_tools: bool = False,
 ) -> tuple[ToolSpec, ...]:
     """Loads the owner's hosts, manifests, and grants and builds the active tool catalog.
 
@@ -505,4 +539,6 @@ async def load_tool_catalog_for_owner(
         include_autonomous_job=include_autonomous_job,
         now=now,
         usage=usage,
+        pinned_host_id=pinned_host_id,
+        include_mesh_tools=include_mesh_tools,
     )

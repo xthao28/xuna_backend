@@ -18,9 +18,12 @@ invoked.
 import json
 import re
 import unicodedata
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
+from xuna_backend.modules.actions.domain.entities import MAX_TOOL_OUTPUT_BYTES
 from xuna_backend.modules.actions.domain.tool_names import from_function_name, to_function_name
 from xuna_backend.modules.cognition.domain.types import ToolSpec
 from xuna_backend.modules.hosts.domain.entities import ToolDescriptor
@@ -28,11 +31,38 @@ from xuna_backend.modules.hosts.domain.entities import ToolDescriptor
 TOOL_SEARCH_FUNCTION = "tool_search"
 TOOL_DESCRIBE_FUNCTION = "tool_describe"
 TOOL_INVOKE_FUNCTION = "tool_invoke"
+MESH_STATUS_FUNCTION = "mesh__status"
+MESH_FIND_RESOURCE_FUNCTION = "mesh__find_resource"
+MESH_CLIPBOARD_TRANSFER_FUNCTION = "mesh__clipboard_transfer"
+MESH_TELEPORT_FUNCTION = "mesh__teleport"
+MESH_SMART_PAUSE_MEDIA_FUNCTION = "mesh__smart_pause_media"
+MESH_FLEET_VITALS_FUNCTION = "mesh__fleet_vitals"
+MESH_FLEET_GIT_STATUS_FUNCTION = "mesh__fleet_git_status"
+MESH_PIPELINE_FUNCTION_NAMES: frozenset[str] = frozenset(
+    {
+        MESH_CLIPBOARD_TRANSFER_FUNCTION,
+        MESH_TELEPORT_FUNCTION,
+        MESH_SMART_PAUSE_MEDIA_FUNCTION,
+        MESH_FLEET_VITALS_FUNCTION,
+        MESH_FLEET_GIT_STATUS_FUNCTION,
+    }
+)
 META_FUNCTION_NAMES: frozenset[str] = frozenset(
-    {TOOL_SEARCH_FUNCTION, TOOL_DESCRIBE_FUNCTION, TOOL_INVOKE_FUNCTION}
+    {
+        TOOL_SEARCH_FUNCTION,
+        TOOL_DESCRIBE_FUNCTION,
+        TOOL_INVOKE_FUNCTION,
+        MESH_STATUS_FUNCTION,
+        MESH_FIND_RESOURCE_FUNCTION,
+        *MESH_PIPELINE_FUNCTION_NAMES,
+    }
 )
 
 META_TOOL_COUNT = 3
+MESH_META_TOOL_COUNT = 2
+MESH_PIPELINE_TOOL_COUNT = 5
+MAX_MESH_HOST_IDS = 20
+MAX_MESH_QUERY_CHARS = 64
 DEFAULT_SEARCH_LIMIT = 8
 MAX_SEARCH_LIMIT = 15
 MAX_DIRECTORY_CHARS = 1500
@@ -333,3 +363,246 @@ def parse_invoke(
         function_name=to_function_name(tool_name),
         arguments=inner,
     )
+
+
+def build_mesh_tool_specs() -> tuple[ToolSpec, ...]:
+    """Builds backend-owned mesh meta-tool specs (`mesh__status`, `mesh__find_resource`)."""
+    return (
+        ToolSpec(
+            name=MESH_STATUS_FUNCTION,
+            description=(
+                "Query live presence and optional system vitals across the owner's active "
+                "devices concurrently (read-only R0/R1 probes, 2000 ms deadline per host)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "hostIds": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 64},
+                        "maxItems": MAX_MESH_HOST_IDS,
+                    },
+                    "includeVitals": {"type": "boolean"},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name=MESH_FIND_RESOURCE_FUNCTION,
+            description=(
+                "Find which online device has a normalized app, workspace, or tool matching "
+                "`query` across live HostTwin resources and manifests."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "minLength": 1, "maxLength": MAX_MESH_QUERY_CHARS},
+                    "kind": {"type": "string", "enum": ["app", "workspace", "tool"]},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        ),
+    )
+
+
+def build_mesh_pipeline_tool_specs() -> tuple[ToolSpec, ...]:
+    """Builds cross-host Phase 3 pipeline specs exposed across multi-host meshes."""
+    return (
+        ToolSpec(
+            name=MESH_CLIPBOARD_TRANSFER_FUNCTION,
+            description=(
+                "Copy selected or clipboard text from one device to another with secret "
+                "redaction, size bounds, and R2 owner confirmation."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "sourceHost": {"type": "string", "maxLength": 64},
+                    "targetHost": {"type": "string", "maxLength": 64},
+                    "mode": {"type": "string", "enum": ["selection", "clipboard"]},
+                    "text": {"type": "string", "maxLength": 4000},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name=MESH_TELEPORT_FUNCTION,
+            description=(
+                "Transfer the active web tab or workspace capsule from a source device to "
+                "a target device with HTTPS validation and R2 confirmation."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "sourceHost": {"type": "string", "maxLength": 64},
+                    "targetHost": {"type": "string", "maxLength": 64},
+                    "kind": {"type": "string", "enum": ["auto", "url", "workspace"]},
+                    "project": {"type": "string", "maxLength": 64},
+                    "openInAppId": {"type": "string", "maxLength": 64},
+                },
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name=MESH_SMART_PAUSE_MEDIA_FUNCTION,
+            description=(
+                "Pause media playback only on online devices currently reporting active "
+                "playback, leaving already-paused devices untouched."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "hostIds": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 64},
+                        "maxItems": MAX_MESH_HOST_IDS,
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name=MESH_FLEET_VITALS_FUNCTION,
+            description=(
+                "Concurrently query system vitals and low-battery advisories across "
+                "eligible online devices."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "hostIds": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 64},
+                        "maxItems": MAX_MESH_HOST_IDS,
+                    },
+                },
+                "additionalProperties": False,
+            },
+        ),
+        ToolSpec(
+            name=MESH_FLEET_GIT_STATUS_FUNCTION,
+            description=(
+                "Concurrently query repository summary status across online devices and "
+                "indexed workspaces."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "hostIds": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 64},
+                        "maxItems": MAX_MESH_HOST_IDS,
+                    },
+                    "project": {"type": "string", "maxLength": 64},
+                },
+                "additionalProperties": False,
+            },
+        ),
+    )
+
+
+def parse_mesh_status_args(
+    arguments: Mapping[str, object],
+) -> tuple[tuple[uuid.UUID, ...] | None, bool]:
+    """Validates `mesh__status` arguments strictly, raising `MetaToolArgumentError`."""
+    allowed_keys = frozenset({"hostIds", "includeVitals"})
+    if not set(arguments).issubset(allowed_keys):
+        raise MetaToolArgumentError("invalid_args")
+
+    raw_host_ids = arguments.get("hostIds")
+    host_ids: tuple[uuid.UUID, ...] | None = None
+    if raw_host_ids is not None:
+        if not isinstance(raw_host_ids, list) or len(raw_host_ids) > MAX_MESH_HOST_IDS:
+            raise MetaToolArgumentError("invalid_args")
+        parsed_ids: list[uuid.UUID] = []
+        for item in raw_host_ids:
+            if not isinstance(item, str) or len(item) > 64:
+                raise MetaToolArgumentError("invalid_args")
+            try:
+                parsed_ids.append(uuid.UUID(item.strip()))
+            except ValueError as exc:
+                raise MetaToolArgumentError("invalid_args") from exc
+        host_ids = tuple(parsed_ids)
+
+    raw_vitals = arguments.get("includeVitals")
+    if raw_vitals is None:
+        include_vitals = False
+    elif isinstance(raw_vitals, bool):
+        include_vitals = raw_vitals
+    else:
+        raise MetaToolArgumentError("invalid_args")
+
+    return host_ids, include_vitals
+
+
+def parse_mesh_find_resource_args(
+    arguments: Mapping[str, object],
+) -> tuple[str, Literal["app", "workspace", "tool"] | None]:
+    """Validates `mesh__find_resource` arguments strictly."""
+    allowed_keys = frozenset({"query", "kind"})
+    if not set(arguments).issubset(allowed_keys):
+        raise MetaToolArgumentError("invalid_args")
+
+    raw_query = arguments.get("query")
+    if not isinstance(raw_query, str):
+        raise MetaToolArgumentError("invalid_args")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_query):
+        raise MetaToolArgumentError("invalid_args")
+    trimmed = raw_query.strip()
+    if not 1 <= len(trimmed) <= MAX_MESH_QUERY_CHARS:
+        raise MetaToolArgumentError("invalid_args")
+
+    raw_kind = arguments.get("kind")
+    kind: Literal["app", "workspace", "tool"] | None = None
+    if raw_kind is not None:
+        if raw_kind == "app":
+            kind = "app"
+        elif raw_kind == "workspace":
+            kind = "workspace"
+        elif raw_kind == "tool":
+            kind = "tool"
+        else:
+            raise MetaToolArgumentError("invalid_args")
+
+    return trimmed, kind
+
+
+def encode_mesh_meta_payload(
+    payload: Mapping[str, object],
+    max_bytes: int = MAX_TOOL_OUTPUT_BYTES,
+) -> str:
+    """Encodes a mesh meta-tool result preserving top-level keys (`hosts`, `matches`)."""
+    body: dict[str, object] = dict(payload)
+    encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) <= max_bytes:
+        return encoded
+    for list_key in ("probeErrors", "batteryAdvisories", "hosts", "matches"):
+        items = body.get(list_key)
+        while isinstance(items, list) and items:
+            if len(encoded.encode("utf-8")) <= max_bytes:
+                return encoded
+            items = items[:-1]
+            body[list_key] = items
+            body["truncated"] = True
+            encoded = json.dumps(body, ensure_ascii=False, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) <= max_bytes:
+                return encoded
+    fallback: dict[str, object] = {
+        "status": body.get("status", "ok"),
+        "truncated": True,
+    }
+    for list_key in ("hosts", "matches"):
+        if list_key in payload:
+            fallback[list_key] = []
+    encoded_fallback = json.dumps(fallback, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded_fallback.encode("utf-8")) <= max_bytes:
+        return encoded_fallback
+    minimal = json.dumps(
+        {"status": str(body.get("status", "ok"))[:16], "truncated": True},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    if len(minimal.encode("utf-8")) <= max_bytes:
+        return minimal
+    return minimal[:max_bytes]

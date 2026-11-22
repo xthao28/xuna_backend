@@ -187,7 +187,7 @@ def test_successful_results_carry_no_error_code() -> None:
         await w.call("input__click", {"elementId": "@s1:e1"})
         assert w.results[-1].status == "ok"
         assert w.results[-1].error_code is None
-        assert w.results[-1].host_id is None
+        assert w.results[-1].host_id == str(w.host.host_id)
 
     _run(scenario)
 

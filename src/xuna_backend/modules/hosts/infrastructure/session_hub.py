@@ -11,14 +11,24 @@ Manages:
 
 import asyncio
 import contextlib
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from xuna_backend.modules.hosts.application.xtp_frames import (
     rpc_notification_frame,
     rpc_request_frame,
 )
 from xuna_backend.modules.hosts.domain.entities import HostAlias, HostId
+from xuna_backend.modules.hosts.domain.twin import (
+    HostFocusChangedNotice,
+    HostFocusState,
+    HostPresence,
+    HostResources,
+    HostTwin,
+)
+from xuna_backend.modules.hosts.infrastructure.host_twin import InMemoryHostTwinStore
 
 
 @dataclass
@@ -35,6 +45,10 @@ class InMemoryHostSessionHub:
     def __init__(self) -> None:
         self._pending: dict[str, Callable[[HostId, HostAlias], Awaitable[None]]] = {}
         self._live: dict[str, _LiveSession] = {}
+        self._twin_store = InMemoryHostTwinStore()
+        self._focus_listeners: dict[
+            uuid.UUID, list[Callable[[HostFocusChangedNotice], Awaitable[None]]]
+        ] = {}
 
     def register_pending(
         self,
@@ -59,12 +73,14 @@ class InMemoryHostSessionHub:
         send_text: Callable[[str], Awaitable[None]],
         close_duplicate: Callable[[], Awaitable[None]],
         close_revoked: Callable[[], Awaitable[None]],
+        owner_id: uuid.UUID | None = None,
     ) -> bool:
         """Registers a live session. If a session is already active for `host_id`,
         closes the existing session with `duplicate_session` and returns `False`
         so the caller also closes the new session with `duplicate_session`."""
         existing = self._live.pop(host_id, None)
         if existing is not None and existing.token is not token:
+            self._twin_store.evict(host_id)
             for fut in existing.in_flight.values():
                 if not fut.done():
                     fut.set_exception(RuntimeError("duplicate_session"))
@@ -78,6 +94,7 @@ class InMemoryHostSessionHub:
             close_duplicate=close_duplicate,
             close_revoked=close_revoked,
         )
+        self._twin_store.register_online(host_id, owner_id=owner_id)
         return True
 
     def close_session(self, host_id: str, token: object) -> bool:
@@ -85,10 +102,70 @@ class InMemoryHostSessionHub:
         if current is None or current.token is not token:
             return False
         del self._live[host_id]
+        self._twin_store.evict(host_id)
         for fut in current.in_flight.values():
             if not fut.done():
                 fut.set_exception(RuntimeError("session_closed"))
         return True
+
+    def get_twin(self, host_id: str) -> HostTwin | None:
+        return self._twin_store.get(host_id)
+
+    def get_twins_for_owner(self, owner_id: uuid.UUID) -> list[HostTwin]:
+        return self._twin_store.list_for_owner(owner_id)
+
+    def update_presence(self, host_id: str, presence: HostPresence) -> HostTwin | None:
+        return self._twin_store.update_presence(host_id, presence)
+
+    def update_resources(self, host_id: str, resources: HostResources) -> HostTwin | None:
+        return self._twin_store.update_resources(host_id, resources)
+
+    def get_focus_state(self, owner_id: uuid.UUID) -> HostFocusState | None:
+        return self._twin_store.get_focus(owner_id)
+
+    def set_focus_state(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        focused_host_id: HostId | None = None,
+        keep_focused_host: bool = False,
+        follow_me: bool | None = None,
+        source: str,
+        now: datetime,
+    ) -> HostFocusState:
+        return self._twin_store.set_focus(
+            owner_id,
+            focused_host_id=focused_host_id,
+            keep_focused_host=keep_focused_host,
+            follow_me=follow_me,
+            source=source,
+            now=now,
+        )
+
+    def subscribe_focus(
+        self,
+        owner_id: uuid.UUID,
+        listener: Callable[[HostFocusChangedNotice], Awaitable[None]],
+    ) -> Callable[[], None]:
+        listeners = self._focus_listeners.setdefault(owner_id, [])
+        listeners.append(listener)
+
+        def _unsubscribe() -> None:
+            bucket = self._focus_listeners.get(owner_id)
+            if bucket is None:
+                return
+            with contextlib.suppress(ValueError):
+                bucket.remove(listener)
+            if not bucket:
+                self._focus_listeners.pop(owner_id, None)
+
+        return _unsubscribe
+
+    async def publish_focus_changed(self, notice: HostFocusChangedNotice) -> None:
+        listeners = list(self._focus_listeners.get(notice.owner_id, ()))
+        for listener in listeners:
+            with contextlib.suppress(Exception):
+                await listener(notice)
 
     def on_response(self, host_id: str, request_id: int | str, result: dict[str, object]) -> None:
         current = self._live.get(host_id)
@@ -167,6 +244,23 @@ class InMemoryHostSessionHub:
         return True
 
     async def disconnect_host(self, host_id: str, reason: str = "revoked") -> None:
+        self._twin_store.evict(host_id)
+        if reason == "revoked":
+            cleared = self._twin_store.clear_focus_if_host(
+                host_id, now=datetime.now(UTC), source="revoked"
+            )
+            for state in cleared:
+                await self.publish_focus_changed(
+                    HostFocusChangedNotice(
+                        owner_id=state.owner_id,
+                        host_id=None,
+                        alias=None,
+                        platform=None,
+                        follow_me=state.follow_me,
+                        source="revoked",
+                        updated_at=state.updated_at,
+                    )
+                )
         current = self._live.pop(host_id, None)
         if current is None:
             return

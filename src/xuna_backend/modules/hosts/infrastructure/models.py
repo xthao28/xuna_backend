@@ -6,14 +6,17 @@ Tables: `hosts`, `host_enrollments`, `host_manifests`, `host_grants`.
 import uuid
 from datetime import datetime
 
+import sqlalchemy as sa
 from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -23,6 +26,15 @@ from xuna_backend.core.db import Base
 
 class HostModel(Base):
     __tablename__ = "hosts"
+    __table_args__ = (
+        Index(
+            "uq_hosts_owner_alias_folded_active",
+            "owner_id",
+            "alias_folded",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
 
     host_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     owner_id: Mapped[uuid.UUID] = mapped_column(
@@ -42,6 +54,20 @@ class HostModel(Base):
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lan_fingerprint: Mapped[str | None] = mapped_column(String(96), nullable=True)
     lan_port: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    host_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="desktop", server_default="desktop"
+    )
+    place: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    nicknames: Mapped[list[str]] = mapped_column(
+        sa.JSON().with_variant(JSONB, "postgresql"),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    alias_folded: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="", server_default=""
+    )
+    wol_mac: Mapped[str | None] = mapped_column(String(17), nullable=True)
 
 
 class HostEnrollmentModel(Base):

@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "frames": {
+    "helloEnrollLinuxRequest": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "xuna/hello",
+      "params": {
+        "protocols": [
+          "xtp/1"
+        ],
+        "enroll": {
+          "code": "AQIDBAUGBwgJCgsMDQ4PEA",
+          "publicKey": "BKr+HhsNxIIAfBt/g2F1/AkDjInvyPrDEdAXlguKKPA3JWprJbihEDhWHMiHpCsq3BYBXY36iATqeRFFANwsDz4=",
+          "platform": "linux",
+          "osVersion": "Ubuntu 24.04",
+          "agentVersion": "0.1.0",
+          "hostname": "nuc-homelab"
+        }
+      }
+    },
+    "helloReconnectLinuxRequest": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "xuna/hello",
+      "params": {
+        "protocols": [
+          "xtp/1"
+        ],
+        "hostId": "9b2f7e4a-5c11-4d8e-9a30-1f6d8c2e4b10",
+        "platform": "linux",
+        "osVersion": "Ubuntu 24.04",
+        "agentVersion": "0.1.0"
+      }
+    },
+    "presenceNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/presence",
+      "params": {
+        "schemaVersion": 1,
+        "idleSeconds": 12,
+        "screenLocked": false,
+        "mediaPlaying": true,
+        "batteryPercent": 78,
+        "isCharging": true,
+        "subnetHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "foregroundAppId": "vscode",
+        "updatedAt": "2026-11-20T16:00:00Z"
+      }
+    },
+    "presenceDesktopNoBatteryNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/presence",
+      "params": {
+        "schemaVersion": 1,
+        "idleSeconds": 0,
+        "screenLocked": false,
+        "mediaPlaying": false,
+        "subnetHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+        "foregroundAppId": null,
+        "updatedAt": "2026-11-20T16:00:05Z"
+      }
+    },
+    "resourcesNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/resources",
+      "params": {
+        "schemaVersion": 1,
+        "installedApps": [
+          "vscode",
+          "obsidian"
+        ],
+        "workspaces": [
+          "xuna_pet",
+          "Notes_Vault"
+        ],
+        "capabilitiesVersion": "r1_0001"
+      }
+    },
+    "focusRequestHotkeyNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/focusRequest",
+      "params": {
+        "schemaVersion": 1,
+        "source": "hotkey",
+        "followMe": true
+      }
+    },
+    "focusRequestTrayNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/focusRequest",
+      "params": {
+        "schemaVersion": 1,
+        "source": "tray"
+      }
+    }
+  }
+}

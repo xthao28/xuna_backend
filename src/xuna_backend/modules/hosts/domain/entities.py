@@ -5,6 +5,7 @@ tiers, manifests, grants, pending enrollments and active/revoked hosts.
 """
 
 import re
+import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -13,6 +14,7 @@ from enum import StrEnum
 _TOOL_NAME_RE = re.compile(r"^[a-z]+\.[a-z_]+$")
 _SAS_RE = re.compile(r"^[0-9]{6}$")
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+_WOL_MAC_RE = re.compile(r"([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}")
 
 FORBIDDEN_TOOLS: frozenset[str] = frozenset(
     {
@@ -44,6 +46,12 @@ FORBIDDEN_TOOL_PREFIXES: tuple[str, ...] = (
     "cmd.",
     "bash.",
 )
+
+
+def validate_non_zero_uuid(value: uuid.UUID) -> uuid.UUID:
+    if value.int == 0:
+        raise ValueError("HostId cannot be the zero UUID")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,7 +93,9 @@ class HostAlias:
     value: str
 
     def __post_init__(self) -> None:
-        trimmed = self.value.strip()
+        if _has_control_chars(self.value):
+            raise ValueError("host alias cannot contain control characters")
+        trimmed = self.value.strip(" ")
         if not 1 <= len(trimmed) <= 24:
             raise ValueError("host alias must be 1..24 characters")
         for ch in trimmed:
@@ -103,6 +113,70 @@ class HostPlatform(StrEnum):
     ANDROID = "android"
     IOS = "ios"
     LINUX = "linux"
+
+
+class HostKind(StrEnum):
+    DESKTOP = "desktop"
+    MOBILE = "mobile"
+    SERVER = "server"
+    BRIDGE = "bridge"
+
+
+def default_host_kind_for_platform(platform: HostPlatform) -> HostKind:
+    if platform in (HostPlatform.ANDROID, HostPlatform.IOS):
+        return HostKind.MOBILE
+    return HostKind.DESKTOP
+
+
+def fold_text(raw: str) -> str:
+    """Canonical lowercase, accent-stripped, whitespace-collapsed folded string."""
+    lowered = raw.strip().lower().replace("đ", "d")
+    decomposed = unicodedata.normalize("NFD", lowered)
+    stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return " ".join(stripped.split())
+
+
+_fold_text = fold_text
+
+
+class HostAliasConflictError(ValueError):
+    """Raised when an active host's folded alias collides with another active host."""
+
+
+def _has_control_chars(raw: str) -> bool:
+    return any(ord(ch) < 32 or ord(ch) == 127 for ch in raw)
+
+
+def normalize_place(raw: str) -> str:
+    if _has_control_chars(raw):
+        raise ValueError("place must be 1..32 non-control characters")
+    trimmed = raw.strip()
+    if not 1 <= len(trimmed) <= 32:
+        raise ValueError("place must be 1..32 non-control characters")
+    return trimmed
+
+
+def normalize_nicknames(items: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    if len(items) > 10:
+        raise ValueError("nicknames cannot exceed 10 entries")
+    normalized: list[str] = []
+    for item in items:
+        if _has_control_chars(item):
+            raise ValueError("each nickname must be 1..24 non-control characters")
+        trimmed = item.strip()
+        if not 1 <= len(trimmed) <= 24:
+            raise ValueError("each nickname must be 1..24 non-control characters")
+        normalized.append(trimmed)
+    return tuple(normalized)
+
+
+def normalize_wol_mac(raw: str) -> str:
+    if _has_control_chars(raw):
+        raise ValueError("wol_mac must match ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+    trimmed = raw.strip(" ")
+    if not _WOL_MAC_RE.fullmatch(trimmed):
+        raise ValueError("wol_mac must match ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+    return trimmed.upper()
 
 
 class HostStatus(StrEnum):
@@ -493,6 +567,10 @@ class Host:
     lan_fingerprint: str | None = field(default=None)
     lan_port: int | None = field(default=None)
     wol_mac: str | None = field(default=None)
+    host_kind: HostKind = field(default=HostKind.DESKTOP)
+    place: str | None = field(default=None)
+    nicknames: tuple[str, ...] = field(default=())
+    alias_folded: str = field(default="")
 
     def __post_init__(self) -> None:
         if len(self.public_key) != 65 or self.public_key[0] != 0x04:
@@ -503,3 +581,21 @@ class Host:
             raise ValueError("created_at must be timezone-aware")
         if self.last_seen_at is not None and self.last_seen_at.tzinfo is None:
             raise ValueError("last_seen_at must be timezone-aware")
+        object.__setattr__(self, "host_kind", HostKind(self.host_kind))
+        if self.place is not None:
+            object.__setattr__(self, "place", normalize_place(self.place))
+        object.__setattr__(self, "nicknames", normalize_nicknames(self.nicknames))
+        if self.wol_mac is not None:
+            object.__setattr__(self, "wol_mac", normalize_wol_mac(self.wol_mac))
+        if not self.alias_folded:
+            folded = fold_text(self.alias.value)[:32]
+            if not folded:
+                raise ValueError("alias_folded cannot be empty")
+            object.__setattr__(self, "alias_folded", folded)
+        else:
+            if _has_control_chars(self.alias_folded):
+                raise ValueError("alias_folded must be 1..32 non-control characters")
+            trimmed_folded = self.alias_folded.strip(" ")
+            if not 1 <= len(trimmed_folded) <= 32:
+                raise ValueError("alias_folded must be 1..32 non-control characters")
+            object.__setattr__(self, "alias_folded", trimmed_folded)

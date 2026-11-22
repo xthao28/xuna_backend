@@ -17,6 +17,7 @@ from xuna_backend.modules.actions.domain.action_summary import (
     gesture_for_action_status,
 )
 from xuna_backend.modules.hosts.domain.entities import HostId, RiskTier
+from xuna_backend.modules.hosts.domain.twin import HostFocusChangedNotice
 
 __all__ = [
     "APPROVAL_TTL_SECONDS",
@@ -31,12 +32,14 @@ __all__ = [
     "ActionResultEvent",
     "ActionStreamEvent",
     "ActionSummary",
+    "ActionTargetRequiredEvent",
     "ApprovalDecision",
     "ApprovalRequest",
     "ApprovalScope",
     "ApprovalState",
     "BoardHidRequestEvent",
     "EmergencyStopSummary",
+    "HostFocusChangedNotice",
     "HostWakeRequestEvent",
     "LocalActionReport",
     "LocalActionRequestEvent",
@@ -53,7 +56,7 @@ MAX_TOOL_OUTPUT_BYTES = 6144
 # TURN_BUDGET_SECONDS remains the hard stop.
 MAX_TOOL_ROUNDS = 12
 MAX_CALLS_PER_ROUND = 3
-TURN_BUDGET_SECONDS = 90.0
+TURN_BUDGET_SECONDS = 150.0
 
 
 class ApprovalState(StrEnum):
@@ -121,6 +124,7 @@ class EmergencyStopSummary:
     hosts_notified: int
     approvals_cancelled: int
     grants_suspended: int
+    host_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +148,9 @@ class ActionPendingEvent:
     standing_approved_count: int | None = None
     # Additive metadata for Wave E Mission Card UX (UDC-18). None for standard 1-step approvals.
     mission_envelope: dict[str, object] | None = None
+    target_reason: str | None = None
+    target_platform: str | None = None
+    battery_advisories: tuple[str, ...] = ()
 
     def standing_payload(self) -> dict[str, object] | None:
         """The `standing` object of `action_pending` on SSE and the voice WebSocket, or
@@ -181,6 +188,12 @@ class ActionPendingEvent:
             payload["standing"] = standing
         if self.mission_envelope is not None:
             payload["missionEnvelope"] = self.mission_envelope
+        if self.target_reason is not None:
+            payload["targetReason"] = self.target_reason
+        if self.target_platform is not None:
+            payload["targetPlatform"] = self.target_platform
+        if self.battery_advisories:
+            payload["batteryAdvisories"] = list(self.battery_advisories)
         return payload
 
 
@@ -226,6 +239,30 @@ class HostWakeRequestEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class ActionTargetRequiredEvent:
+    """SSE / WebSocket event emitted when target resolution requires owner choice or repair."""
+
+    invocation_id: str
+    tool: str
+    reason_code: str
+    target_reason: str
+    candidates: tuple[dict[str, object], ...] = ()
+    error_code: str | None = None
+
+    def wire_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "invocationId": self.invocation_id,
+            "tool": self.tool,
+            "reasonCode": self.reason_code,
+            "targetReason": self.target_reason,
+            "candidates": list(self.candidates),
+        }
+        if self.error_code is not None:
+            payload["errorCode"] = self.error_code
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class ActionResultEvent:
     """SSE / WebSocket event emitted when a tool invocation completes.
 
@@ -240,6 +277,31 @@ class ActionResultEvent:
     gesture: str | None = None
     error_code: str | None = None
     host_id: str | None = None
+    target_reason: str | None = None
+    target_platform: str | None = None
+    mission_envelope: dict[str, object] | None = None
+
+    def wire_payload(self) -> dict[str, object]:
+        """Wire JSON payload for `action_result` on SSE and the voice WebSocket."""
+        payload: dict[str, object] = {
+            "invocationId": self.invocation_id,
+            "target": self.target,
+            "summary": self.summary,
+            "status": self.status,
+        }
+        if self.gesture is not None:
+            payload["gesture"] = self.gesture
+        if self.error_code is not None:
+            payload["errorCode"] = self.error_code
+        if self.host_id is not None:
+            payload["hostId"] = self.host_id
+        if self.target_reason is not None:
+            payload["targetReason"] = self.target_reason
+        if self.target_platform is not None:
+            payload["targetPlatform"] = self.target_platform
+        if self.mission_envelope is not None:
+            payload["missionEnvelope"] = self.mission_envelope
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,9 +333,11 @@ class ComputerUseSessionEvent:
 
 ActionStreamEvent = (
     ActionPendingEvent
+    | ActionTargetRequiredEvent
     | BoardHidRequestEvent
     | LocalActionRequestEvent
     | HostWakeRequestEvent
     | ActionResultEvent
     | ComputerUseSessionEvent
+    | HostFocusChangedNotice
 )

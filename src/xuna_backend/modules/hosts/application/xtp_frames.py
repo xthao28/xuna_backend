@@ -3,10 +3,12 @@
 import base64
 import binascii
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from xuna_backend.modules.hosts.domain.crypto import (
     NONCE_SIZE,
@@ -24,9 +26,14 @@ from xuna_backend.modules.hosts.domain.entities import (
 )
 from xuna_backend.modules.hosts.domain.session import (
     FRAME_TOO_LARGE,
+    MAX_MEDIA_STRUCTURED_CONTENT_BYTES,
+    MAX_STRUCTURED_CONTENT_BYTES,
     UNAUTHORIZED,
     UNSUPPORTED_PROTOCOL,
     HostSessionRejected,
+    has_media_structured_content,
+    structured_content_byte_size,
+    structured_content_exceeds_limit,
 )
 
 MAX_FRAME_BYTES_DEFAULT = 524_288
@@ -39,7 +46,7 @@ class _StrictModel(BaseModel):
 class EnrollHelloPayload(_StrictModel):
     code: str = Field(min_length=20, max_length=28)
     publicKey: str = Field(min_length=80, max_length=96)
-    platform: Literal["windows", "macos"]
+    platform: Literal["windows", "macos", "linux"]
     osVersion: str = Field(min_length=1, max_length=64)
     agentVersion: str = Field(min_length=1, max_length=32)
     hostname: str = Field(min_length=1, max_length=32)
@@ -64,7 +71,7 @@ class HelloEnrollParamsModel(_StrictModel):
 class HelloReconnectParamsModel(_StrictModel):
     protocols: list[str] = Field(min_length=1, max_length=8)
     hostId: str = Field(min_length=36, max_length=36)
-    platform: Literal["windows", "macos", "android", "ios"]
+    platform: Literal["windows", "macos", "android", "ios", "linux"]
     osVersion: str = Field(min_length=1, max_length=64)
     agentVersion: str = Field(min_length=1, max_length=32)
 
@@ -101,6 +108,78 @@ class LanPeerParamsModel(_StrictModel):
     enabled: bool
     port: int | None = Field(default=47821, ge=1024, le=65535)
     certFingerprint: str | None = Field(default=None, min_length=16, max_length=96)
+
+
+class PresenceParamsModel(_StrictModel):
+    schemaVersion: Literal[1]
+    idleSeconds: int = Field(ge=0)
+    screenLocked: bool
+    mediaPlaying: bool
+    batteryPercent: int | None = Field(default=None, ge=0, le=100)
+    isCharging: bool | None = None
+    subnetHash: str | None = Field(default=None, pattern=r"^[0-9a-f]{16,64}$")
+    foregroundAppId: str | None = Field(default=None, pattern=r"^[a-z0-9_.-]{1,64}$")
+    updatedAt: str = Field(min_length=10, max_length=64)
+
+    @field_validator("subnetHash", "foregroundAppId")
+    @classmethod
+    def _reject_newlines(cls, value: str | None) -> str | None:
+        if value is not None and ("\n" in value or "\r" in value):
+            raise ValueError("newline characters are not allowed")
+        return value
+
+    @field_validator("updatedAt")
+    @classmethod
+    def _validate_updated_at(cls, value: str) -> str:
+        if "T" not in value and "t" not in value:
+            raise ValueError("updatedAt must be an ISO-8601 datetime string")
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError("updatedAt must be timezone-aware")
+        return value
+
+    def parsed_updated_at(self) -> datetime:
+        return datetime.fromisoformat(self.updatedAt).astimezone(UTC)
+
+
+class ResourcesParamsModel(_StrictModel):
+    schemaVersion: Literal[1]
+    installedApps: list[Annotated[str, Field(pattern=r"^[a-z0-9_.-]{1,64}$")]] = Field(
+        max_length=256
+    )
+    workspaces: list[Annotated[str, Field(pattern=r"^[a-zA-Z0-9_.-]{1,64}$")]] = Field(
+        max_length=128
+    )
+    capabilitiesVersion: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.-]{1,32}$")
+
+    @field_validator("installedApps", "workspaces")
+    @classmethod
+    def _reject_list_newlines(cls, items: list[str]) -> list[str]:
+        for item in items:
+            if "\n" in item or "\r" in item or "/" in item or "\\" in item:
+                raise ValueError("invalid character in resource identifier")
+        return items
+
+    @field_validator("workspaces")
+    @classmethod
+    def _reject_workspace_traversal(cls, items: list[str]) -> list[str]:
+        for item in items:
+            if item in {".", ".."} or ".." in item:
+                raise ValueError("path traversal tokens are not allowed in workspaces")
+        return items
+
+    @field_validator("capabilitiesVersion")
+    @classmethod
+    def _reject_cap_newlines(cls, value: str | None) -> str | None:
+        if value is not None and ("\n" in value or "\r" in value):
+            raise ValueError("newline characters are not allowed")
+        return value
+
+
+class FocusRequestParamsModel(_StrictModel):
+    schemaVersion: Literal[1]
+    source: Literal["hotkey", "tray"]
+    followMe: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +226,21 @@ class ParsedLanPeer:
 
 
 @dataclass(frozen=True, slots=True)
+class ParsedPresence:
+    params: PresenceParamsModel
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedResources:
+    params: ResourcesParamsModel
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedFocusRequest:
+    params: FocusRequestParamsModel
+
+
+@dataclass(frozen=True, slots=True)
 class ParsedRpcResponse:
     request_id: int | str
     result: dict[str, object]
@@ -168,6 +262,9 @@ InboundAgentMessage = (
     | ParsedProgress
     | ParsedStop
     | ParsedLanPeer
+    | ParsedPresence
+    | ParsedResources
+    | ParsedFocusRequest
     | ParsedRpcResponse
     | ParsedRpcError
 )
@@ -294,6 +391,12 @@ def _parse_agent_notification(method: str, params: dict[str, object]) -> Inbound
             return ParsedStop(params=StopParamsModel.model_validate(params))
         if method == "xuna/lanPeer":
             return ParsedLanPeer(params=LanPeerParamsModel.model_validate(params))
+        if method == "xuna/presence":
+            return ParsedPresence(params=PresenceParamsModel.model_validate(params))
+        if method == "xuna/resources":
+            return ParsedResources(params=ResourcesParamsModel.model_validate(params))
+        if method == "xuna/focusRequest":
+            return ParsedFocusRequest(params=FocusRequestParamsModel.model_validate(params))
     except (ValidationError, ValueError) as error:
         raise HostSessionRejected(UNSUPPORTED_PROTOCOL) from error
     raise HostSessionRejected(UNSUPPORTED_PROTOCOL)
@@ -457,3 +560,20 @@ def rpc_notification_frame(method: str, params: dict[str, object]) -> str:
 
 def _dump(payload: dict[str, object]) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def validate_structured_content_size(
+    structured_content: Mapping[str, object],
+    *,
+    allow_media: bool = False,
+) -> tuple[bool, int, int]:
+    """Returns `(within_limit, byte_size, limit_bytes)` for `tools/call` `structuredContent`."""
+    is_media = allow_media and has_media_structured_content(structured_content)
+    limit = MAX_MEDIA_STRUCTURED_CONTENT_BYTES if is_media else MAX_STRUCTURED_CONTENT_BYTES
+    if structured_content_exceeds_limit(structured_content, allow_media=allow_media):
+        try:
+            byte_size = structured_content_byte_size(structured_content)
+        except (TypeError, ValueError):
+            byte_size = limit + 1
+        return False, byte_size, limit
+    return True, structured_content_byte_size(structured_content), limit

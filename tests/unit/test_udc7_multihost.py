@@ -39,8 +39,12 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalState,
 )
 from xuna_backend.modules.actions.domain.target_resolver import (
+    _DESKTOP_OTHER_PRONOUNS,
+    _MOBILE_OTHER_PRONOUNS,
+    _OTHER_TARGET_PRONOUNS,
     TargetResolutionStatus,
     TargetResolver,
+    is_target_pronoun,
 )
 from xuna_backend.modules.actions.infrastructure.brokers import (
     InMemoryApprovalBroker,
@@ -711,3 +715,27 @@ def test_s74_lan_peer_frames_and_host_persistence() -> None:
     assert saved is not None
     assert saved.lan_fingerprint == "ABCD1234EFGH5678"
     assert saved.lan_port == 47821
+
+
+def test_s72_pronoun_set_invariants_and_other_computer_routing() -> None:
+    assert _DESKTOP_OTHER_PRONOUNS <= _OTHER_TARGET_PRONOUNS
+    assert _MOBILE_OTHER_PRONOUNS <= _OTHER_TARGET_PRONOUNS
+    assert is_target_pronoun("other computer") is True
+
+    t0 = datetime(2026, 10, 31, 9, 0, tzinfo=UTC)
+    owner_id = uuid.uuid4()
+    pc_work = _make_host(owner_id, "PC Làm Việc", HostPlatform.WINDOWS, t0)
+    mac_thao = _make_host(owner_id, "Mac của Thảo", HostPlatform.MACOS, t0)
+    phone_thao = _make_host(owner_id, "Điện thoại Thảo", HostPlatform.ANDROID, t0)
+
+    res = TargetResolver.resolve(
+        requested_target="other computer",
+        eligible_hosts=[pc_work, mac_thao, phone_thao],
+        all_tool_hosts=[pc_work, mac_thao, phone_thao],
+        last_target_alias=pc_work.alias.value,
+        last_target_at=t0,
+        now=t0 + timedelta(seconds=10),
+    )
+    assert res.status == TargetResolutionStatus.RESOLVED
+    assert res.host == mac_thao
+    assert res.reason == "pronoun_other_target"

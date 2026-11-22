@@ -545,14 +545,29 @@ class InMemoryComputerUseSessionStore:
     async def get(self, session_id: str) -> ComputerUseSessionState | None:
         return self._by_id.get(session_id)
 
-    async def get_active_for_owner(self, owner_id: uuid.UUID) -> ComputerUseSessionState | None:
-        for state in self._by_id.values():
-            if state.owner_id == owner_id and state.active:
-                return state
-        return None
+    async def get_active_for_owner(
+        self, owner_id: uuid.UUID, host_id: HostId | None = None
+    ) -> ComputerUseSessionState | None:
+        matches = [
+            state
+            for state in self._by_id.values()
+            if state.owner_id == owner_id
+            and state.active
+            and (host_id is None or state.host_id == host_id)
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda s: s.started_at_utc)
+
+    async def list_active_for_owner(self, owner_id: uuid.UUID) -> list[ComputerUseSessionState]:
+        matches = [
+            state for state in self._by_id.values() if state.owner_id == owner_id and state.active
+        ]
+        matches.sort(key=lambda s: s.started_at_utc, reverse=True)
+        return matches
 
     async def start(self, state: ComputerUseSessionState, now: datetime) -> None:
-        await self.stop_all_for_owner(state.owner_id, "replaced", now)
+        await self.stop_all_for_owner(state.owner_id, "replaced", now, host_id=state.host_id)
         self._by_id[state.session_id] = state
 
     async def mark_ended(
@@ -571,10 +586,20 @@ class InMemoryComputerUseSessionStore:
         state.typed_count = 0
         return state
 
-    async def stop_all_for_owner(self, owner_id: uuid.UUID, reason: str, now: datetime) -> int:
+    async def stop_all_for_owner(
+        self,
+        owner_id: uuid.UUID,
+        reason: str,
+        now: datetime,
+        host_id: HostId | None = None,
+    ) -> int:
         stopped = 0
         for state in list(self._by_id.values()):
-            if state.owner_id == owner_id and state.active:
+            if (
+                state.owner_id == owner_id
+                and state.active
+                and (host_id is None or state.host_id == host_id)
+            ):
                 await self.mark_ended(state.session_id, reason, now)
                 stopped += 1
         return stopped
@@ -710,8 +735,8 @@ class ComputerUseSessionRunner:
             arguments=start_args,
         )
 
-        # End any previous active session for this owner
-        existing = await self._store.get_active_for_owner(owner_id)
+        # End any previous active session for this (owner_id, host_id) lane
+        existing = await self._store.get_active_for_owner(owner_id, host_id=host_id)
         if existing is not None:
             await self.end_session(
                 owner_id=owner_id,

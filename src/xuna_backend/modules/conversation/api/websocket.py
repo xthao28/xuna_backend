@@ -11,11 +11,13 @@ import contextlib
 import json
 import logging
 import uuid
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from pydantic import ValidationError
 from starlette.status import (
     WS_1008_POLICY_VIOLATION,
 )
@@ -28,9 +30,9 @@ from xuna_backend.modules.accounts.application.ports import (
 )
 from xuna_backend.modules.actions.api.routes import (
     _decode_b64_flex,
+    build_mesh_pre_router,
     build_stream_orchestrator,
 )
-from xuna_backend.modules.actions.application.catalog import load_tool_catalog_for_owner
 from xuna_backend.modules.actions.application.computer_use import session_event_payload
 from xuna_backend.modules.actions.application.orchestrator import (
     ActionContext,
@@ -40,6 +42,7 @@ from xuna_backend.modules.actions.application.orchestrator import (
 from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
+    ActionTargetRequiredEvent,
     ApprovalDecision,
     ApprovalScope,
     BoardHidRequestEvent,
@@ -73,6 +76,19 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     ReplyBudget,
     ToolCallRunner,
     TurnContext,
+    TurnEvent,
+    build_request,
+    chat_turn,
+)
+from xuna_backend.modules.conversation.application.mesh_turn_helper import (
+    execute_repair_dispatch,
+    parse_ws_hello,
+    parse_ws_optional_host_id,
+    parse_ws_turn_commit,
+    prepare_mesh_turn,
+    stream_short_circuit_turn,
+    stream_with_target_fallback,
+    tz_offset_minutes_from_dt,
 )
 from xuna_backend.modules.conversation.application.spoken_turn import (
     SpokenAudio,
@@ -94,6 +110,8 @@ from xuna_backend.modules.conversation.domain.turn_mode import (
     decide_mode,
     is_code_or_tool_synthesis_request,
 )
+from xuna_backend.modules.hosts.domain.entities import HostId
+from xuna_backend.modules.hosts.domain.twin import HostFocusChangedNotice
 from xuna_backend.modules.identity.application.ports import IdentityRepository
 from xuna_backend.modules.identity.domain.pet_id import PetId
 from xuna_backend.modules.knowledge.application.owner_context import BuildOwnerContextUseCase
@@ -275,8 +293,19 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=WS_1008_POLICY_VIOLATION)
         return
 
-    if hello.get("type") != "hello" or hello.get("schemaVersion") != 1:
+    if (
+        not isinstance(hello, dict)
+        or hello.get("type") != "hello"
+        or hello.get("schemaVersion") != 1
+    ):
         await websocket.send_json({"type": "error", "code": "unsupported_protocol"})
+        await websocket.close(code=WS_1008_POLICY_VIOLATION)
+        return
+
+    try:
+        parsed_hello = parse_ws_hello(hello)
+    except ValidationError:
+        await websocket.send_json({"type": "error", "code": "validation_failed"})
         await websocket.close(code=WS_1008_POLICY_VIOLATION)
         return
 
@@ -304,6 +333,8 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
         pet_id_raw = hello.get("petId")
         try:
+            if not isinstance(pet_id_raw, str):
+                raise ValueError("petId must be a string")
             pet_id = PetId(pet_id_raw)
         except Exception:
             await websocket.send_json({"type": "error", "code": "invalid_pet_id"})
@@ -357,6 +388,16 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
         if isinstance(raw_hello_self, str) and raw_hello_self.strip()
         else None
     )
+    try:
+        default_target_host_id = (
+            HostId(parsed_hello.targetHostId) if parsed_hello.targetHostId is not None else None
+        )
+    except ValueError:
+        await websocket.send_json({"type": "error", "code": "validation_failed"})
+        await websocket.close(code=WS_1008_POLICY_VIOLATION)
+        return
+    default_follow_me = parsed_hello.followMe
+    default_client_subnet_hash = parsed_hello.clientSubnetHash
 
     session = VoiceSession(
         session_id=session_id,
@@ -374,7 +415,20 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
     active_turn_task: asyncio.Task[None] | None = None
     active_turn_orch: Orchestrator | None = None
+    active_turn_pinned_host: HostId | None = None
     ws_closing = False
+
+    ws_hub = getattr(app.state, "host_session_hub", None)
+    ws_focus_unsub: Callable[[], None] | None = None
+
+    async def _on_ws_focus(notice: HostFocusChangedNotice) -> None:
+        if not ws_closing:
+            with contextlib.suppress(Exception):
+                await websocket.send_json({"type": "host_focus_changed", **notice.wire_payload()})
+
+    sub_fn = getattr(ws_hub, "subscribe_focus", None) if ws_hub is not None else None
+    if callable(sub_fn):
+        ws_focus_unsub = sub_fn(owner.owner_id, _on_ws_focus)
 
     def _is_closing() -> bool:
         return ws_closing
@@ -430,79 +484,115 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
                 elif msg_type == "turn.commit":
                     await _cancel_active_turn()
+                    try:
+                        parsed_commit, ctx_mesh = parse_ws_turn_commit(payload)
+                    except ValidationError:
+                        await websocket.send_json({"type": "error", "code": "validation_failed"})
+                        continue
 
-                    turn_text = str(payload.get("text", "")).strip()
-                    raw_ctx = payload.get("context", {})
-                    ctx_dict = raw_ctx if isinstance(raw_ctx, dict) else {}
+                    turn_text = parsed_commit.text.strip()
+                    ctx_dict = parsed_commit.context
                     parsed_ctx = _parse_commit_context(ctx_dict)
-                    requested_mode = _parse_requested_mode(payload.get("mode"))
-                    turn_voice = payload.get("voice")
+                    requested_mode = _parse_requested_mode(parsed_commit.mode)
+                    turn_voice = parsed_commit.voice
 
                     turn_caps = (
-                        _parse_client_caps(payload.get("clientCapabilities"))
+                        _parse_client_caps(parsed_commit.clientCapabilities)
                         or _parse_client_caps(ctx_dict.get("clientCapabilities"))
                         or default_client_caps
                     )
-                    override_board = _parse_board_available(payload.get("boardHid"))
+                    override_board = _parse_board_available(parsed_commit.boardHid)
                     if override_board is None:
                         override_board = _parse_board_available(ctx_dict.get("boardHid"))
                     turn_board_available = (
                         override_board if override_board is not None else default_board_available
                     )
-                    raw_self_host = payload.get("selfHostId") or ctx_dict.get("selfHostId")
+                    raw_self_host = parsed_commit.selfHostId or ctx_dict.get("selfHostId")
                     turn_self_host_id = (
                         raw_self_host.strip()[:64]
                         if isinstance(raw_self_host, str) and raw_self_host.strip()
                         else default_self_host_id
                     )
+                    try:
+                        turn_target_host_id = (
+                            HostId(parsed_commit.targetHostId)
+                            if parsed_commit.targetHostId is not None
+                            else (
+                                HostId(ctx_mesh.targetHostId)
+                                if ctx_mesh.targetHostId is not None
+                                else default_target_host_id
+                            )
+                        )
+                    except ValueError:
+                        await websocket.send_json({"type": "error", "code": "validation_failed"})
+                        continue
+                    turn_follow_me = (
+                        parsed_commit.followMe
+                        if parsed_commit.followMe is not None
+                        else (
+                            ctx_mesh.followMe
+                            if ctx_mesh.followMe is not None
+                            else default_follow_me
+                        )
+                    )
+                    turn_subnet_hash = (
+                        parsed_commit.clientSubnetHash
+                        or ctx_mesh.clientSubnetHash
+                        or default_client_subnet_hash
+                    )
+                    turn_tz_offset = tz_offset_minutes_from_dt(parsed_ctx.base.local_time)
 
                     now = datetime.now(UTC)
                     turn_tools: tuple[ToolSpec, ...] = ()
                     turn_host_screen_consent = False
-                    try:
-                        async with app.state.database.sessions() as db:
-                            if turn_caps:
-                                try:
-                                    u5_consent_repo: ConsentRepository = (
-                                        app.state.consent_repository(db)
-                                    )
-                                    consent_state = await u5_consent_repo.current(owner.owner_id)
-                                    turn_host_screen_consent = consent_state.host_screen
-                                except Exception:
-                                    logger.warning(
-                                        "Failed to read U5 consent for voice turn; "
-                                        "treating it as not granted",
-                                        exc_info=True,
-                                    )
-                                    turn_host_screen_consent = False
-                                try:
-                                    turn_tools = await load_tool_catalog_for_owner(
-                                        owner_id=owner.owner_id,
-                                        client_caps=turn_caps,
-                                        board_available=turn_board_available,
-                                        host_repo=app.state.host_repository(db),
-                                        hub=app.state.host_session_hub,
-                                        self_host_id=turn_self_host_id,
-                                        host_screen_consent=turn_host_screen_consent,
-                                        include_autonomous_job=getattr(
-                                            app.state, "job_runner", None
-                                        )
-                                        is not None,
-                                        audit=app.state.audit_log(db),
-                                    )
-                                except Exception:
-                                    logger.debug(
-                                        "Failed to load tool catalog for voice turn",
-                                        exc_info=True,
-                                    )
-                                    turn_tools = ()
+                    turn_pinned_host_id: HostId | None = None
+                    turn_host_roster: str | None = None
+                    async with app.state.database.sessions() as db:
+                        consent_factory = getattr(app.state, "consent_repository", None)
+                        host_factory = getattr(app.state, "host_repository", None)
+                        audit_factory = getattr(app.state, "audit_log", None)
+                        mesh_prep = await prepare_mesh_turn(
+                            owner_id=owner.owner_id,
+                            pet_id=str(pet_id),
+                            text=turn_text,
+                            client_caps=turn_caps,
+                            board_available=turn_board_available,
+                            self_host_id=turn_self_host_id,
+                            target_host_id=turn_target_host_id,
+                            follow_me=turn_follow_me,
+                            tz_offset_minutes=turn_tz_offset,
+                            include_autonomous_job=(
+                                getattr(app.state, "job_runner", None) is not None
+                            ),
+                            consent_repo=(
+                                consent_factory(db) if consent_factory is not None else None
+                            ),
+                            host_repo=host_factory(db) if host_factory is not None else None,
+                            hub=ws_hub,
+                            audit=audit_factory(db) if audit_factory is not None else None,
+                            pre_router=build_mesh_pre_router(app.state),
+                        )
+                        if mesh_prep.outcome.kind == "not_found":
+                            await websocket.send_json({"type": "error", "code": "not_found"})
+                            continue
+                        turn_tools = mesh_prep.tools
+                        turn_host_screen_consent = mesh_prep.host_screen_consent
+                        turn_pinned_host_id = mesh_prep.pinned_host_id
+                        turn_host_roster = mesh_prep.host_roster
+                        active_turn_pinned_host = turn_pinned_host_id
+                        routing_text = (
+                            mesh_prep.effective_text
+                            if mesh_prep.outcome.kind == "repair_dispatch"
+                            else turn_text
+                        )
 
+                        try:
                             mem_repo = app.state.memory_repository(db)
                             k_repo = app.state.knowledge_repository(db)
                             c_port = app.state.knowledge_candidate_adapter(db)
                             prepared = await prepare_turn(
                                 pet_id=pet_id,
-                                text=turn_text,
+                                text=routing_text,
                                 requested=requested_mode,
                                 channel=Channel.VOICE,
                                 base=parsed_ctx.base,
@@ -525,15 +615,15 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         confirmed_facts=parsed_ctx.base.confirmed_facts,
                                     ),
                                 )
-                    except Exception:
-                        fallback_dec = decide_mode(
-                            requested_mode, Channel.VOICE, turn_text, domain_matched=False
-                        )
-                        prepared = PreparedTurn(
-                            context=replace(parsed_ctx.base, mode=fallback_dec.mode),
-                            decision=fallback_dec,
-                            domain_id=None,
-                        )
+                        except Exception:
+                            fallback_dec = decide_mode(
+                                requested_mode, Channel.VOICE, routing_text, domain_matched=False
+                            )
+                            prepared = PreparedTurn(
+                                context=replace(parsed_ctx.base, mode=fallback_dec.mode),
+                                decision=fallback_dec,
+                                domain_id=None,
+                            )
 
                     settings = getattr(app.state, "settings", None)
                     chosen_mode = prepared.decision.mode
@@ -543,7 +633,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                     expert_gen: TextGenerator | None = (
                         getattr(app.state, "expert_text_generator", None) or code_gen
                     )
-                    is_code_turn = is_code_or_tool_synthesis_request(turn_text)
+                    is_code_turn = is_code_or_tool_synthesis_request(routing_text)
                     if chosen_mode == TurnMode.EXPERT:
                         if is_code_turn and code_gen is not None:
                             max_tok = (
@@ -583,12 +673,13 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                     turn_cu_cleanup: CuCleanupCallback | None = None
                     ended_cu_events: list[ComputerUseSessionEvent] = []
                     turn_orch: Orchestrator | None = None
-                    if turn_caps:
+                    eff_locale = target_locale or Locale.VI
+                    ws_ctx_factory: Callable[[EventSink], ActionContext] | None = None
+                    if turn_caps or mesh_prep.outcome.kind == "repair_dispatch":
                         stream_orch = build_stream_orchestrator(app.state)
                         turn_orch = stream_orch
                         active_turn_orch = stream_orch
-                        eff_locale = target_locale or Locale.VI
-                        detected_lang = detect_text_language(turn_text)
+                        detected_lang = detect_text_language(routing_text)
                         prompt_locale = (
                             Locale.EN
                             if detected_lang == Locale.EN
@@ -598,6 +689,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                             try:
                                 turn_cu_note = await stream_orch.active_cu_session_prompt_note(
                                     owner.owner_id,
+                                    host_id=turn_pinned_host_id,
                                     locale=prompt_locale,
                                     request_id=session_id,
                                 )
@@ -613,9 +705,11 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                             *,
                             _orch: Orchestrator = stream_orch,
                             _ended: list[ComputerUseSessionEvent] = ended_cu_events,
+                            _pin: HostId | None = turn_pinned_host_id,
                         ) -> ComputerUseSessionEvent | None:
                             ev = await _orch.cleanup_dangling_cu_session(
                                 owner_id=owner.owner_id,
+                                host_id=_pin,
                                 reason=reason,
                                 request_id=session_id,
                             )
@@ -625,31 +719,51 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
                         turn_cu_cleanup = _cleanup_ws_cu
 
+                        def _make_ws_ctx(
+                            emit: EventSink,
+                            *,
+                            _locale: Locale = eff_locale,
+                            _caps: frozenset[str] = frozenset(mesh_prep.effective_client_caps),
+                            _board: bool = turn_board_available,
+                            _self_host: str | None = turn_self_host_id,
+                            _u5_consent: bool = turn_host_screen_consent,
+                            _pinned_host: HostId | None = turn_pinned_host_id,
+                            _follow: bool = bool(turn_follow_me),
+                            _subnet: str | None = turn_subnet_hash,
+                            _tz: int | None = turn_tz_offset,
+                            _hab: bool = mesh_prep.habit_recorded_in_preroute,
+                            _pre_tr: Any = mesh_prep.pre_route_target_required,
+                            _pin_rsn: str | None = mesh_prep.pinned_target_reason,
+                        ) -> ActionContext:
+                            return ActionContext(
+                                owner_id=owner.owner_id,
+                                pet_id=str(pet_id),
+                                locale=_locale,
+                                client_caps=_caps,
+                                board_available=_board,
+                                emit_event=emit,
+                                request_id=session_id,
+                                self_host_id=_self_host,
+                                host_screen_consent=_u5_consent,
+                                pinned_host_id=_pinned_host,
+                                follow_me=_follow,
+                                client_subnet_hash=_subnet,
+                                client_tz_offset_minutes=_tz,
+                                habit_recorded_in_preroute=_hab,
+                                pre_route_target_required=_pre_tr,
+                                pinned_target_reason=_pin_rsn,
+                            )
+
+                        ws_ctx_factory = _make_ws_ctx
+
                         async def _run_voice_tool(
                             call: ToolCall,
                             emit: EventSink,
                             *,
                             _orch: Orchestrator = stream_orch,
-                            _locale: Locale = eff_locale,
-                            _caps: frozenset[str] = frozenset(turn_caps),
-                            _board: bool = turn_board_available,
-                            _self_host: str | None = turn_self_host_id,
-                            _u5_consent: bool = turn_host_screen_consent,
+                            _ctx_fn: Callable[[EventSink], ActionContext] = _make_ws_ctx,
                         ) -> Message:
-                            return await _orch.handle_call(
-                                call,
-                                ActionContext(
-                                    owner_id=owner.owner_id,
-                                    pet_id=str(pet_id),
-                                    locale=_locale,
-                                    client_caps=_caps,
-                                    board_available=_board,
-                                    emit_event=emit,
-                                    request_id=session_id,
-                                    self_host_id=_self_host,
-                                    host_screen_consent=_u5_consent,
-                                ),
-                            )
+                            return await _orch.handle_call(call, _ctx_fn(emit))
 
                         turn_tool_runner = _run_voice_tool
                     else:
@@ -666,10 +780,20 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         v: str | None = None,
                         *,
                         _code_gen: TextGenerator | None = code_gen,
+                        _code_timeout_s: float | None = (
+                            getattr(settings, "text_code_timeout_s", None)
+                            if settings is not None and code_gen is not None
+                            else None
+                        ),
                         _turn_note: str | None = turn_cu_note,
                         _cu_cleanup: CuCleanupCallback | None = turn_cu_cleanup,
                         _orch: Orchestrator | None = turn_orch,
                         _ended: list[ComputerUseSessionEvent] = ended_cu_events,
+                        _roster: str | None = turn_host_roster,
+                        _mesh: Any = mesh_prep,
+                        _ctx_fn: Callable[[EventSink], ActionContext] | None = ws_ctx_factory,
+                        _pin: HostId | None = turn_pinned_host_id,
+                        _eff_loc: Locale = eff_locale,
                     ) -> None:
                         signals = {
                             "signals": list(
@@ -689,6 +813,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                 with contextlib.suppress(Exception):
                                     ev = await _orch.cleanup_dangling_cu_session(
                                         owner_id=owner.owner_id,
+                                        host_id=_pin,
                                         reason=reason,
                                         request_id=session_id,
                                     )
@@ -705,6 +830,76 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         "reason": prep.decision.reason.value,
                                     }
                                 )
+                            if _mesh.outcome.focus_notice is not None and ws_focus_unsub is None:
+                                await websocket.send_json(
+                                    {
+                                        "type": "host_focus_changed",
+                                        **_mesh.outcome.focus_notice.wire_payload(),
+                                    }
+                                )
+                            src_events: AsyncIterator[TurnEvent] | None = None
+                            ws_turn_note_fn: Callable[[Locale], str] | None = None
+                            if _turn_note:
+                                _note_str = _turn_note
+
+                                def _ws_note(_loc: Locale, _n: str = _note_str) -> str:
+                                    return _n
+
+                                ws_turn_note_fn = _ws_note
+                            if _mesh.short_circuit:
+                                src_events = stream_short_circuit_turn(_mesh, _eff_loc)
+                            elif (
+                                _mesh.outcome.kind == "repair_dispatch"
+                                and _orch is not None
+                                and _ctx_fn is not None
+                            ):
+                                base_req = build_request(
+                                    _mesh.effective_text,
+                                    context=prep.context,
+                                    locale=session.locale,
+                                    mode=prep.decision.mode,
+                                    budget=bud,
+                                    tools=tools_arg,
+                                    turn_note=ws_turn_note_fn,
+                                    host_roster=_roster if tools_arg else None,
+                                )
+                                src_events = execute_repair_dispatch(
+                                    outcome=_mesh.outcome,
+                                    generator=gen,
+                                    base_request=base_req,
+                                    orchestrator=_orch,
+                                    action_ctx_factory=_ctx_fn,
+                                    sections=(prep.decision.mode == TurnMode.EXPERT),
+                                    locale_vi=(base_req.locale == Locale.VI),
+                                    code_generator=_code_gen,
+                                    code_timeout_s=_code_timeout_s,
+                                    cu_cleanup=_cu_cleanup,
+                                )
+                            elif _mesh.pre_route_target_required is not None:
+                                ws_req = build_request(
+                                    target_text,
+                                    context=prep.context,
+                                    locale=session.locale,
+                                    mode=prep.decision.mode,
+                                    budget=bud,
+                                    tools=tools_arg,
+                                    turn_note=ws_turn_note_fn,
+                                    host_roster=_roster if tools_arg else None,
+                                )
+                                raw_ev = chat_turn(
+                                    gen,
+                                    ws_req,
+                                    sections=(prep.decision.mode == TurnMode.EXPERT),
+                                    locale_vi=(ws_req.locale == Locale.VI),
+                                    tool_runner=runner_arg,
+                                    code_generator=_code_gen,
+                                    code_timeout_s=_code_timeout_s,
+                                    cu_cleanup=_cu_cleanup,
+                                )
+                                src_events = stream_with_target_fallback(
+                                    raw_ev, _mesh.target_required_event
+                                )
+
                             async for event in session.stream_turn_reply(
                                 target_text,
                                 prep.context,
@@ -713,10 +908,13 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                 budget=bud,
                                 generator=gen,
                                 code_generator=_code_gen,
+                                code_timeout_s=_code_timeout_s,
                                 tools=tools_arg,
                                 tool_runner=runner_arg,
                                 turn_note=_turn_note,
                                 cu_cleanup=_cu_cleanup,
+                                host_roster=_roster if tools_arg else None,
+                                source_events=src_events,
                             ):
                                 if isinstance(event, GestureChosen):
                                     await websocket.send_json(
@@ -725,6 +923,14 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                 elif isinstance(event, ActionPendingEvent):
                                     await websocket.send_json(
                                         {"type": "action_pending", **event.wire_payload()}
+                                    )
+                                elif isinstance(event, ActionTargetRequiredEvent):
+                                    await websocket.send_json(
+                                        {"type": "action_target_required", **event.wire_payload()}
+                                    )
+                                elif isinstance(event, HostFocusChangedNotice):
+                                    await websocket.send_json(
+                                        {"type": "host_focus_changed", **event.wire_payload()}
                                     )
                                 elif isinstance(event, BoardHidRequestEvent):
                                     await websocket.send_json(
@@ -758,20 +964,9 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                         wake_msg["macAddress"] = event.mac_address
                                     await websocket.send_json(wake_msg)
                                 elif isinstance(event, ActionResultEvent):
-                                    act_msg: dict[str, Any] = {
-                                        "type": "action_result",
-                                        "invocationId": event.invocation_id,
-                                        "target": event.target,
-                                        "summary": event.summary,
-                                        "status": event.status,
-                                    }
-                                    if event.gesture is not None:
-                                        act_msg["gesture"] = event.gesture
-                                    if event.error_code is not None:
-                                        act_msg["errorCode"] = event.error_code
-                                    if event.host_id is not None:
-                                        act_msg["hostId"] = event.host_id
-                                    await websocket.send_json(act_msg)
+                                    await websocket.send_json(
+                                        {"type": "action_result", **event.wire_payload()}
+                                    )
                                 elif isinstance(event, ComputerUseSessionEvent):
                                     if event.status == "ended":
                                         emitted_cu_ended = True
@@ -847,7 +1042,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
                     active_turn_task = asyncio.create_task(
                         run_reply(
-                            turn_text,
+                            mesh_prep.effective_text,
                             prepared,
                             requested_mode,
                             budget,
@@ -894,14 +1089,27 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
                 elif msg_type == "action.stop":
                     raw_reason = payload.get("reason")
-                    ws_orch = build_stream_orchestrator(app.state)
-                    stop_summary = await ws_orch.emergency_stop(
-                        owner_id=owner.owner_id,
-                        reason=str(raw_reason)[:64]
+                    try:
+                        stop_host_id = parse_ws_optional_host_id(payload.get("hostId"))
+                    except ValueError:
+                        await websocket.send_json({"type": "error", "code": "validation_failed"})
+                        continue
+                    stop_reason = (
+                        str(raw_reason)[:64]
                         if isinstance(raw_reason, str) and raw_reason.strip()
-                        else "owner_ws",
-                        request_id=session_id,
+                        else "owner_ws"
                     )
+                    ws_orch = build_stream_orchestrator(app.state)
+                    try:
+                        stop_summary = await ws_orch.emergency_stop(
+                            owner_id=owner.owner_id,
+                            reason=stop_reason,
+                            request_id=session_id,
+                            host_id=stop_host_id,
+                        )
+                    except ValueError:
+                        await websocket.send_json({"type": "error", "code": "not_found"})
+                        continue
                     await websocket.send_json(
                         {
                             "type": "action_stopped",
@@ -909,6 +1117,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                             "hostsNotified": stop_summary.hosts_notified,
                             "approvalsCancelled": stop_summary.approvals_cancelled,
                             "grantsSuspended": stop_summary.grants_suspended,
+                            "hostId": stop_summary.host_id,
                         }
                     )
 
@@ -939,6 +1148,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                             await asyncio.shield(
                                 active_turn_orch.cleanup_dangling_cu_session(
                                     owner_id=owner.owner_id,
+                                    host_id=active_turn_pinned_host,
                                     reason="turn_disconnected",
                                     request_id=session_id,
                                 )
@@ -950,6 +1160,9 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
         ws_closing = True
     finally:
         ws_closing = True
+        if callable(ws_focus_unsub):
+            with contextlib.suppress(BaseException):
+                ws_focus_unsub()
         was_turn_running = active_turn_task is not None and not active_turn_task.done()
         await _cancel_active_turn()
         if was_turn_running and active_turn_orch is not None:
@@ -957,6 +1170,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                 await asyncio.shield(
                     active_turn_orch.cleanup_dangling_cu_session(
                         owner_id=owner.owner_id,
+                        host_id=active_turn_pinned_host,
                         reason="turn_disconnected",
                         request_id=session_id,
                     )

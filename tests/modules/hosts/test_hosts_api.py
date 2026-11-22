@@ -39,10 +39,13 @@ from xuna_backend.modules.hosts.domain.crypto import (
 from xuna_backend.modules.hosts.domain.entities import (
     Host,
     HostAlias,
+    HostAliasConflictError,
     HostId,
+    HostKind,
     HostPlatform,
     HostStatus,
 )
+from xuna_backend.modules.hosts.domain.twin import HostFocusChangedNotice
 
 ROOT = Path(__file__).resolve().parents[3]
 TABLES = (
@@ -1071,3 +1074,767 @@ def test_postgres_manifest_cache_invalidation_owner_commits_warm_pool_and_idempo
         return resp
 
     asyncio.run(_verify_idempotency_sweep())
+
+
+def test_websocket_linux_mesh_notifications_and_eviction() -> None:
+    """Connects a `linux` host over WS, streams mesh notifications, and evicts on close."""
+    issuer = LocalIssuer()
+    app = create_app(
+        Settings(
+            environment=Environment.TEST,
+            database_url="postgresql+psycopg://xuna:unused@127.0.0.1:1/none",
+        ),
+        verifier=issuer.verifier(),
+    )
+    host_repo = FakeHostRepository()
+    enroll_repo = FakeEnrollmentRepository()
+    audit_log = MemoryAuditLog()
+
+    agent_key = SimulatedDevice()
+    host_id = HostId.generate()
+    owner_id = uuid.uuid4()
+    now = datetime(2026, 11, 20, 16, 0, tzinfo=UTC)
+    host_repo.hosts[host_id.value] = Host(
+        host_id=host_id,
+        owner_id=owner_id,
+        alias=HostAlias("Homelab Linux"),
+        platform=HostPlatform.LINUX,
+        hostname="nuc-homelab",
+        os_version="Ubuntu 24.04",
+        agent_version="0.1.0",
+        public_key=agent_key.public_key,
+        status=HostStatus.ACTIVE,
+        created_at=now,
+        last_seen_at=now,
+        host_kind=HostKind.SERVER,
+    )
+
+    hook_notices: list[HostFocusChangedNotice] = []
+    sub_notices: list[HostFocusChangedNotice] = []
+
+    async def _on_focus_hook(notice: HostFocusChangedNotice) -> None:
+        hook_notices.append(notice)
+
+    async def _on_focus_sub(notice: HostFocusChangedNotice) -> None:
+        sub_notices.append(notice)
+
+    with TestClient(app) as client:
+        app.state.database = _DummyDatabase()
+        app.state.cu_session_store = InMemoryComputerUseSessionStore()
+        app.state.host_repository = lambda _db: host_repo
+        app.state.host_enrollment_repository = lambda _db: enroll_repo
+        app.state.audit_log = lambda _db: audit_log
+        app.state.on_host_focus_changed = _on_focus_hook
+
+        hub = app.state.host_session_hub
+        unsub = hub.subscribe_focus(owner_id, _on_focus_sub)
+        try:
+            with client.websocket_connect("/v1/hosts/connect", subprotocols=SUBPROTOCOL) as ws:
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "xuna/hello",
+                            "params": {
+                                "protocols": ["xtp/1"],
+                                "hostId": str(host_id),
+                                "platform": "linux",
+                                "osVersion": "Ubuntu 24.04",
+                                "agentVersion": "0.1.0",
+                            },
+                        }
+                    )
+                )
+                assert json.loads(ws.receive_text())["result"] == {"protocol": "xtp/1"}
+                challenge = json.loads(ws.receive_text())
+                nonce = base64.b64decode(challenge["params"]["nonce"])
+                proof_msg = host_proof_message(
+                    nonce=nonce,
+                    purpose=HostProofPurpose.SESSION,
+                    payload=agent_key.public_key,
+                    host_id=host_id,
+                )
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "xuna/proof",
+                            "params": {
+                                "purpose": 2,
+                                "signature": b64(agent_key.sign(proof_msg)),
+                            },
+                        }
+                    )
+                )
+                assert json.loads(ws.receive_text())["result"] == {"verified": True}
+                assert json.loads(ws.receive_text())["method"] == "xuna/ready"
+                tools_req = json.loads(ws.receive_text())
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": tools_req["id"],
+                            "result": {"tools": _sample_tools_wire()},
+                        }
+                    )
+                )
+
+                # Send xuna/presence, xuna/resources, xuna/focusRequest
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "xuna/presence",
+                            "params": {
+                                "schemaVersion": 1,
+                                "idleSeconds": 4,
+                                "screenLocked": False,
+                                "mediaPlaying": False,
+                                "subnetHash": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+                                "foregroundAppId": "vscode",
+                                "updatedAt": "2026-11-20T16:00:00Z",
+                            },
+                        }
+                    )
+                )
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "xuna/resources",
+                            "params": {
+                                "schemaVersion": 1,
+                                "installedApps": ["vscode"],
+                                "workspaces": ["xuna_pet"],
+                                "capabilitiesVersion": "r1_0001",
+                            },
+                        }
+                    )
+                )
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "xuna/focusRequest",
+                            "params": {
+                                "schemaVersion": 1,
+                                "source": "hotkey",
+                                "followMe": True,
+                            },
+                        }
+                    )
+                )
+                # Flush via ping
+                ws.send_text(
+                    json.dumps({"jsonrpc": "2.0", "id": 10, "method": "ping", "params": {}})
+                )
+                assert json.loads(ws.receive_text()) == {"jsonrpc": "2.0", "id": 10, "result": {}}
+
+                twin = hub.get_twin(str(host_id))
+                assert twin is not None
+                assert twin.presence is not None
+                assert twin.presence.foreground_app_id == "vscode"
+                assert twin.presence.battery_percent is None
+                assert twin.resources is not None
+                assert twin.resources.installed_apps == ("vscode",)
+                assert twin.resources.workspaces == ("xuna_pet",)
+
+                focus = hub.get_focus_state(owner_id)
+                assert focus is not None
+                assert focus.focused_host_id == host_id
+                assert focus.follow_me is True
+                assert focus.source == "hotkey"
+                assert len(sub_notices) == 1
+                assert len(hook_notices) == 1
+                assert hook_notices[0].alias == "Homelab Linux"
+
+                # Invalid mesh frame closes socket with 1002 unsupported_protocol
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "xuna/resources",
+                            "params": {
+                                "schemaVersion": 1,
+                                "installedApps": [],
+                                "workspaces": ["/etc/passwd"],
+                            },
+                        }
+                    )
+                )
+                close_msg = ws.receive()
+                assert close_msg["type"] == "websocket.close"
+                assert close_msg["code"] == 1002
+        finally:
+            unsub()
+
+        # Disconnected host must have its HostTwin immediately evicted
+        assert hub.get_twin(str(host_id)) is None
+
+
+@pytest.mark.postgres
+def test_postgres_spatial_host_round_trip_and_alias_collision(
+    pg_client: TestClient,
+    pg_issuer: LocalIssuer,
+) -> None:
+    import asyncio
+
+    app_state: Any = pg_client.app.state  # type: ignore[union-attr]
+    database = app_state.database
+    now = datetime(2026, 11, 20, 16, 30, tzinfo=UTC)
+
+    async def _verify_repo_round_trip_and_savepoint() -> None:
+        from xuna_backend.modules.accounts.domain.owner import OwnerClaims
+
+        async with database.sessions() as db:
+            owner = await app_state.owner_repository(db).get_or_create(
+                OwnerClaims(issuer="https://auth.test.xuna", subject="spatial-owner-1")
+            )
+            repo = app_state.host_repository(db)
+            dev1 = SimulatedDevice()
+            host1 = Host(
+                host_id=HostId.generate(),
+                owner_id=owner.owner_id,
+                alias=HostAlias("Máy của Thảo"),
+                platform=HostPlatform.MACOS,
+                hostname="macbook-pro",
+                os_version="15.1",
+                agent_version="0.1.0",
+                public_key=dev1.public_key,
+                status=HostStatus.ACTIVE,
+                created_at=now,
+                wol_mac="aa:bb:cc:dd:ee:ff",
+                host_kind=HostKind.DESKTOP,
+                place="office",
+                nicknames=("mac nha", "workstation"),
+            )
+            await repo.save_host(host1)
+            await db.commit()
+
+            loaded = await repo.get_host(host1.host_id)
+            assert loaded is not None
+            assert loaded.host_kind == HostKind.DESKTOP
+            assert loaded.place == "office"
+            assert loaded.nicknames == ("mac nha", "workstation")
+            assert loaded.alias_folded == "may cua thao"
+            assert loaded.wol_mac == "AA:BB:CC:DD:EE:FF"
+
+            # Direct concurrent save with duplicate folded active alias raises
+            # HostAliasConflictError and leaves the session usable via savepoint.
+            dev2 = SimulatedDevice()
+            host2 = Host(
+                host_id=HostId.generate(),
+                owner_id=owner.owner_id,
+                alias=HostAlias("May cua Thao"),
+                platform=HostPlatform.WINDOWS,
+                hostname="win-pc",
+                os_version="11",
+                agent_version="0.1.0",
+                public_key=dev2.public_key,
+                status=HostStatus.ACTIVE,
+                created_at=now,
+            )
+            with pytest.raises(HostAliasConflictError):
+                await repo.save_host(host2)
+            existing = await repo.list_hosts(owner.owner_id)
+            assert len(existing) == 1
+            await db.commit()
+
+    asyncio.run(_verify_repo_round_trip_and_savepoint())
+
+    # HTTP 409 conflict on self-enroll & confirm, plus revoke freeing the folded alias
+    headers = {"Authorization": f"Bearer {pg_issuer.token('spatial-owner-http')}"}
+
+    def _self_enroll(dev: SimulatedDevice, alias: str) -> Any:
+        ch_resp = pg_client.post("/v1/hosts/self/challenge", headers=headers)
+        assert ch_resp.status_code == 200
+        ch = ch_resp.json()
+        code_raw = base64.urlsafe_b64decode(ch["enrollmentCode"] + "==")
+        nonce_raw = base64.urlsafe_b64decode(ch["nonce"] + "==")
+        sig = dev.sign(
+            host_proof_message(nonce=nonce_raw, purpose=HostProofPurpose.ENROLL, payload=code_raw)
+        )
+        return pg_client.post(
+            "/v1/hosts/self",
+            headers={**headers, **idem()},
+            json={
+                "schemaVersion": 1,
+                "platform": "ios",
+                "osVersion": "18.0",
+                "agentVersion": "0.1.0",
+                "alias": alias,
+                "publicKey": base64.urlsafe_b64encode(dev.public_key).rstrip(b"=").decode("ascii"),
+                "proof": base64.urlsafe_b64encode(sig).rstrip(b"=").decode("ascii"),
+            },
+        )
+
+    phone_a = SimulatedDevice()
+    phone_b = SimulatedDevice()
+    r_first = _self_enroll(phone_a, "Máy của Thảo")
+    assert r_first.status_code == 200
+    first_host_id = r_first.json()["hostId"]
+
+    r_conflict = _self_enroll(phone_b, "May cua Thao")
+    assert r_conflict.status_code == 409
+    assert r_conflict.json()["code"] == "conflict"
+
+    # Confirm enrollment also returns 409 on folded alias collision
+    from xuna_backend.modules.hosts.application.use_cases import (
+        StartEnrollmentCommand,
+        start_enrollment,
+    )
+
+    desktop_dev = SimulatedDevice()
+    code_bytes = bytes(range(10, 26))
+    code_b64url = base64.urlsafe_b64encode(code_bytes).rstrip(b"=").decode("ascii")
+    fp_b64url = public_key_fingerprint_b64url(desktop_dev.public_key)
+    nonce = bytes(range(32))
+    enroll_sig = desktop_dev.sign(host_proof_message(nonce, HostProofPurpose.ENROLL, code_bytes))
+
+    async def _seed_pending() -> None:
+        async with database.sessions() as db:
+            await start_enrollment(
+                app_state.host_enrollment_repository(db),
+                app_state.signature_verifier,
+                StartEnrollmentCommand(
+                    code=code_bytes,
+                    public_key=desktop_dev.public_key,
+                    nonce=nonce,
+                    signature=enroll_sig,
+                    platform=HostPlatform.LINUX,
+                    os_version="Ubuntu 24.04",
+                    agent_version="0.1.0",
+                    hostname="nuc-box",
+                ),
+                datetime.now(UTC),
+            )
+            await db.commit()
+
+    asyncio.run(_seed_pending())
+    claim_r = pg_client.post(
+        "/v1/hosts",
+        headers={**headers, **idem()},
+        json={
+            "schemaVersion": 1,
+            "enrollmentCode": code_b64url,
+            "keyFingerprint": fp_b64url,
+            "alias": "MÁY CỦA THẢO",
+        },
+    )
+    assert claim_r.status_code == 202
+    pending_id = claim_r.json()["hostId"]
+
+    confirm_conflict = pg_client.post(
+        f"/v1/hosts/{pending_id}/confirm",
+        headers={**headers, **idem()},
+        json={"schemaVersion": 1},
+    )
+    assert confirm_conflict.status_code == 409
+    assert confirm_conflict.json()["code"] == "conflict"
+
+    # Revoking first host frees the folded alias so confirm succeeds
+    rev_r = pg_client.delete(f"/v1/hosts/{first_host_id}", headers={**headers, **idem()})
+    assert rev_r.status_code == 204
+
+    confirm_ok = pg_client.post(
+        f"/v1/hosts/{pending_id}/confirm",
+        headers={**headers, **idem()},
+        json={"schemaVersion": 1},
+    )
+    assert confirm_ok.status_code == 200
+    assert confirm_ok.json()["hostId"] == pending_id
+
+
+@pytest.mark.postgres
+def test_patch_host_and_focus_revoke_postgres_e2e(
+    pg_client: TestClient, pg_issuer: LocalIssuer
+) -> None:
+    """Verifies PATCH /v1/hosts/{id}, GET /v1/hosts additive fields, and revoke focus clearing."""
+    headers = {"Authorization": f"Bearer {pg_issuer.token('patch-owner-pg')}"}
+    foreign_headers = {"Authorization": f"Bearer {pg_issuer.token('patch-foreign-pg')}"}
+
+    def _enroll(dev: SimulatedDevice, alias: str) -> str:
+        ch = pg_client.post("/v1/hosts/self/challenge", headers=headers).json()
+        code_raw = base64.urlsafe_b64decode(ch["enrollmentCode"] + "==")
+        nonce_raw = base64.urlsafe_b64decode(ch["nonce"] + "==")
+        sig = dev.sign(
+            host_proof_message(nonce=nonce_raw, purpose=HostProofPurpose.ENROLL, payload=code_raw)
+        )
+        r = pg_client.post(
+            "/v1/hosts/self",
+            headers={**headers, **idem()},
+            json={
+                "schemaVersion": 1,
+                "platform": "ios",
+                "osVersion": "18.0",
+                "agentVersion": "0.1.0",
+                "alias": alias,
+                "publicKey": base64.urlsafe_b64encode(dev.public_key).rstrip(b"=").decode("ascii"),
+                "proof": base64.urlsafe_b64encode(sig).rstrip(b"=").decode("ascii"),
+            },
+        )
+        assert r.status_code == 200
+        return str(r.json()["hostId"])
+
+    h1 = _enroll(SimulatedDevice(), "Mac Phòng")
+    h2 = _enroll(SimulatedDevice(), "Win Studio")
+
+    # Missing Idempotency-Key -> 400
+    assert (
+        pg_client.patch(
+            f"/v1/hosts/{h1}", headers=headers, json={"schemaVersion": 1, "place": "office"}
+        ).status_code
+        == 400
+    )
+
+    # Valid PATCH + clear via "" + 409 SQL alias_folded collision + 404 foreign
+    p1 = pg_client.patch(
+        f"/v1/hosts/{h1}",
+        headers={**headers, **idem()},
+        json={
+            "schemaVersion": 1,
+            "place": "office",
+            "nicknames": ["mac nha"],
+            "hostKind": "desktop",
+            "wolMac": "aa:bb:cc:dd:ee:ff",
+        },
+    )
+    assert p1.status_code == 200
+    assert p1.json()["place"] == "office"
+    assert p1.json()["wolMac"] == "AA:BB:CC:DD:EE:FF"
+
+    p_clr = pg_client.patch(
+        f"/v1/hosts/{h1}",
+        headers={**headers, **idem()},
+        json={"schemaVersion": 1, "place": "", "wolMac": ""},
+    )
+    assert p_clr.status_code == 200
+    assert p_clr.json()["place"] is None
+    assert p_clr.json()["wolMac"] is None
+
+    assert (
+        pg_client.patch(
+            f"/v1/hosts/{h2}",
+            headers={**headers, **idem()},
+            json={"schemaVersion": 1, "alias": "mac phong"},
+        ).status_code
+        == 409
+    )
+    assert (
+        pg_client.patch(
+            f"/v1/hosts/{h1}",
+            headers={**foreign_headers, **idem()},
+            json={"schemaVersion": 1, "alias": "Other"},
+        ).status_code
+        == 404
+    )
+
+    # Focus h1, verify GET /v1/hosts focused=True and presence=None, then revoke h1 clears focus
+    f_r = pg_client.post(
+        "/v1/actions/focus",
+        headers=headers,
+        json={"schemaVersion": 1, "hostId": h1, "followMe": True},
+    )
+    assert f_r.status_code == 200
+    assert f_r.json()["focusedHostId"] == h1
+
+    items = {it["hostId"]: it for it in pg_client.get("/v1/hosts", headers=headers).json()["items"]}
+    assert items[h1]["focused"] is True
+    assert items[h1]["presence"] is None
+    assert items[h2]["focused"] is False
+
+    assert pg_client.delete(f"/v1/hosts/{h1}", headers={**headers, **idem()}).status_code == 204
+    focus_after = pg_client.post(
+        "/v1/actions/focus",
+        headers=headers,
+        json={"schemaVersion": 1, "hostId": None},
+    )
+    assert focus_after.status_code == 200
+    assert focus_after.json()["focusedHostId"] is None
+
+
+def test_patch_host_unicode_whitespace_rejected_and_empty_clears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xuna_backend.core.idempotency import parse_key
+    from xuna_backend.modules.hosts.api import routes as host_routes
+    from xuna_backend.modules.hosts.api.schemas import PatchHostRequest
+    from xuna_backend.modules.hosts.domain.entities import (
+        normalize_nicknames,
+        normalize_place,
+    )
+
+    for ws_only in ("\u00a0", "\u00a0\u00a0", "\u2003\u3000"):
+        with pytest.raises(ValueError):
+            normalize_place(ws_only)
+        with pytest.raises(ValueError):
+            normalize_nicknames([ws_only])
+        with pytest.raises(ValueError):
+            PatchHostRequest(schemaVersion=1, place=ws_only)
+        with pytest.raises(ValueError):
+            PatchHostRequest(schemaVersion=1, nicknames=[ws_only])
+
+    assert normalize_place("\u00a0office\u00a0") == "office"
+    assert normalize_nicknames(["\u00a0nick\u00a0"]) == ("nick",)
+    assert PatchHostRequest(schemaVersion=1, place="").place == ""
+
+    seen_idem: dict[tuple[uuid.UUID, str], Any] = {}
+
+    async def _fake_run_once(
+        _session: Any,
+        *,
+        owner_id: uuid.UUID,
+        key: str,
+        fingerprint: str,
+        now: Any,
+        action: Any,
+    ) -> Any:
+        if (owner_id, key) in seen_idem:
+            return seen_idem[(owner_id, key)]
+        res = await action()
+        seen_idem[(owner_id, key)] = res
+        return res
+
+    monkeypatch.setattr(host_routes, "run_once", _fake_run_once)
+    monkeypatch.setattr(host_routes, "parse_key", parse_key)
+
+    issuer = LocalIssuer()
+    owner_id = uuid.uuid4()
+    host = Host(
+        host_id=HostId.generate(),
+        owner_id=owner_id,
+        alias=HostAlias("WorkMac"),
+        platform=HostPlatform.MACOS,
+        hostname="workmac.local",
+        os_version="15.0",
+        agent_version="0.2.0",
+        public_key=b"\x04" + b"\x11" * 64,
+        status=HostStatus.ACTIVE,
+        created_at=datetime.now(UTC),
+        host_kind=HostKind.DESKTOP,
+        place="office",
+    )
+    host_repo = FakeHostRepository()
+    host_repo.hosts[host.host_id.value] = host
+
+    class _OwnerRepo:
+        async def get_by_subject(self, _issuer: str, subject: str) -> Any:
+            from xuna_backend.modules.accounts.domain.owner import Owner
+
+            return Owner(owner_id=owner_id, issuer=_issuer, subject=subject)
+
+        async def get_or_create(self, claims: Any) -> Any:
+            return await self.get_by_subject(claims.issuer, claims.subject)
+
+    app = create_app(
+        Settings(
+            environment=Environment.TEST,
+            database_url="postgresql+psycopg://xuna:unused@127.0.0.1:1/none",
+        ),
+        verifier=issuer.verifier(),
+    )
+    app.state.database = _DummyDatabase()
+    app.state.owner_repository = lambda _s: _OwnerRepo()
+    app.state.host_repository = lambda _s: host_repo
+    app.state.audit_log = lambda _s: MemoryAuditLog()
+
+    client = TestClient(app)
+    headers = {"Authorization": f"Bearer {issuer.token('unicode-ws-owner')}"}
+
+    for bad in (
+        {"schemaVersion": 1, "place": "\u00a0\u00a0"},
+        {"schemaVersion": 1, "nicknames": ["\u00a0"]},
+    ):
+        resp = client.patch(
+            f"/v1/hosts/{host.host_id}",
+            headers={**headers, **idem()},
+            json=bad,
+        )
+        assert resp.status_code == 422
+        assert resp.json()["code"] == "validation_failed"
+
+    clear_resp = client.patch(
+        f"/v1/hosts/{host.host_id}",
+        headers={**headers, **idem()},
+        json={"schemaVersion": 1, "place": ""},
+    )
+    assert clear_resp.status_code == 200
+    assert clear_resp.json()["place"] is None
+
+    # Gap 9: PatchHostRequest rejects boolean schemaVersion
+    bool_resp = client.patch(
+        f"/v1/hosts/{host.host_id}",
+        headers={**headers, **idem()},
+        json={"schemaVersion": True, "alias": "ShouldFail"},
+    )
+    assert bool_resp.status_code == 422
+
+
+def test_focus_request_after_patch_host_emits_updated_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tier 5 (Gap 8): xuna/focusRequest fetches fresh host alias after PATCH /v1/hosts/{id}."""
+    from xuna_backend.core.idempotency import parse_key
+    from xuna_backend.modules.actions.application.computer_use import (
+        InMemoryComputerUseSessionStore,
+    )
+    from xuna_backend.modules.hosts.api import routes as host_routes
+    from xuna_backend.modules.hosts.domain.twin import HostFocusChangedNotice
+
+    seen_idem: dict[tuple[uuid.UUID, str], Any] = {}
+
+    async def _fake_run_once(
+        _session: Any,
+        *,
+        owner_id: uuid.UUID,
+        key: str,
+        fingerprint: str,
+        now: Any,
+        action: Any,
+    ) -> Any:
+        if (owner_id, key) in seen_idem:
+            return seen_idem[(owner_id, key)]
+        res = await action()
+        seen_idem[(owner_id, key)] = res
+        return res
+
+    monkeypatch.setattr(host_routes, "run_once", _fake_run_once)
+    monkeypatch.setattr(host_routes, "parse_key", parse_key)
+
+    issuer = LocalIssuer()
+    owner_id = uuid.uuid4()
+    host_id = HostId.generate()
+    agent_key = SimulatedDevice()
+    now = datetime.now(UTC)
+    host = Host(
+        host_id=host_id,
+        owner_id=owner_id,
+        alias=HostAlias("OldMac"),
+        platform=HostPlatform.MACOS,
+        hostname="oldmac.local",
+        os_version="15.0",
+        agent_version="0.2.0",
+        public_key=agent_key.public_key,
+        status=HostStatus.ACTIVE,
+        created_at=now,
+        last_seen_at=now,
+        host_kind=HostKind.DESKTOP,
+    )
+    host_repo = FakeHostRepository()
+    host_repo.hosts[host_id.value] = host
+    enroll_repo = FakeEnrollmentRepository()
+
+    class _OwnerRepo:
+        async def get_by_subject(self, _issuer: str, subject: str) -> Any:
+            from xuna_backend.modules.accounts.domain.owner import Owner
+
+            return Owner(owner_id=owner_id, issuer=_issuer, subject=subject)
+
+        async def get_or_create(self, claims: Any) -> Any:
+            return await self.get_by_subject(claims.issuer, claims.subject)
+
+    app = create_app(
+        Settings(
+            environment=Environment.TEST,
+            database_url="postgresql+psycopg://xuna:unused@127.0.0.1:1/none",
+        ),
+        verifier=issuer.verifier(),
+    )
+
+    notices: list[HostFocusChangedNotice] = []
+
+    async def _on_notice(notice: HostFocusChangedNotice) -> None:
+        notices.append(notice)
+
+    headers = {"Authorization": f"Bearer {issuer.token('focus-rename-owner')}"}
+    with TestClient(app) as client:
+        app.state.database = _DummyDatabase()
+        app.state.cu_session_store = InMemoryComputerUseSessionStore()
+        app.state.owner_repository = lambda _s: _OwnerRepo()
+        app.state.host_repository = lambda _s: host_repo
+        app.state.host_enrollment_repository = lambda _s: enroll_repo
+        app.state.audit_log = lambda _s: MemoryAuditLog()
+
+        hub = app.state.host_session_hub
+        unsub = hub.subscribe_focus(owner_id, _on_notice)
+        try:
+            with client.websocket_connect("/v1/hosts/connect", subprotocols=SUBPROTOCOL) as ws:
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "xuna/hello",
+                            "params": {
+                                "protocols": ["xtp/1"],
+                                "hostId": str(host_id),
+                                "platform": "macos",
+                                "osVersion": "15.0",
+                                "agentVersion": "0.2.0",
+                            },
+                        }
+                    )
+                )
+                assert json.loads(ws.receive_text())["result"] == {"protocol": "xtp/1"}
+                challenge = json.loads(ws.receive_text())
+                nonce = base64.b64decode(challenge["params"]["nonce"])
+                proof_msg = host_proof_message(
+                    nonce=nonce,
+                    purpose=HostProofPurpose.SESSION,
+                    payload=agent_key.public_key,
+                    host_id=host_id,
+                )
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "xuna/proof",
+                            "params": {
+                                "purpose": 2,
+                                "signature": b64(agent_key.sign(proof_msg)),
+                            },
+                        }
+                    )
+                )
+                assert json.loads(ws.receive_text())["result"] == {"verified": True}
+                assert json.loads(ws.receive_text())["method"] == "xuna/ready"
+                tools_req = json.loads(ws.receive_text())
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": tools_req["id"],
+                            "result": {"tools": _sample_tools_wire()},
+                        }
+                    )
+                )
+
+                patch_resp = client.patch(
+                    f"/v1/hosts/{host_id}",
+                    headers={**headers, **idem()},
+                    json={"schemaVersion": 1, "alias": "RenamedMac"},
+                )
+                assert patch_resp.status_code == 200
+                assert patch_resp.json()["alias"] == "RenamedMac"
+
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "xuna/focusRequest",
+                            "params": {"schemaVersion": 1, "source": "hotkey", "followMe": False},
+                        }
+                    )
+                )
+                ws.send_text(
+                    json.dumps({"jsonrpc": "2.0", "id": 11, "method": "ping", "params": {}})
+                )
+                assert json.loads(ws.receive_text()) == {"jsonrpc": "2.0", "id": 11, "result": {}}
+
+                assert len(notices) == 1
+                assert notices[0].alias == "RenamedMac"
+        finally:
+            unsub()

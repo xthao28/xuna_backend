@@ -1,11 +1,48 @@
 """XTP v1 WebSocket session constants, close codes and rate limiter (UDC-3 §5.2)."""
 
+import json
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 SUBPROTOCOL = "xtp/1"
 ENROLLMENT_TTL_S = 300
 APPROVAL_TTL_S = 60
+MAX_STRUCTURED_CONTENT_BYTES = 16_384
+MAX_MEDIA_STRUCTURED_CONTENT_BYTES = 458_752
+
+
+def has_media_structured_content(sc: Mapping[str, object]) -> bool:
+    """Matches `frames.dart:_hasMediaStructuredContent` for 448 KiB media payloads."""
+    screenshot = sc.get("screenshot")
+    if isinstance(screenshot, Mapping) and isinstance(screenshot.get("dataBase64"), str):
+        return True
+    if isinstance(sc.get("dataBase64"), str):
+        return True
+    image = sc.get("image")
+    return isinstance(image, Mapping) and isinstance(image.get("dataBase64"), str)
+
+
+def structured_content_byte_size(sc: Mapping[str, object]) -> int:
+    """Compact UTF-8 JSON byte length matching `utf8.encode(jsonEncode(sc)).length`."""
+    return len(json.dumps(sc, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+
+
+def structured_content_exceeds_limit(
+    sc: Mapping[str, object],
+    *,
+    allow_media: bool = False,
+    max_ordinary_bytes: int = MAX_STRUCTURED_CONTENT_BYTES,
+    max_media_bytes: int = MAX_MEDIA_STRUCTURED_CONTENT_BYTES,
+) -> bool:
+    """Returns True if `sc` exceeds the 16 KiB ordinary or 448 KiB media ceiling."""
+    limit = (
+        max_media_bytes if allow_media and has_media_structured_content(sc) else max_ordinary_bytes
+    )
+    try:
+        return structured_content_byte_size(sc) > limit
+    except (TypeError, ValueError):
+        return True
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +76,8 @@ class HostGatewayLimits:
     heartbeat_s: int = 30
     default_call_deadline_ms: int = 10_000
     max_frame_bytes: int = 524_288
-    max_structured_content_bytes: int = 16_384
+    max_structured_content_bytes: int = MAX_STRUCTURED_CONTENT_BYTES
+    max_media_structured_content_bytes: int = MAX_MEDIA_STRUCTURED_CONTENT_BYTES
     claims_per_owner_per_min: int = 30
     connects_per_peer_per_min: int = 30
 

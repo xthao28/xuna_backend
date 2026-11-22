@@ -13,12 +13,14 @@ import sqlalchemy as sa
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
     LargeBinary,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects import postgresql
@@ -97,11 +99,13 @@ class CuSessionModel(Base):
     __tablename__ = "cu_sessions"
     __table_args__ = (
         Index(
-            "uq_cu_sessions_owner_active",
+            "uq_cu_sessions_owner_host_active",
             "owner_id",
+            "host_id",
             unique=True,
             postgresql_where=text("active"),
         ),
+        Index("ix_cu_sessions_owner_host", "owner_id", "host_id"),
     )
 
     session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -202,3 +206,82 @@ class AutonomousJobModel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class HostRoutingHabitModel(Base):
+    """Persistent contextual host routing habit (`host_routing_habits`, Spatial Mesh §5.1.3)."""
+
+    __tablename__ = "host_routing_habits"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id",
+            "pet_id",
+            "context_key",
+            "host_id",
+            name="uq_host_routing_habits_key",
+        ),
+    )
+
+    habit_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("owners.owner_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    pet_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    context_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    host_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("hosts.host_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    positive_score: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0, server_default="0"
+    )
+    negative_score: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0, server_default="0"
+    )
+    sample_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    decay_gamma: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.85, server_default="0.85"
+    )
+    last_reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class HostDefaultModel(Base):
+    """Server-side durable host defaults (`host_defaults`, Spatial Mesh §5.1.4)."""
+
+    __tablename__ = "host_defaults"
+    __table_args__ = (
+        UniqueConstraint(
+            "owner_id",
+            "pet_id",
+            "scope_key",
+            name="uq_host_defaults_owner_pet_scope",
+        ),
+    )
+
+    default_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("owners.owner_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    pet_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    host_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("hosts.host_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="confirmed", server_default="confirmed"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

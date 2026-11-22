@@ -4,13 +4,16 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from xuna_backend.modules.hosts.domain.entities import (
     Grant,
     Host,
     HostAlias,
+    HostAliasConflictError,
     HostId,
+    HostKind,
     HostPlatform,
     HostStatus,
     Manifest,
@@ -60,6 +63,11 @@ def _to_host(row: HostModel) -> Host:
         last_seen_at=row.last_seen_at,
         lan_fingerprint=row.lan_fingerprint,
         lan_port=row.lan_port,
+        wol_mac=row.wol_mac,
+        host_kind=HostKind(row.host_kind),
+        place=row.place,
+        nicknames=tuple(row.nicknames or ()),
+        alias_folded=row.alias_folded,
     )
 
 
@@ -143,38 +151,55 @@ class SqlHostRepository:
         return _to_host(row) if row is not None else None
 
     async def save_host(self, host: Host) -> None:
-        row = await self._session.get(HostModel, host.host_id.value)
-        if row is None:
-            self._session.add(
-                HostModel(
-                    host_id=host.host_id.value,
-                    owner_id=host.owner_id,
-                    alias=host.alias.value,
-                    platform=host.platform.value,
-                    hostname=host.hostname,
-                    os_version=host.os_version,
-                    agent_version=host.agent_version,
-                    public_key=host.public_key,
-                    status=host.status.value,
-                    created_at=host.created_at,
-                    last_seen_at=host.last_seen_at,
-                    lan_fingerprint=host.lan_fingerprint,
-                    lan_port=host.lan_port,
-                )
-            )
-        else:
-            row.owner_id = host.owner_id
-            row.alias = host.alias.value
-            row.platform = host.platform.value
-            row.hostname = host.hostname
-            row.os_version = host.os_version
-            row.agent_version = host.agent_version
-            row.public_key = host.public_key
-            row.status = host.status.value
-            row.last_seen_at = host.last_seen_at
-            row.lan_fingerprint = host.lan_fingerprint
-            row.lan_port = host.lan_port
-        await self._session.flush()
+        try:
+            async with self._session.begin_nested():
+                row = await self._session.get(HostModel, host.host_id.value)
+                if row is None:
+                    self._session.add(
+                        HostModel(
+                            host_id=host.host_id.value,
+                            owner_id=host.owner_id,
+                            alias=host.alias.value,
+                            platform=host.platform.value,
+                            hostname=host.hostname,
+                            os_version=host.os_version,
+                            agent_version=host.agent_version,
+                            public_key=host.public_key,
+                            status=host.status.value,
+                            created_at=host.created_at,
+                            last_seen_at=host.last_seen_at,
+                            lan_fingerprint=host.lan_fingerprint,
+                            lan_port=host.lan_port,
+                            host_kind=host.host_kind.value,
+                            place=host.place,
+                            nicknames=list(host.nicknames),
+                            alias_folded=host.alias_folded,
+                            wol_mac=host.wol_mac,
+                        )
+                    )
+                else:
+                    row.owner_id = host.owner_id
+                    row.alias = host.alias.value
+                    row.platform = host.platform.value
+                    row.hostname = host.hostname
+                    row.os_version = host.os_version
+                    row.agent_version = host.agent_version
+                    row.public_key = host.public_key
+                    row.status = host.status.value
+                    row.last_seen_at = host.last_seen_at
+                    row.lan_fingerprint = host.lan_fingerprint
+                    row.lan_port = host.lan_port
+                    row.host_kind = host.host_kind.value
+                    row.place = host.place
+                    row.nicknames = list(host.nicknames)
+                    row.alias_folded = host.alias_folded
+                    row.wol_mac = host.wol_mac
+                await self._session.flush()
+        except IntegrityError as error:
+            msg = str(getattr(error, "orig", error))
+            if "uq_hosts_owner_alias_folded_active" in msg:
+                raise HostAliasConflictError("active host alias conflict") from error
+            raise
 
     async def list_hosts(self, owner_id: uuid.UUID) -> list[Host]:
         stmt = (

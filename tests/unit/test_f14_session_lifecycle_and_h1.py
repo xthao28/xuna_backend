@@ -1167,3 +1167,80 @@ def test_rule_h1_orchestrator_hints_for_activation_hover_nodiff_and_launch() -> 
         assert "previous instructions" not in note4
 
     asyncio.run(run())
+
+
+def test_chat_turn_fallback_upgrades_timeout_to_code_timeout_s() -> None:
+    """When primary fails over to code_generator, subsequent calls inherit code_timeout_s."""
+    seen_timeouts: list[float] = []
+
+    async def primary_fail(_req: ChatRequest, _idx: int) -> AsyncIterator[ChatEvent]:
+        if False:
+            yield _done()
+        raise ProviderUnavailableError("quota_exhausted")
+
+    async def fallback_two_rounds(req: ChatRequest, idx: int) -> AsyncIterator[ChatEvent]:
+        seen_timeouts.append(req.timeout_s)
+        if idx == 0 and req.tools:
+            yield ToolCallRequested(ToolCall("c1", "window__active_context", {}))
+            yield _done()
+        else:
+            yield TextDelta("Đã ngắt VPN xong.")
+            yield _done()
+
+    async def ok_runner(call: ToolCall, _emit: Any) -> Message:
+        return Message(Role.TOOL, '{"status":"ok"}', tool_call_id=call.id)
+
+    req = ChatRequest(
+        messages=(Message(Role.USER, "dừng vpn"),),
+        locale=Locale.VI,
+        timeout_s=25.0,
+        tools=(ToolSpec("window__active_context", "active context", {"type": "object"}),),
+    )
+
+    async def run_multi() -> None:
+        evs = [
+            ev
+            async for ev in chat_turn(
+                _ScriptedGenerator(primary_fail),
+                req,
+                tool_runner=ok_runner,
+                code_generator=_ScriptedGenerator(fallback_two_rounds),
+                code_timeout_s=60.0,
+            )
+        ]
+        assert any(isinstance(e, TextDelta) and "ngắt VPN" in e.text for e in evs)
+
+    asyncio.run(run_multi())
+    assert len(seen_timeouts) == 2
+    assert seen_timeouts[0] == pytest.approx(60.0, abs=1.0)
+    assert seen_timeouts[1] == pytest.approx(60.0, abs=1.0)
+
+    # Single-round path (no tools) also upgrades timeout on fallback
+    single_seen: list[float] = []
+
+    async def fallback_single(req_in: ChatRequest, _idx: int) -> AsyncIterator[ChatEvent]:
+        single_seen.append(req_in.timeout_s)
+        yield TextDelta("OK")
+        yield _done()
+
+    single_req = ChatRequest(
+        messages=(Message(Role.USER, "chào"),),
+        locale=Locale.VI,
+        timeout_s=25.0,
+    )
+
+    async def run_single() -> None:
+        evs = [
+            ev
+            async for ev in chat_turn(
+                _ScriptedGenerator(primary_fail),
+                single_req,
+                tool_runner=None,
+                code_generator=_ScriptedGenerator(fallback_single),
+                code_timeout_s=60.0,
+            )
+        ]
+        assert any(isinstance(e, TextDelta) and e.text == "OK" for e in evs)
+
+    asyncio.run(run_single())
+    assert single_seen == [60.0]

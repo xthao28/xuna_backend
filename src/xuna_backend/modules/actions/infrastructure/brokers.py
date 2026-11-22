@@ -130,10 +130,16 @@ class InMemoryApprovalBroker:
         slot.event.set()
         return slot.request
 
-    def reject_all_for_owner(self, owner_id: uuid.UUID, now: datetime) -> list[ApprovalRequest]:
+    def reject_all_for_owner(
+        self, owner_id: uuid.UUID, now: datetime, host_id: HostId | None = None
+    ) -> list[ApprovalRequest]:
         rejected: list[ApprovalRequest] = []
         for slot in list(self._slots.values()):
-            if slot.request.owner_id == owner_id and slot.request.state == ApprovalState.PENDING:
+            if (
+                slot.request.owner_id == owner_id
+                and slot.request.state == ApprovalState.PENDING
+                and (host_id is None or slot.request.host_id == host_id)
+            ):
                 slot.request = ApprovalRequest(
                     approval_id=slot.request.approval_id,
                     owner_id=slot.request.owner_id,
@@ -295,10 +301,11 @@ class InMemoryApprovalScopeStore:
         self._scopes[key] = expires_at
         return expires_at
 
-    async def clear_owner(self, owner_id: uuid.UUID) -> int:
+    async def clear_owner(self, owner_id: uuid.UUID, host_id: HostId | None = None) -> int:
         count = 0
+        host_key = str(host_id) if host_id is not None else None
         for key in list(self._scopes.keys()):
-            if key[0] == owner_id:
+            if key[0] == owner_id and (host_key is None or key[2] == host_key):
                 self._scopes.pop(key, None)
                 count += 1
         return count

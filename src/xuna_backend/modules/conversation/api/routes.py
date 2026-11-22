@@ -16,13 +16,15 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, BeforeValidator, ConfigDict, Field
 
 from xuna_backend.core.errors import AppError
 from xuna_backend.modules.accounts.api.dependencies import Session, state
 from xuna_backend.modules.accounts.domain.owner import Owner
-from xuna_backend.modules.actions.api.routes import build_stream_orchestrator
-from xuna_backend.modules.actions.application.catalog import load_tool_catalog_for_owner
+from xuna_backend.modules.actions.api.routes import (
+    build_mesh_pre_router,
+    build_stream_orchestrator,
+)
 from xuna_backend.modules.actions.application.computer_use import session_event_payload
 from xuna_backend.modules.actions.application.cu_template import CuTemplatePin
 from xuna_backend.modules.actions.application.orchestrator import (
@@ -33,6 +35,7 @@ from xuna_backend.modules.actions.application.orchestrator import (
 from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
+    ActionTargetRequiredEvent,
     BoardHidRequestEvent,
     ComputerUseSessionEvent,
     HostWakeRequestEvent,
@@ -52,10 +55,8 @@ from xuna_backend.modules.cognition.domain.types import (
     TextDelta,
     ToolCall,
     ToolCallRequested,
-    ToolSpec,
 )
 from xuna_backend.modules.consent.api.routes import RequireConsent
-from xuna_backend.modules.consent.application.ports import ConsentRepository
 from xuna_backend.modules.consent.domain.consent import ConsentClass
 from xuna_backend.modules.conversation.api.websocket import router as ws_router
 from xuna_backend.modules.conversation.application.chat_turn import (
@@ -77,6 +78,14 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     TurnContext,
     build_request,
     chat_turn,
+)
+from xuna_backend.modules.conversation.application.mesh_turn_helper import (
+    NonZeroHostUuid,
+    execute_repair_dispatch,
+    prepare_mesh_turn,
+    stream_short_circuit_turn,
+    stream_with_target_fallback,
+    tz_offset_minutes_from_dt,
 )
 from xuna_backend.modules.conversation.application.spoken_turn import (
     SpeechUnavailable,
@@ -108,6 +117,7 @@ from xuna_backend.modules.conversation.domain.turn_mode import (
 )
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
 from xuna_backend.modules.hosts.domain.entities import HostId
+from xuna_backend.modules.hosts.domain.twin import HostFocusChangedNotice
 from xuna_backend.modules.identity.application.use_cases import IdentityError, get_owned_pet
 from xuna_backend.modules.identity.domain.pet_id import PetId
 from xuna_backend.modules.knowledge.application.owner_context import BuildOwnerContextUseCase
@@ -194,10 +204,16 @@ class CuTemplateBody(BaseModel):
         )
 
 
+def _require_int_schema_version(v: object) -> object:
+    if not isinstance(v, int) or isinstance(v, bool):
+        raise ValueError("schemaVersion must be an integer")
+    return v
+
+
 class TurnBody(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schemaVersion: Literal[1]
+    schemaVersion: Annotated[Literal[1], BeforeValidator(_require_int_schema_version)]
     text: str = Field(min_length=1, max_length=MAX_EXPERT_INPUT_CHARS)
     locale: Locale | None = None
     voice: str | None = None
@@ -224,6 +240,10 @@ class TurnBody(BaseModel):
     selfHostId: str | None = Field(default=None, max_length=64)
     # UDC-17 S17.5: rerun of a template saved on the phone (old apps omit it).
     cuTemplate: CuTemplateBody | None = None
+    # Spatial Device Mesh (§5.6.6): explicit target override, Follow Me, and subnet proximity.
+    targetHostId: NonZeroHostUuid | None = None
+    followMe: bool | None = None
+    clientSubnetHash: str | None = Field(default=None, max_length=64, pattern=r"^[0-9a-f]{16,64}$")
 
     def base_context(self) -> TurnContext:
         pet = self.pet
@@ -408,10 +428,53 @@ async def turn(
         # Candidate extraction is best-effort; must not fail turn
         pass
 
+    client_caps = tuple(body.clientCapabilities or ())
+    board_available = bool(body.boardHid.available) if body.boardHid is not None else False
+    self_host_id = body.selfHostId.strip() if body.selfHostId else None
+    try:
+        cu_template = body.cuTemplate.to_pin() if body.cuTemplate is not None else None
+    except ValueError as error:
+        raise AppError(
+            "validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "cuTemplate"
+        ) from error
+    tz_offset = tz_offset_minutes_from_dt(body.clientTime)
+    hub_obj: HostSessionHub | None = getattr(request.app.state, "host_session_hub", None)
+    host_repo_factory = getattr(request.app.state, "host_repository", None)
+    consent_factory = getattr(request.app.state, "consent_repository", None)
+    audit_factory = getattr(request.app.state, "audit_log", None)
+    try:
+        parsed_target_host_id = HostId(body.targetHostId) if body.targetHostId is not None else None
+    except ValueError as error:
+        raise AppError(
+            "validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "targetHostId"
+        ) from error
+    mesh_prep = await prepare_mesh_turn(
+        owner_id=owner.owner_id,
+        pet_id=pet_id,
+        text=body.text,
+        client_caps=client_caps,
+        board_available=board_available,
+        self_host_id=self_host_id,
+        target_host_id=parsed_target_host_id,
+        follow_me=body.followMe,
+        tz_offset_minutes=tz_offset,
+        include_autonomous_job=getattr(request.app.state, "job_runner", None) is not None,
+        consent_repo=consent_factory(session) if consent_factory is not None else None,
+        host_repo=host_repo_factory(session) if host_repo_factory is not None else None,
+        hub=hub_obj,
+        audit=audit_factory(session) if audit_factory is not None else None,
+        pre_router=build_mesh_pre_router(request.app.state),
+    )
+    if mesh_prep.outcome.kind == "not_found":
+        raise AppError("not_found", HTTPStatus.NOT_FOUND)
+    routing_text = (
+        mesh_prep.effective_text if mesh_prep.outcome.kind == "repair_dispatch" else body.text
+    )
+
     try:
         prepared = await prepare_turn(
             pet_id=target_pet_id,
-            text=body.text,
+            text=routing_text,
             requested=body.mode,
             channel=Channel.TEXT,
             base=base_ctx,
@@ -424,54 +487,16 @@ async def turn(
             now=now,
         )
     except Exception:
-        fallback_decision = decide_mode(body.mode, Channel.TEXT, body.text, domain_matched=False)
+        fallback_decision = decide_mode(body.mode, Channel.TEXT, routing_text, domain_matched=False)
         prepared = PreparedTurn(
             context=base_ctx,
             decision=fallback_decision,
             domain_id=None,
         )
-
-    client_caps = tuple(body.clientCapabilities or ())
-    board_available = bool(body.boardHid.available) if body.boardHid is not None else False
-    self_host_id = body.selfHostId.strip() if body.selfHostId else None
-    try:
-        cu_template = body.cuTemplate.to_pin() if body.cuTemplate is not None else None
-    except ValueError as error:
-        raise AppError(
-            "validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "cuTemplate"
-        ) from error
-    tools: tuple[ToolSpec, ...] = ()
-    host_screen_consent = False
-    if client_caps:
-        try:
-            consent_factory: Callable[[object], ConsentRepository] = state(
-                request, "consent_repository"
-            )
-            consent_state = await consent_factory(session).current(owner.owner_id)
-            host_screen_consent = consent_state.host_screen
-        except Exception:
-            _logger.warning(
-                "Failed to read U5 consent for turn; treating it as not granted",
-                exc_info=True,
-            )
-            host_screen_consent = False
-        try:
-            host_factory: Callable[[object], HostRepository] = state(request, "host_repository")
-            hub: HostSessionHub = state(request, "host_session_hub")
-            tools = await load_tool_catalog_for_owner(
-                owner_id=owner.owner_id,
-                client_caps=client_caps,
-                board_available=board_available,
-                host_repo=host_factory(session),
-                hub=hub,
-                self_host_id=self_host_id,
-                host_screen_consent=host_screen_consent,
-                include_autonomous_job=getattr(request.app.state, "job_runner", None) is not None,
-                audit=state(request, "audit_log")(session),
-            )
-        except Exception:
-            _logger.debug("Failed to load tool catalog for turn", exc_info=True)
-            tools = ()
+    tools = mesh_prep.tools
+    host_screen_consent = mesh_prep.host_screen_consent
+    pinned_host_id = mesh_prep.pinned_host_id
+    host_roster = mesh_prep.host_roster
     template_note: Callable[[Locale], str] | None = None
     if cu_template is not None and tools:
         # The computer's current alias, read for this owner only; the pin itself is by id.
@@ -495,15 +520,18 @@ async def turn(
     raw_rid = getattr(request.state, "request_id", "")
     request_id_str = str(raw_rid) if isinstance(raw_rid, str) else ""
     stream_orch: Orchestrator | None = (
-        build_stream_orchestrator(request.app.state) if client_caps else None
+        build_stream_orchestrator(request.app.state)
+        if (client_caps or mesh_prep.outcome.kind == "repair_dispatch")
+        else None
     )
     cu_note: str | None = None
     if stream_orch is not None and tools:
-        detected = detect_text_language(body.text)
+        detected = detect_text_language(routing_text)
         eff_locale = detected if detected == Locale.EN else (body.locale or Locale.VI)
         try:
             cu_note = await stream_orch.active_cu_session_prompt_note(
                 owner.owner_id,
+                host_id=pinned_host_id,
                 locale=eff_locale,
                 request_id=request_id_str,
             )
@@ -538,7 +566,7 @@ async def turn(
     expert_gen: TextGenerator | None = (
         getattr(request.app.state, "expert_text_generator", None) or code_gen
     )
-    is_code_turn = is_code_or_tool_synthesis_request(body.text)
+    is_code_turn = is_code_or_tool_synthesis_request(routing_text)
 
     if chosen_mode == TurnMode.EXPERT:
         if is_code_turn and code_gen is not None:
@@ -561,7 +589,7 @@ async def turn(
 
     try:
         chat_request = build_request(
-            body.text,
+            mesh_prep.effective_text,
             body.locale,
             budget.timeout_s,
             _effective_context(prepared.context),
@@ -569,6 +597,7 @@ async def turn(
             budget=budget,
             tools=tools,
             turn_note=turn_note,
+            host_roster=host_roster if tools else None,
         )
     except ValueError as error:
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, "text") from error
@@ -582,29 +611,38 @@ async def turn(
 
     tool_runner: ToolCallRunner | None = None
     cu_cleanup: CuCleanupCallback | None = None
+
+    def _make_action_ctx(emit: EventSink) -> ActionContext:
+        return ActionContext(
+            owner_id=owner.owner_id,
+            pet_id=pet_id,
+            locale=chat_request.locale,
+            client_caps=mesh_prep.effective_client_caps,
+            board_available=board_available,
+            emit_event=emit,
+            request_id=request_id_str,
+            self_host_id=self_host_id,
+            host_screen_consent=host_screen_consent,
+            cu_template=cu_template,
+            pinned_host_id=pinned_host_id,
+            follow_me=bool(body.followMe),
+            client_subnet_hash=body.clientSubnetHash,
+            client_tz_offset_minutes=tz_offset,
+            habit_recorded_in_preroute=mesh_prep.habit_recorded_in_preroute,
+            pre_route_target_required=mesh_prep.pre_route_target_required,
+            pinned_target_reason=mesh_prep.pinned_target_reason,
+        )
+
     if stream_orch is not None:
         _sse_orch = stream_orch
 
         async def _run_tool(call: ToolCall, emit: EventSink) -> Message:
-            return await _sse_orch.handle_call(
-                call,
-                ActionContext(
-                    owner_id=owner.owner_id,
-                    pet_id=pet_id,
-                    locale=chat_request.locale,
-                    client_caps=client_caps,
-                    board_available=board_available,
-                    emit_event=emit,
-                    request_id=request_id_str,
-                    self_host_id=self_host_id,
-                    host_screen_consent=host_screen_consent,
-                    cu_template=cu_template,
-                ),
-            )
+            return await _sse_orch.handle_call(call, _make_action_ctx(emit))
 
         async def _cleanup_sse_cu(reason: str) -> ComputerUseSessionEvent | None:
             return await _sse_orch.cleanup_dangling_cu_session(
                 owner_id=owner.owner_id,
+                host_id=pinned_host_id,
                 reason=reason,
                 request_id=request_id_str,
             )
@@ -622,15 +660,42 @@ async def turn(
                     "reason": prepared.decision.reason.value,
                 },
             )
-        text_events = chat_turn(
-            generator,
-            chat_request,
-            sections=(chosen_mode == TurnMode.EXPERT),
-            locale_vi=(chat_request.locale == Locale.VI),
-            tool_runner=tool_runner,
-            code_generator=code_gen,
-            cu_cleanup=cu_cleanup,
+        if mesh_prep.outcome.focus_notice is not None:
+            yield _sse("host_focus_changed", mesh_prep.outcome.focus_notice.wire_payload())
+        code_timeout_s = (
+            getattr(settings, "text_code_timeout_s", None) if code_gen is not None else None
         )
+        if mesh_prep.short_circuit:
+            text_events = stream_short_circuit_turn(mesh_prep, chat_request.locale)
+        elif mesh_prep.outcome.kind == "repair_dispatch" and stream_orch is not None:
+            text_events = execute_repair_dispatch(
+                outcome=mesh_prep.outcome,
+                generator=generator,
+                base_request=chat_request,
+                orchestrator=stream_orch,
+                action_ctx_factory=_make_action_ctx,
+                sections=(chosen_mode == TurnMode.EXPERT),
+                locale_vi=(chat_request.locale == Locale.VI),
+                code_generator=code_gen,
+                code_timeout_s=code_timeout_s,
+                cu_cleanup=cu_cleanup,
+            )
+        else:
+            raw_text_events = chat_turn(
+                generator,
+                chat_request,
+                sections=(chosen_mode == TurnMode.EXPERT),
+                locale_vi=(chat_request.locale == Locale.VI),
+                tool_runner=tool_runner,
+                code_generator=code_gen,
+                code_timeout_s=code_timeout_s,
+                cu_cleanup=cu_cleanup,
+            )
+            text_events = (
+                stream_with_target_fallback(raw_text_events, mesh_prep.target_required_event)
+                if mesh_prep.pre_route_target_required is not None
+                else raw_text_events
+            )
         stream: AsyncIterator[SpokenTurnEvent] = (
             spoken_turn(text_events, synthesizer, body.locale, voice=body.voice)
             if body.speak
@@ -639,6 +704,12 @@ async def turn(
         has_detail = False
         stream_completed = False
         event_queue: asyncio.Queue[SpokenTurnEvent | BaseException | None] = asyncio.Queue()
+
+        async def _on_focus_changed(notice: HostFocusChangedNotice) -> None:
+            await event_queue.put(notice)
+
+        sub_fn = getattr(hub_obj, "subscribe_focus", None) if hub_obj is not None else None
+        unsub_focus = sub_fn(owner.owner_id, _on_focus_changed) if callable(sub_fn) else None
 
         async def _pump_stream() -> None:
             try:
@@ -677,6 +748,10 @@ async def turn(
                         yield _sse("gesture", {"name": gesture.value})
                     case ActionPendingEvent() as pending:
                         yield _sse("action_pending", pending.wire_payload())
+                    case ActionTargetRequiredEvent() as target_req:
+                        yield _sse("action_target_required", target_req.wire_payload())
+                    case HostFocusChangedNotice() as focus_ev:
+                        yield _sse("host_focus_changed", focus_ev.wire_payload())
                     case BoardHidRequestEvent() as hid_req:
                         yield _sse(
                             "board_hid_request",
@@ -707,19 +782,7 @@ async def turn(
                             wake_payload["macAddress"] = wake_req.mac_address
                         yield _sse("host_wake_request", wake_payload)
                     case ActionResultEvent() as act_res:
-                        act_payload: dict[str, Any] = {
-                            "invocationId": act_res.invocation_id,
-                            "target": act_res.target,
-                            "summary": act_res.summary,
-                            "status": act_res.status,
-                        }
-                        if act_res.gesture is not None:
-                            act_payload["gesture"] = act_res.gesture
-                        if act_res.error_code is not None:
-                            act_payload["errorCode"] = act_res.error_code
-                        if act_res.host_id is not None:
-                            act_payload["hostId"] = act_res.host_id
-                        yield _sse("action_result", act_payload)
+                        yield _sse("action_result", act_res.wire_payload())
                     case ComputerUseSessionEvent() as cu_ev:
                         yield _sse("cu_session", session_event_payload(cu_ev))
                     case ToolCallRequested():
@@ -766,6 +829,9 @@ async def turn(
                     case ProviderFailed(code=code):
                         yield _sse("error", {"code": code})
         finally:
+            if callable(unsub_focus):
+                with contextlib.suppress(BaseException):
+                    unsub_focus()
             if not pump_task.done():
                 pump_task.cancel()
                 await asyncio.gather(pump_task, return_exceptions=True)
@@ -774,6 +840,7 @@ async def turn(
                     await asyncio.shield(
                         stream_orch.cleanup_dangling_cu_session(
                             owner_id=owner.owner_id,
+                            host_id=pinned_host_id,
                             reason="turn_disconnected",
                             request_id=request_id_str,
                         )

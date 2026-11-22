@@ -615,22 +615,56 @@ class TestR3SafetyGateAndCoordinateAntiCircumvention:
 
 
 class TestRuleH5GenericLayerCompliance:
-    def test_rule_h5_zero_hardcoded_app_names_in_generic_layers(self) -> None:
-        pattern = re.compile(
-            r"\b(spotify|chrome|safari|zalo|figma|slack|notion|telegram)\b",
+    def test_rule_h5_zero_hardcoded_app_names_or_paths_in_generic_layers(self) -> None:
+        app_pattern = re.compile(
+            r"\b(spotify|chrome|safari|zalo|figma|slack|notion|telegram|vscode|obsidian)\b",
             re.IGNORECASE,
         )
+        host_pattern = re.compile(
+            r"\b(macbook|mac\s*studio|pc\s*nha|living_room)\b",
+            re.IGNORECASE,
+        )
+        os_path_pattern = re.compile(r"(/Users/|/home/|C:\\\\|/Applications/|/Program Files)")
         backend_root = Path(__file__).resolve().parents[2]
-        files_to_scan = [
-            backend_root / "src/xuna_backend/modules/actions/application/prompts.py",
-            backend_root / "src/xuna_backend/modules/actions/application/catalog.py",
-            backend_root / "src/xuna_backend/modules/actions/application/orchestrator.py",
-            backend_root / "src/xuna_backend/modules/actions/application/computer_use.py",
+        generic_dirs: list[tuple[Path, frozenset[str]]] = [
+            (
+                backend_root / "src/xuna_backend/modules/actions/application",
+                frozenset({"workflows.py"}),
+            ),
+            (
+                backend_root / "src/xuna_backend/modules/actions/domain",
+                frozenset({"tool_names.py"}),
+            ),
+            (backend_root / "src/xuna_backend/modules/hosts/application", frozenset()),
+            (backend_root / "src/xuna_backend/modules/conversation/application", frozenset()),
         ]
-        conv_dir = backend_root / "src/xuna_backend/modules/conversation/application"
-        if conv_dir.exists():
-            for p in conv_dir.rglob("*.py"):
-                files_to_scan.append(p)
+        files_to_scan: list[Path] = []
+        for directory, exempt in generic_dirs:
+            if directory.exists():
+                for p in sorted(directory.rglob("*.py")):
+                    if p.name not in exempt:
+                        files_to_scan.append(p)
+
+        scanned_names = {p.name for p in files_to_scan}
+        for required in (
+            "mesh_scoring.py",
+            "habit_learner.py",
+            "mesh_router.py",
+            "mesh_prober.py",
+            "mesh_call_helper.py",
+            "mesh_turn_helper.py",
+            "habits.py",
+            "tool_discovery.py",
+            "catalog.py",
+            "prompts.py",
+            "orchestrator.py",
+            "cross_host_pipelines.py",
+            "redaction.py",
+            "battery_advisor.py",
+            "mission_envelope.py",
+            "wake_queue.py",
+        ):
+            assert required in scanned_names, f"Expected {required} in H5 generic scan"
 
         violations: list[str] = []
         for file_path in files_to_scan:
@@ -639,13 +673,70 @@ class TestRuleH5GenericLayerCompliance:
                     stripped = line.strip()
                     if stripped.startswith("#"):
                         continue
-                    match = pattern.search(line)
-                    if match:
-                        violations.append(
-                            f"{file_path}:{line_num}: matched '{match.group(0)}' in '{stripped}'"
-                        )
+                    for label, pat in (
+                        ("app_name", app_pattern),
+                        ("host_literal", host_pattern),
+                        ("os_path", os_path_pattern),
+                    ):
+                        match = pat.search(line)
+                        if match:
+                            violations.append(
+                                f"{file_path}:{line_num} [{label}]: matched '{match.group(0)}' "
+                                f"in '{stripped}'"
+                            )
 
         assert not violations, "Rule H5 violations found:\n" + "\n".join(violations)
+
+    def test_rule_h5_zero_hardcoded_app_names_in_generic_layers(self) -> None:
+        self.test_rule_h5_zero_hardcoded_app_names_or_paths_in_generic_layers()
+
+    def test_rule_h5_no_keyword_intent_tables_in_mesh_modules(self) -> None:
+        import ast
+
+        keyword_pat = re.compile(
+            r"\b(music|nhac|browser|trinh duyet|editor|terminal|spotify|chrome|macbook)\b",
+            re.IGNORECASE,
+        )
+        dotted_tool_pat = re.compile(r"^[a-z]+\.[a-z_]+$")
+        backend_root = Path(__file__).resolve().parents[2]
+        mesh_files = [
+            backend_root / "src/xuna_backend/modules/actions/domain/mesh_scoring.py",
+            backend_root / "src/xuna_backend/modules/actions/domain/habit_learner.py",
+            backend_root / "src/xuna_backend/modules/actions/domain/redaction.py",
+            backend_root / "src/xuna_backend/modules/actions/domain/battery_advisor.py",
+            backend_root / "src/xuna_backend/modules/actions/domain/mission_envelope.py",
+            backend_root / "src/xuna_backend/modules/actions/domain/wake_queue.py",
+            backend_root / "src/xuna_backend/modules/actions/application/mesh_router.py",
+            backend_root / "src/xuna_backend/modules/actions/application/mesh_prober.py",
+            backend_root / "src/xuna_backend/modules/actions/application/cross_host_pipelines.py",
+        ]
+        violations: list[str] = []
+        for file_path in mesh_files:
+            tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Dict):
+                    for k, v in zip(node.keys, node.values, strict=False):
+                        if (
+                            isinstance(k, ast.Constant)
+                            and isinstance(k.value, str)
+                            and isinstance(v, ast.Constant)
+                            and isinstance(v.value, str)
+                            and dotted_tool_pat.fullmatch(v.value)
+                        ):
+                            violations.append(
+                                f"{file_path}:{node.lineno}: "
+                                f"intent dict key={k.value!r} -> {v.value!r}"
+                            )
+                elif (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and not dotted_tool_pat.fullmatch(node.value)
+                    and keyword_pat.search(node.value)
+                ):
+                    if len(node.value) > 80 and "\n" in node.value:
+                        continue
+                    violations.append(f"{file_path}:{node.lineno}: keyword match {node.value!r}")
+        assert not violations, "Rule H5 AST intent-table violations:\n" + "\n".join(violations)
 
     def test_udc19_universal_hints_menu_risk_and_summaries(self) -> None:
         from xuna_backend.modules.actions.application.prompts import state_driven_hint

@@ -57,6 +57,8 @@ from xuna_backend.modules.hosts.domain.crypto import (
     validate_public_key,
 )
 from xuna_backend.modules.hosts.domain.entities import (
+    Grant,
+    HostId,
     HostPlatform,
     HostStatus,
     RiskTier,
@@ -100,28 +102,69 @@ class ApprovalAndBoardService:
         owner_id: uuid.UUID,
         reason: str = "owner_app",
         request_id: str = "",
+        host_id: HostId | None = None,
     ) -> EmergencyStopSummary:
         now = self._clock()
-        hosts = await self._host_repo.list_hosts(owner_id)
-        hosts_notified = 0
-        for host in hosts:
-            if host.status == HostStatus.ACTIVE and await self._hub.stop_host(
-                str(host.host_id), reason=reason
-            ):
-                hosts_notified += 1
+        if host_id is not None:
+            host = await self._host_repo.get_host(host_id)
+            if host is None or host.owner_id != owner_id or host.status != HostStatus.ACTIVE:
+                raise ValueError("host_not_found")
+            hosts_notified = 1 if await self._hub.stop_host(str(host_id), reason=reason) else 0
+            broker_rejected = self._approval_broker.reject_all_for_owner(
+                owner_id, now, host_id=host_id
+            )
+            db_rejected = await self._approval_repo.reject_pending_for_owner(
+                owner_id, now, host_id=host_id
+            )
+            approvals_cancelled = max(len(broker_rejected), db_rejected)
+            if self._scope_store is not None:
+                clear_res = self._scope_store.clear_owner(owner_id, host_id=host_id)
+                if inspect.isawaitable(clear_res):
+                    await clear_res
+            grants = await self._host_repo.get_grants(host_id)
+            next_grants: list[Grant] = []
+            grants_suspended = 0
+            for grant in grants:
+                if grant.max_risk.level >= RiskTier.R2.level and grant.suspended_at is None:
+                    next_grants.append(
+                        Grant(
+                            host_id=grant.host_id,
+                            family=grant.family,
+                            max_risk=grant.max_risk,
+                            enabled=grant.enabled,
+                            updated_at=now,
+                            expires_at=grant.expires_at,
+                            suspended_at=now,
+                        )
+                    )
+                    grants_suspended += 1
+                else:
+                    next_grants.append(grant)
+            if grants_suspended:
+                await self._host_repo.set_grants(host_id, next_grants)
+            subject = str(host_id)
+        else:
+            hosts = await self._host_repo.list_hosts(owner_id)
+            hosts_notified = 0
+            for host in hosts:
+                if host.status == HostStatus.ACTIVE and await self._hub.stop_host(
+                    str(host.host_id), reason=reason
+                ):
+                    hosts_notified += 1
 
-        broker_rejected = self._approval_broker.reject_all_for_owner(owner_id, now)
-        db_rejected = await self._approval_repo.reject_pending_for_owner(owner_id, now)
-        approvals_cancelled = max(len(broker_rejected), db_rejected)
+            broker_rejected = self._approval_broker.reject_all_for_owner(owner_id, now)
+            db_rejected = await self._approval_repo.reject_pending_for_owner(owner_id, now)
+            approvals_cancelled = max(len(broker_rejected), db_rejected)
 
-        self._local_result_broker.cancel_for_owner(owner_id)
-        self._last_target_store.clear_owner(owner_id)
-        if self._scope_store is not None:
-            clear_res = self._scope_store.clear_owner(owner_id)
-            if inspect.isawaitable(clear_res):
-                await clear_res
+            self._local_result_broker.cancel_for_owner(owner_id)
+            self._last_target_store.clear_owner(owner_id)
+            if self._scope_store is not None:
+                clear_res = self._scope_store.clear_owner(owner_id)
+                if inspect.isawaitable(clear_res):
+                    await clear_res
 
-        grants_suspended = await self._host_repo.suspend_r2_plus_grants_for_owner(owner_id, now)
+            grants_suspended = await self._host_repo.suspend_r2_plus_grants_for_owner(owner_id, now)
+            subject = "all_hosts"
 
         safe_reason = (
             reason
@@ -133,7 +176,7 @@ class ApprovalAndBoardService:
                 owner_id=owner_id,
                 action=AuditAction.HOST_STOPPED,
                 occurred_at=now,
-                subject="all_hosts",
+                subject=subject,
                 request_id=request_id,
                 metadata={
                     "reason": safe_reason,
@@ -148,6 +191,7 @@ class ApprovalAndBoardService:
             hosts_notified=hosts_notified,
             approvals_cancelled=approvals_cancelled,
             grants_suspended=grants_suspended,
+            host_id=str(host_id) if host_id is not None else None,
         )
 
     async def decide_approval(
@@ -174,19 +218,9 @@ class ApprovalAndBoardService:
         resolved_pub_key = signer_public_key
         if (
             decision == ApprovalDecision.APPROVE
-            and existing.risk == RiskTier.R3
+            and existing.risk.level >= RiskTier.R3.level
             and existing.host_id is not None
-            and signature is not None
         ):
-            if len(signature) != 64:
-                raise ValueError("approval_signature_invalid")
-            expires_iso = existing.expires_at.astimezone(UTC).isoformat()
-            msg = approval_proof_message(
-                str(existing.approval_id),
-                existing.args_sha256,
-                str(existing.host_id),
-                expires_iso,
-            )
             owned_hosts = await self._host_repo.list_hosts(owner_id)
             phone_keys = [
                 h.public_key
@@ -194,15 +228,35 @@ class ApprovalAndBoardService:
                 if h.status == HostStatus.ACTIVE
                 and h.platform in (HostPlatform.ANDROID, HostPlatform.IOS)
             ]
-            if resolved_pub_key is not None:
-                validate_public_key(resolved_pub_key)
-                if phone_keys and resolved_pub_key not in phone_keys:
+            if signature is None:
+                if (
+                    existing.risk.level >= RiskTier.R4.level
+                    or phone_keys
+                    or resolved_pub_key is not None
+                ):
                     raise ValueError("approval_signature_invalid")
-                candidate_keys = [resolved_pub_key]
             else:
-                candidate_keys = phone_keys
+                if len(signature) != 64:
+                    raise ValueError("approval_signature_invalid")
+                expires_iso = existing.expires_at.astimezone(UTC).isoformat()
+                msg = approval_proof_message(
+                    str(existing.approval_id),
+                    existing.args_sha256,
+                    str(existing.host_id),
+                    expires_iso,
+                )
+                if resolved_pub_key is not None:
+                    validate_public_key(resolved_pub_key)
+                    if phone_keys and resolved_pub_key not in phone_keys:
+                        raise ValueError("approval_signature_invalid")
+                    if existing.risk.level >= RiskTier.R4.level and not phone_keys:
+                        raise ValueError("approval_signature_invalid")
+                    candidate_keys = [resolved_pub_key]
+                else:
+                    candidate_keys = phone_keys
 
-            if self._verifier is not None and candidate_keys:
+                if not candidate_keys or self._verifier is None:
+                    raise ValueError("approval_signature_invalid")
                 matched_key: bytes | None = None
                 for cand in candidate_keys:
                     if self._verifier.verify(cand, msg, signature):

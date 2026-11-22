@@ -69,10 +69,7 @@ class InMemoryAutonomousJobStore(AutonomousJobRepository):
         return self._jobs.get(job_id)
 
     async def get_active_for_owner(self, owner_id: uuid.UUID) -> AutonomousJob | None:
-        active = [
-            j for j in self._jobs.values()
-            if j.owner_id == owner_id and j.is_active
-        ]
+        active = [j for j in self._jobs.values() if j.owner_id == owner_id and j.is_active]
         if not active:
             return None
         active.sort(key=lambda j: j.updated_at, reverse=True)
@@ -86,9 +83,9 @@ class InMemoryAutonomousJobStore(AutonomousJobRepository):
         states: tuple[AutonomousJobState, ...] | None = None,
     ) -> list[AutonomousJob]:
         matches = [
-            j for j in self._jobs.values()
-            if j.owner_id == owner_id
-            and (states is None or j.state in states)
+            j
+            for j in self._jobs.values()
+            if j.owner_id == owner_id and (states is None or j.state in states)
         ]
         matches.sort(key=lambda j: j.created_at, reverse=True)
         return matches[offset : offset + limit]
@@ -98,11 +95,13 @@ class InMemoryAutonomousJobStore(AutonomousJobRepository):
         owner_id: uuid.UUID,
         states: tuple[AutonomousJobState, ...] | None = None,
     ) -> int:
-        return len([
-            j for j in self._jobs.values()
-            if j.owner_id == owner_id
-            and (states is None or j.state in states)
-        ])
+        return len(
+            [
+                j
+                for j in self._jobs.values()
+                if j.owner_id == owner_id and (states is None or j.state in states)
+            ]
+        )
 
 
 class SqlAutonomousJobStore(AutonomousJobRepository):
@@ -169,6 +168,8 @@ class SqlAutonomousJobStore(AutonomousJobRepository):
 
     async def get_active_for_owner(self, owner_id: uuid.UUID) -> AutonomousJob | None:
         async with self._sessions() as s:
+            if not hasattr(s, "execute"):
+                return None
             stmt = (
                 select(AutonomousJobModel)
                 .where(
@@ -189,6 +190,8 @@ class SqlAutonomousJobStore(AutonomousJobRepository):
         states: tuple[AutonomousJobState, ...] | None = None,
     ) -> list[AutonomousJob]:
         async with self._sessions() as s:
+            if not hasattr(s, "execute"):
+                return []
             stmt = select(AutonomousJobModel).where(AutonomousJobModel.owner_id == owner_id)
             if states:
                 stmt = stmt.where(AutonomousJobModel.state.in_([st.value for st in states]))
@@ -202,6 +205,8 @@ class SqlAutonomousJobStore(AutonomousJobRepository):
         states: tuple[AutonomousJobState, ...] | None = None,
     ) -> int:
         async with self._sessions() as s:
+            if not hasattr(s, "execute"):
+                return 0
             stmt = select(sa.func.count(AutonomousJobModel.job_id)).where(
                 AutonomousJobModel.owner_id == owner_id
             )

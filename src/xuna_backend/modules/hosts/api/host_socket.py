@@ -11,6 +11,7 @@ Supports:
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import secrets
 import time
@@ -39,12 +40,15 @@ from xuna_backend.modules.hosts.application.use_cases import (
     update_host_lan_peer,
 )
 from xuna_backend.modules.hosts.application.xtp_frames import (
+    ParsedFocusRequest,
     ParsedHelloEnroll,
     ParsedHelloReconnect,
     ParsedLanPeer,
     ParsedPing,
+    ParsedPresence,
     ParsedProgress,
     ParsedProof,
+    ParsedResources,
     ParsedRpcError,
     ParsedRpcResponse,
     ParsedStop,
@@ -82,6 +86,11 @@ from xuna_backend.modules.hosts.domain.session import (
     HostRateLimiter,
     HostSessionClose,
     HostSessionRejected,
+)
+from xuna_backend.modules.hosts.domain.twin import (
+    HostFocusChangedNotice,
+    HostPresence,
+    HostResources,
 )
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
 
@@ -321,6 +330,61 @@ async def _serve_session(
         if isinstance(msg, ParsedProgress):
             continue
 
+        if isinstance(msg, ParsedPresence):
+            presence = HostPresence(
+                idle_seconds=msg.params.idleSeconds,
+                screen_locked=msg.params.screenLocked,
+                media_playing=msg.params.mediaPlaying,
+                updated_at=msg.params.parsed_updated_at(),
+                battery_percent=msg.params.batteryPercent,
+                is_charging=msg.params.isCharging,
+                subnet_hash=msg.params.subnetHash,
+                foreground_app_id=msg.params.foregroundAppId,
+            )
+            hub.update_presence(str(host.host_id), presence)
+            continue
+
+        if isinstance(msg, ParsedResources):
+            resources = HostResources(
+                installed_apps=tuple(msg.params.installedApps),
+                workspaces=tuple(msg.params.workspaces),
+                updated_at=datetime.now(UTC),
+                capabilities_version=msg.params.capabilitiesVersion,
+            )
+            hub.update_resources(str(host.host_id), resources)
+            continue
+
+        if isinstance(msg, ParsedFocusRequest):
+            now_utc = datetime.now(UTC)
+            async with app.state.database.sessions() as db:
+                repos = _Repos(app, db)
+                fresh_host = await repos.hosts.get_host(host.host_id)
+            effective_host = fresh_host or host
+            focus_state = hub.set_focus_state(
+                effective_host.owner_id,
+                focused_host_id=effective_host.host_id,
+                follow_me=msg.params.followMe,
+                source=msg.params.source,
+                now=now_utc,
+            )
+            notice = HostFocusChangedNotice(
+                owner_id=effective_host.owner_id,
+                host_id=effective_host.host_id,
+                alias=effective_host.alias.value,
+                platform=effective_host.platform.value,
+                follow_me=focus_state.follow_me,
+                source=msg.params.source,
+                updated_at=focus_state.updated_at,
+            )
+            await hub.publish_focus_changed(notice)
+            on_focus = getattr(app.state, "on_host_focus_changed", None)
+            if callable(on_focus):
+                with contextlib.suppress(Exception):
+                    maybe_awaitable = on_focus(notice)
+                    if inspect.isawaitable(maybe_awaitable):
+                        await maybe_awaitable
+            continue
+
         if isinstance(msg, ParsedLanPeer):
             async with app.state.database.sessions() as db:
                 repos = _Repos(app, db)
@@ -406,6 +470,7 @@ async def host_connect(websocket: WebSocket) -> None:
             _send_text,
             _close_duplicate,
             _close_revoked,
+            owner_id=host.owner_id,
         )
         if not opened:
             async with app.state.database.sessions() as db:
@@ -419,6 +484,10 @@ async def host_connect(websocket: WebSocket) -> None:
         await websocket.send_text(
             ready_notification_frame(datetime.now(UTC).isoformat(), limits.heartbeat_s)
         )
+        on_ready = getattr(app.state, "on_host_ready", None)
+        if callable(on_ready):
+            ready_task = asyncio.create_task(on_ready(host.owner_id, host.host_id))
+            ready_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         await _serve_session(websocket, host, limits, hub)
     except HostSessionRejected as rejected:
         logger.info("host session closed code=%s", rejected.close.reason)

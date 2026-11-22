@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from xuna_backend.modules.hosts.domain.crypto import (
     PUBLIC_KEY_SIZE,
@@ -14,9 +14,14 @@ from xuna_backend.modules.hosts.domain.crypto import (
     validate_public_key,
 )
 from xuna_backend.modules.hosts.domain.entities import (
+    HostAlias,
+    HostKind,
     HostPlatform,
     RiskTier,
     ToolFamily,
+    normalize_nicknames,
+    normalize_place,
+    normalize_wol_mac,
 )
 
 
@@ -36,6 +41,64 @@ def _decode_b64_flex(raw: str, expected_len: int) -> bytes:
 
 class _StrictSchema(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+
+class PatchHostRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schemaVersion: Literal[1] = 1
+    alias: str | None = None
+    place: str | None = None
+    nicknames: list[str] | None = Field(default=None, max_length=10)
+    hostKind: HostKind | None = None
+    wolMac: str | None = None
+
+    @field_validator("schemaVersion", mode="before")
+    @classmethod
+    def _validate_schema_version(cls, v: object) -> object:
+        if not isinstance(v, int) or isinstance(v, bool):
+            raise ValueError("schemaVersion must be an integer")
+        return v
+
+    @field_validator("alias", mode="before")
+    @classmethod
+    def _validate_alias(cls, v: object) -> str | None:
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("alias must be a string")
+        return HostAlias(v).value
+
+    @field_validator("place", mode="before")
+    @classmethod
+    def _validate_place(cls, v: object) -> str | None:
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("place must be a string")
+        if v == "":
+            return ""
+        return normalize_place(v)
+
+    @field_validator("nicknames", mode="before")
+    @classmethod
+    def _validate_nicknames(cls, v: object) -> list[str] | None:
+        if v is None:
+            return None
+        if not isinstance(v, list) or not all(isinstance(item, str) for item in v):
+            raise ValueError("nicknames must be a list of strings")
+        return list(normalize_nicknames(v))
+
+    @field_validator("wolMac", mode="before")
+    @classmethod
+    def _validate_wol_mac(cls, v: object) -> str | None:
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("wolMac must be a string")
+        if v == "":
+            return ""
+        return normalize_wol_mac(v)
 
 
 class ClaimHostRequest(_StrictSchema):

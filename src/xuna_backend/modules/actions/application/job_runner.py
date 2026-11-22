@@ -7,10 +7,11 @@ upon P-256 approval.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, datetime
 from typing import Any
 
@@ -41,6 +42,12 @@ from xuna_backend.modules.actions.domain.job import (
 )
 from xuna_backend.modules.actions.domain.ports import AutonomousJobRepository
 from xuna_backend.modules.actions.domain.tool_names import from_function_name
+from xuna_backend.modules.actions.domain.wake_queue import (
+    WAKE_QUEUE_TTL,
+    DeferredWakeStep,
+    InMemoryWakeQueueStore,
+    WakeQueueFullError,
+)
 from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
@@ -56,7 +63,7 @@ from xuna_backend.modules.cognition.domain.types import (
     ToolCallRequested,
 )
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
-from xuna_backend.modules.hosts.domain.entities import HostId, HostStatus, ToolFamily
+from xuna_backend.modules.hosts.domain.entities import HostId, HostStatus, RiskTier
 
 _logger = logging.getLogger(__name__)
 
@@ -227,13 +234,18 @@ class AutonomousJobRunner:
         if job is None:
             raise ValueError(f"Job {job_id} not found")
 
-        if job.state not in {AutonomousJobState.AWAITING_R3_CHECKPOINT, AutonomousJobState.PAUSED}:
+        if job.state not in {
+            AutonomousJobState.AWAITING_R3_CHECKPOINT,
+            AutonomousJobState.WAITING_WAKE,
+            AutonomousJobState.PAUSED,
+        }:
             raise ValueError(f"Cannot resume job in state {job.state.value}")
 
         now = self._clock()
         appr_uuid = uuid.UUID(str(approval_id)) if approval_id else None
 
         cp = dict(job.checkpoint_data or {})
+        cp.pop("wake_expires_at", None)
         if appr_uuid or job.state == AutonomousJobState.AWAITING_R3_CHECKPOINT:
             cp["pending_approval_id"] = None
 
@@ -299,18 +311,20 @@ class AutonomousJobRunner:
         self,
         owner_id: uuid.UUID,
         reason: str = "owner_app",
+        host_id: HostId | None = None,
     ) -> int:
-        """Cancels all active jobs belonging to `owner_id` (invoked on Emergency Stop)."""
+        """Cancels active jobs belonging to `owner_id` (scoped to `host_id` on Tier-1 E-Stop)."""
         active_states = (
             AutonomousJobState.QUEUED,
             AutonomousJobState.RUNNING,
             AutonomousJobState.AWAITING_R3_CHECKPOINT,
+            AutonomousJobState.WAITING_WAKE,
             AutonomousJobState.PAUSED,
         )
         jobs = await self._store.list_for_owner(owner_id, limit=100, states=active_states)
         count = 0
         for job in jobs:
-            if not job.is_terminal:
+            if not job.is_terminal and (host_id is None or job.host_id == host_id):
                 await self.cancel_job(job.job_id, reason=reason)
                 count += 1
         return count
@@ -358,6 +372,53 @@ class AutonomousJobRunner:
                 return failed
             return latest
         return None
+
+    async def resume_waiting_wake_jobs(
+        self,
+        owner_id: uuid.UUID,
+        host_id: HostId,
+        *,
+        allowed_job_ids: Collection[uuid.UUID] | None = None,
+        now: datetime | None = None,
+    ) -> int:
+        """Resumes unexpired `WAITING_WAKE` jobs for `(owner_id, host_id)`, fails expired ones."""
+        jobs = await self._store.list_for_owner(
+            owner_id,
+            limit=50,
+            states=(AutonomousJobState.WAITING_WAKE,),
+        )
+        check_now = now or self._clock()
+        resumed = 0
+        for job in jobs:
+            if job.host_id != host_id:
+                continue
+            wake_exp_raw = (job.checkpoint_data or {}).get("wake_expires_at")
+            wake_expires_at: datetime | None = None
+            if isinstance(wake_exp_raw, str):
+                with contextlib.suppress(ValueError):
+                    parsed_exp = datetime.fromisoformat(wake_exp_raw)
+                    if parsed_exp.tzinfo is not None:
+                        wake_expires_at = parsed_exp
+            if wake_expires_at is None:
+                wake_expires_at = job.updated_at + WAKE_QUEUE_TTL
+            is_unexpired = check_now < wake_expires_at
+            is_allowed = (
+                True
+                if (allowed_job_ids is not None and job.job_id in allowed_job_ids)
+                else is_unexpired
+            )
+            if is_allowed:
+                await self.resume_job(job.job_id)
+                resumed += 1
+            else:
+                failed = job.with_state(
+                    AutonomousJobState.FAILED,
+                    now=check_now,
+                    error_message="Wake-on-LAN window expired (180s TTL)",
+                    stop_reason="wake_ttl_expired",
+                )
+                await self._store.save(failed)
+        return resumed
 
     def _spawn_loop_task(self, job_id: uuid.UUID) -> None:
         self._cancel_task(job_id)
@@ -499,6 +560,18 @@ class AutonomousJobRunner:
                     await self._store.save(updated)
                     break  # Pauses execution until resume_job is invoked
 
+                elif outcome.kind == "waiting_wake":
+                    wake_cp = dict(clean_cp)
+                    wake_cp["wake_expires_at"] = (now + WAKE_QUEUE_TTL).isoformat()
+                    updated = base_job.with_state(
+                        AutonomousJobState.WAITING_WAKE,
+                        now=now,
+                        checkpoint_data=wake_cp,
+                        stop_reason=outcome.stop_reason or "waiting_wake",
+                    )
+                    await self._store.save(updated)
+                    break
+
                 elif outcome.kind == "progress":
                     sub_goals_val = (
                         outcome.sub_goals if outcome.sub_goals is not None else base_job.sub_goals
@@ -606,6 +679,7 @@ class OrchestratorJobStepExecutor:
         planner: JobPlannerExecutor,
         compactor: SubGoalCompactor,
         on_pending_approval: Callable[[uuid.UUID, uuid.UUID], Awaitable[None]] | None = None,
+        wake_queue: InMemoryWakeQueueStore | None = None,
         clock_utc: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._orchestrator_factory = orchestrator_factory
@@ -616,6 +690,7 @@ class OrchestratorJobStepExecutor:
         self._planner = planner
         self._compactor = compactor
         self._on_pending_approval = on_pending_approval
+        self._wake_queue = wake_queue
         self._clock = clock_utc
         self._ephemeral_vision: dict[uuid.UUID, tuple[str, str]] = {}
 
@@ -631,14 +706,12 @@ class OrchestratorJobStepExecutor:
             )
 
         host_repo = self._host_repo_factory()
-        pinned_defaults: dict[str, str] | None = None
         if job.host_id is not None:
             target_host = await host_repo.get_host(job.host_id)
             if (
                 target_host is None
                 or target_host.owner_id != job.owner_id
                 or target_host.status != HostStatus.ACTIVE
-                or not self._hub.is_online(str(job.host_id))
             ):
                 self._ephemeral_vision.pop(job.job_id, None)
                 return JobStepOutcome(
@@ -646,7 +719,43 @@ class OrchestratorJobStepExecutor:
                     error_message="Pinned target host is offline or unavailable",
                     stop_reason="no_host",
                 )
-            pinned_defaults = {f.value: target_host.alias.value for f in ToolFamily}
+            if not self._hub.is_online(str(job.host_id)):
+                self._ephemeral_vision.pop(job.job_id, None)
+                if target_host.wol_mac:
+                    if self._wake_queue is not None:
+                        try:
+                            self._wake_queue.enqueue(
+                                DeferredWakeStep(
+                                    step_id=uuid.uuid4(),
+                                    owner_id=job.owner_id,
+                                    pet_id=job.pet_id,
+                                    host_id=job.host_id,
+                                    host_alias=target_host.alias.value,
+                                    tool="autonomous.job",
+                                    arguments={},
+                                    risk=RiskTier.R2,
+                                    created_at=now,
+                                    expires_at=now + WAKE_QUEUE_TTL,
+                                    job_id=job.job_id,
+                                    summary=job.title[:120],
+                                ),
+                                now,
+                            )
+                        except WakeQueueFullError:
+                            return JobStepOutcome(
+                                kind="failed",
+                                error_message="Deferred wake queue limit reached",
+                                stop_reason="wake_queue_full",
+                            )
+                    return JobStepOutcome(
+                        kind="waiting_wake",
+                        stop_reason="host_offline",
+                    )
+                return JobStepOutcome(
+                    kind="failed",
+                    error_message="Pinned target host is offline or unavailable",
+                    stop_reason="no_host",
+                )
 
         tools = await load_tool_catalog_for_owner(
             owner_id=job.owner_id,
@@ -658,6 +767,7 @@ class OrchestratorJobStepExecutor:
             host_screen_consent=True,
             now=now,
             audit=self._audit_factory(),
+            pinned_host_id=job.host_id,
         )
         if not tools:
             self._ephemeral_vision.pop(job.job_id, None)
@@ -712,7 +822,7 @@ class OrchestratorJobStepExecutor:
                 steering_block = "\n\n[Owner Live Steering]:\n" + "\n".join(lines)
 
         system_instruction = (
-            f"{tool_system_prompt(locale)}\n\n"
+            f"{tool_system_prompt(locale, tools=tools)}\n\n"
             f"[Autonomous Job Goal]: {job.goal}\n"
             f"[Active Sub-Goal {idx + 1}/{len(sub_goals)}]: {current_sg.title} — "
             f"{current_sg.description}\n"
@@ -859,9 +969,9 @@ class OrchestratorJobStepExecutor:
             emit_event=_emit,
             request_id=f"job-{job.job_id}-step-{job.steps_used + 1}",
             self_host_id=None,
-            host_defaults=pinned_defaults,
             host_screen_consent=True,
             mission_envelope=job_mission_env,
+            pinned_host_id=job.host_id,
         )
         tool_msg = await orch.handle_call(call, action_ctx)
 

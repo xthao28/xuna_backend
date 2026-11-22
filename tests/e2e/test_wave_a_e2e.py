@@ -176,6 +176,7 @@ class _InMemoryCuSessionStore(ComputerUseSessionStore):
         self._sessions: dict[str, ComputerUseSessionState] = {}
 
     async def start(self, state: ComputerUseSessionState, now: datetime) -> None:
+        await self.stop_all_for_owner(state.owner_id, "replaced", now, host_id=state.host_id)
         self._sessions[state.session_id] = state
 
     async def create(self, state: ComputerUseSessionState) -> None:
@@ -184,16 +185,33 @@ class _InMemoryCuSessionStore(ComputerUseSessionStore):
     async def get(self, session_id: str) -> ComputerUseSessionState | None:
         return self._sessions.get(session_id)
 
-    async def get_active_for_owner(self, owner_id: uuid.UUID) -> ComputerUseSessionState | None:
-        for s in self._sessions.values():
-            if s.owner_id == owner_id and s.active:
-                return s
-        return None
+    async def get_active_for_owner(
+        self, owner_id: uuid.UUID, host_id: HostId | None = None
+    ) -> ComputerUseSessionState | None:
+        matches = [
+            s
+            for s in self._sessions.values()
+            if s.owner_id == owner_id and s.active and (host_id is None or s.host_id == host_id)
+        ]
+        if not matches:
+            return None
+        return max(matches, key=lambda s: s.started_at_utc)
 
-    async def stop_all_for_owner(self, owner_id: uuid.UUID, reason: str, now: datetime) -> int:
+    async def list_active_for_owner(self, owner_id: uuid.UUID) -> list[ComputerUseSessionState]:
+        matches = [s for s in self._sessions.values() if s.owner_id == owner_id and s.active]
+        matches.sort(key=lambda s: s.started_at_utc, reverse=True)
+        return matches
+
+    async def stop_all_for_owner(
+        self,
+        owner_id: uuid.UUID,
+        reason: str,
+        now: datetime,
+        host_id: HostId | None = None,
+    ) -> int:
         count = 0
         for s in self._sessions.values():
-            if s.owner_id == owner_id and s.active:
+            if s.owner_id == owner_id and s.active and (host_id is None or s.host_id == host_id):
                 s.active = False
                 s.stop_reason = reason
                 count += 1

@@ -96,11 +96,13 @@ class SqlApprovalScopeStore:
             await s.commit()
         return expires_at
 
-    async def clear_owner(self, owner_id: uuid.UUID) -> int:
+    async def clear_owner(self, owner_id: uuid.UUID, host_id: HostId | None = None) -> int:
         owner_uuid = owner_id if isinstance(owner_id, uuid.UUID) else uuid.UUID(str(owner_id))
         async with self._sessions() as s:
-            res = await s.execute(
-                delete(ApprovalScopeModel).where(ApprovalScopeModel.owner_id == owner_uuid)
-            )
+            stmt = delete(ApprovalScopeModel).where(ApprovalScopeModel.owner_id == owner_uuid)
+            if host_id is not None:
+                host_uuid = host_id if isinstance(host_id, uuid.UUID) else uuid.UUID(str(host_id))
+                stmt = stmt.where(ApprovalScopeModel.host_id == host_uuid)
+            res = await s.execute(stmt)
             await s.commit()
             return res.rowcount or 0

@@ -9,7 +9,7 @@ import base64
 import hashlib
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -35,7 +35,9 @@ from xuna_backend.modules.hosts.domain.entities import (
     Grant,
     Host,
     HostAlias,
+    HostAliasConflictError,
     HostId,
+    HostKind,
     HostPlatform,
     HostStatus,
     Manifest,
@@ -43,7 +45,12 @@ from xuna_backend.modules.hosts.domain.entities import (
     RiskTier,
     ToolDescriptor,
     ToolFamily,
+    default_host_kind_for_platform,
     default_initial_grants,
+    fold_text,
+    normalize_nicknames,
+    normalize_place,
+    normalize_wol_mac,
     validate_tool_name,
 )
 from xuna_backend.modules.hosts.domain.session import (
@@ -54,7 +61,9 @@ from xuna_backend.modules.hosts.domain.session import (
     HostSessionClose,
     HostSessionRejected,
     SelfEnrollmentChallengeStore,
+    structured_content_exceeds_limit,
 )
+from xuna_backend.modules.hosts.domain.twin import HostPresence
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
 
 
@@ -123,6 +132,17 @@ class HostSummaryView:
     grants: list[Grant]
     manifest: Manifest | None
     online: bool
+    focused: bool = False
+    presence: HostPresence | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PatchHostCommand:
+    alias: str | None = None
+    place: str | None = None
+    nicknames: list[str] | tuple[str, ...] | None = None
+    host_kind: HostKind | str | None = None
+    wol_mac: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,6 +283,21 @@ async def claim_enrollment(
     return claimed
 
 
+def _ensure_no_active_alias_conflict(
+    owned: list[Host],
+    target_folded: str,
+    *,
+    exclude_host_id: HostId | None = None,
+) -> None:
+    for item in owned:
+        if (
+            item.status == HostStatus.ACTIVE
+            and item.alias_folded == target_folded
+            and (exclude_host_id is None or item.host_id != exclude_host_id)
+        ):
+            raise HostError("conflict", "host alias already in use")
+
+
 async def confirm_enrollment(
     enrollments: EnrollmentRepository,
     hosts: HostRepository,
@@ -292,6 +327,10 @@ async def confirm_enrollment(
     if pending.owner_id != owner_id or pending.alias is None:
         raise HostError("not_found")
 
+    target_folded = fold_text(pending.alias.value)[:32]
+    owned = await hosts.list_hosts(owner_id)
+    _ensure_no_active_alias_conflict(owned, target_folded, exclude_host_id=pending.pending_id)
+
     host = Host(
         host_id=pending.pending_id,
         owner_id=owner_id,
@@ -304,9 +343,14 @@ async def confirm_enrollment(
         status=HostStatus.ACTIVE,
         created_at=now,
         last_seen_at=now,
+        host_kind=default_host_kind_for_platform(pending.platform),
+        alias_folded=target_folded,
     )
     initial_grants = list(default_initial_grants(host.host_id, now))
-    await hosts.save_host(host)
+    try:
+        await hosts.save_host(host)
+    except HostAliasConflictError as error:
+        raise HostError("conflict", "host alias already in use") from error
     await hosts.set_grants(host.host_id, initial_grants)
     await enrollments.delete_pending(pending.pending_id)
 
@@ -365,20 +409,13 @@ async def open_host_session(
         )
         raise HostSessionRejected(UNAUTHORIZED)
 
-    updated = Host(
-        host_id=host.host_id,
-        owner_id=host.owner_id,
-        alias=host.alias,
+    updated = replace(
+        host,
         platform=command.platform,
-        hostname=host.hostname,
         os_version=command.os_version,
         agent_version=command.agent_version,
-        public_key=host.public_key,
         status=HostStatus.ACTIVE,
-        created_at=host.created_at,
         last_seen_at=now,
-        lan_fingerprint=host.lan_fingerprint,
-        lan_port=host.lan_port,
     )
     await hosts.save_host(updated)
     await audit.record(
@@ -421,21 +458,7 @@ async def touch_host_session(
     host = await hosts.get_host(host_id)
     if host is None or host.status != HostStatus.ACTIVE:
         return UNAUTHORIZED
-    updated = Host(
-        host_id=host.host_id,
-        owner_id=host.owner_id,
-        alias=host.alias,
-        platform=host.platform,
-        hostname=host.hostname,
-        os_version=host.os_version,
-        agent_version=host.agent_version,
-        public_key=host.public_key,
-        status=host.status,
-        created_at=host.created_at,
-        last_seen_at=now,
-        lan_fingerprint=host.lan_fingerprint,
-        lan_port=host.lan_port,
-    )
+    updated = replace(host, last_seen_at=now)
     await hosts.save_host(updated)
     return None
 
@@ -448,21 +471,7 @@ async def close_host_session(
     host = await hosts.get_host(host_id)
     if host is None:
         return
-    updated = Host(
-        host_id=host.host_id,
-        owner_id=host.owner_id,
-        alias=host.alias,
-        platform=host.platform,
-        hostname=host.hostname,
-        os_version=host.os_version,
-        agent_version=host.agent_version,
-        public_key=host.public_key,
-        status=host.status,
-        created_at=host.created_at,
-        last_seen_at=now,
-        lan_fingerprint=host.lan_fingerprint,
-        lan_port=host.lan_port,
-    )
+    updated = replace(host, last_seen_at=now)
     await hosts.save_host(updated)
 
 
@@ -478,17 +487,8 @@ async def update_host_lan_peer(
     host = await hosts.get_host(host_id)
     if host is None or host.status != HostStatus.ACTIVE:
         return None
-    updated = Host(
-        host_id=host.host_id,
-        owner_id=host.owner_id,
-        alias=host.alias,
-        platform=host.platform,
-        hostname=host.hostname,
-        os_version=host.os_version,
-        agent_version=host.agent_version,
-        public_key=host.public_key,
-        status=host.status,
-        created_at=host.created_at,
+    updated = replace(
+        host,
         last_seen_at=now,
         lan_fingerprint=cert_fingerprint if enabled else None,
         lan_port=port if enabled else None,
@@ -607,24 +607,30 @@ async def self_enroll_host(
         (h for h in owned if h.status == HostStatus.ACTIVE and h.public_key == command.public_key),
         None,
     )
+    target_folded = fold_text(alias.value)[:32]
+    _ensure_no_active_alias_conflict(
+        owned,
+        target_folded,
+        exclude_host_id=existing.host_id if existing is not None else None,
+    )
 
     if existing is not None:
-        host = Host(
-            host_id=existing.host_id,
-            owner_id=owner_id,
+        host = replace(
+            existing,
             alias=alias,
+            alias_folded=target_folded,
             platform=command.platform,
             hostname=resolved_hostname,
             os_version=command.os_version[:64],
             agent_version=command.agent_version[:32],
             public_key=command.public_key,
             status=HostStatus.ACTIVE,
-            created_at=existing.created_at,
             last_seen_at=now,
-            lan_fingerprint=existing.lan_fingerprint,
-            lan_port=existing.lan_port,
         )
-        await hosts.save_host(host)
+        try:
+            await hosts.save_host(host)
+        except HostAliasConflictError as error:
+            raise HostError("conflict", "host alias already in use") from error
         grants = await hosts.get_grants(host.host_id)
         if not grants:
             grants = list(default_initial_grants(host.host_id, now))
@@ -642,9 +648,14 @@ async def self_enroll_host(
             status=HostStatus.ACTIVE,
             created_at=now,
             last_seen_at=now,
+            host_kind=default_host_kind_for_platform(command.platform),
+            alias_folded=target_folded,
         )
         grants = list(default_initial_grants(host.host_id, now))
-        await hosts.save_host(host)
+        try:
+            await hosts.save_host(host)
+        except HostAliasConflictError as error:
+            raise HostError("conflict", "host alias already in use") from error
         await hosts.set_grants(host.host_id, grants)
 
     if parsed_tools is not None:
@@ -692,21 +703,119 @@ async def list_hosts(
     owner_id: uuid.UUID,
 ) -> list[HostSummaryView]:
     owned = await hosts.list_hosts(owner_id)
+    focus_fn = getattr(hub, "get_focus_state", None)
+    focus = focus_fn(owner_id) if callable(focus_fn) else None
+    twin_fn = getattr(hub, "get_twin", None)
     views: list[HostSummaryView] = []
     for host in owned:
         if host.status != HostStatus.ACTIVE:
             continue
         grants = await hosts.get_grants(host.host_id)
         manifest = await hosts.get_manifest(host.host_id)
+        online = hub.is_online(str(host.host_id))
+        twin = twin_fn(str(host.host_id)) if (online and callable(twin_fn)) else None
+        focused = focus is not None and focus.focused_host_id == host.host_id
+        presence = twin.presence if twin is not None else None
         views.append(
             HostSummaryView(
                 host=host,
                 grants=grants,
                 manifest=manifest,
-                online=hub.is_online(str(host.host_id)),
+                online=online,
+                focused=focused,
+                presence=presence,
             )
         )
     return views
+
+
+async def patch_host(
+    hosts: HostRepository,
+    hub: HostSessionHub,
+    audit: AuditLog,
+    owner_id: uuid.UUID,
+    host_id: HostId,
+    cmd: PatchHostCommand,
+    now: datetime,
+    request_id: str = "",
+) -> HostSummaryView:
+    host = await hosts.get_host(host_id)
+    if host is None or host.owner_id != owner_id or host.status != HostStatus.ACTIVE:
+        raise HostError("not_found")
+
+    fields_count = 0
+    new_alias = host.alias
+    new_alias_folded = host.alias_folded
+    new_place = host.place
+    new_nicknames = host.nicknames
+    new_host_kind = host.host_kind
+    new_wol_mac = host.wol_mac
+
+    try:
+        if cmd.alias is not None:
+            fields_count += 1
+            new_alias = HostAlias(cmd.alias)
+            new_alias_folded = fold_text(new_alias.value)[:32]
+        if cmd.place is not None:
+            fields_count += 1
+            new_place = None if cmd.place == "" else normalize_place(cmd.place)
+        if cmd.nicknames is not None:
+            fields_count += 1
+            new_nicknames = normalize_nicknames(list(cmd.nicknames))
+        if cmd.host_kind is not None:
+            fields_count += 1
+            new_host_kind = (
+                cmd.host_kind if isinstance(cmd.host_kind, HostKind) else HostKind(cmd.host_kind)
+            )
+        if cmd.wol_mac is not None:
+            fields_count += 1
+            new_wol_mac = None if cmd.wol_mac == "" else normalize_wol_mac(cmd.wol_mac)
+    except ValueError as error:
+        raise HostError("validation_failed", str(error)) from error
+
+    if cmd.alias is not None:
+        owned = await hosts.list_hosts(owner_id)
+        _ensure_no_active_alias_conflict(owned, new_alias_folded, exclude_host_id=host.host_id)
+
+    updated = replace(
+        host,
+        alias=new_alias,
+        alias_folded=new_alias_folded,
+        place=new_place,
+        nicknames=new_nicknames,
+        host_kind=new_host_kind,
+        wol_mac=new_wol_mac,
+    )
+    try:
+        await hosts.save_host(updated)
+    except HostAliasConflictError as error:
+        raise HostError("conflict", "host alias already in use") from error
+
+    await audit.record(
+        AuditEvent(
+            owner_id=owner_id,
+            action=AuditAction.HOST_UPDATED,
+            occurred_at=now,
+            subject=str(host_id),
+            request_id=request_id,
+            metadata={"hostId": str(host_id), "fieldsCount": fields_count},
+        )
+    )
+    grants = await hosts.get_grants(host_id)
+    manifest = await hosts.get_manifest(host_id)
+    online = hub.is_online(str(host_id))
+    focus_fn = getattr(hub, "get_focus_state", None)
+    focus = focus_fn(owner_id) if callable(focus_fn) else None
+    twin_fn = getattr(hub, "get_twin", None)
+    twin = twin_fn(str(host_id)) if (online and callable(twin_fn)) else None
+    return HostSummaryView(
+        host=updated,
+        grants=grants,
+        manifest=manifest,
+        online=online,
+        focused=(focus is not None and focus.focused_host_id == updated.host_id),
+        presence=twin.presence if twin is not None else None,
+    )
 
 
 async def revoke_host(
@@ -721,18 +830,12 @@ async def revoke_host(
     host = await hosts.get_host(host_id)
     if host is None or host.owner_id != owner_id or host.status != HostStatus.ACTIVE:
         raise HostError("not_found")
-    revoked = Host(
-        host_id=host.host_id,
-        owner_id=host.owner_id,
-        alias=host.alias,
-        platform=host.platform,
-        hostname=host.hostname,
-        os_version=host.os_version,
-        agent_version=host.agent_version,
-        public_key=host.public_key,
+    revoked = replace(
+        host,
         status=HostStatus.REVOKED,
-        created_at=host.created_at,
         last_seen_at=now,
+        lan_fingerprint=None,
+        lan_port=None,
     )
     await hosts.save_host(revoked)
     await audit.record(
@@ -1027,6 +1130,14 @@ async def invoke_tool(
         first = content_raw[0]
         if isinstance(first, dict) and isinstance(first.get("text"), str):
             text = str(first["text"])
+
+    allow_media_sc = descriptor.family in {ToolFamily.SCREEN, ToolFamily.UI, ToolFamily.CU}
+    if structured_content_exceeds_limit(structured_content, allow_media=allow_media_sc):
+        status = "failed"
+        is_error = True
+        error_code = "structured_content_too_large"
+        structured_content = {}
+        text = "failed: structured_content_too_large"
 
     audit_action = (
         AuditAction.HOST_TOOL_DENIED if status == "denied" else AuditAction.HOST_TOOL_INVOKED

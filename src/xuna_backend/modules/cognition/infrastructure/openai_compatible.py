@@ -54,6 +54,29 @@ _QUOTA_EXHAUSTED_KEYWORDS = (
     "exceeded your current quota",
     "insufficient_quota",
 )
+_RETRY_HINT_RE = re.compile(
+    r"retry\s+(?:in|after)\s+(?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s",
+    re.IGNORECASE,
+)
+_DAILY_QUOTA_MARKERS = (
+    "per day",
+    "daily",
+    "requests_per_day",
+    "insufficient_quota",
+    "billing",
+)
+_MINUTE_QUOTA_MARKERS = (
+    "per minute",
+    "requests per minute",
+    "tokens per minute",
+    "rpm",
+    "tpm",
+)
+_DAILY_COOLDOWN_MIN_S = 600.0
+_DAILY_COOLDOWN_MAX_S = 1800.0
+_MINUTE_COOLDOWN_MIN_S = 15.0
+_MINUTE_COOLDOWN_MAX_S = 65.0
+_DEFAULT_QUOTA_COOLDOWN_S = 300.0
 
 
 def _cache_signature(call_id: str, extra: dict[str, Any]) -> None:
@@ -97,6 +120,37 @@ def _sanitize_error_text(text: str, secrets: Iterable[str] = ()) -> str:
 def _is_quota_exhausted(text: str) -> bool:
     lower = text.lower()
     return any(kw in lower for kw in _QUOTA_EXHAUSTED_KEYWORDS)
+
+
+def _parse_quota_cooldown_s(text: str, retry_after_header: str = "") -> float:
+    parsed_s: float | None = None
+    if retry_after_header.strip():
+        try:
+            header_val = float(retry_after_header.strip())
+            if header_val > 0:
+                parsed_s = header_val
+        except ValueError:
+            pass
+    if parsed_s is None:
+        match = _RETRY_HINT_RE.search(text)
+        if match is not None:
+            hours = int(match.group(1) or 0)
+            minutes = int(match.group(2) or 0)
+            seconds = float(match.group(3))
+            parsed_s = hours * 3600.0 + minutes * 60.0 + seconds
+
+    lower = text.lower()
+    if any(marker in lower for marker in _DAILY_QUOTA_MARKERS) or (
+        parsed_s is not None and parsed_s >= 120.0
+    ):
+        base = parsed_s if parsed_s is not None else _DAILY_COOLDOWN_MIN_S
+        return min(max(base, _DAILY_COOLDOWN_MIN_S), _DAILY_COOLDOWN_MAX_S)
+    if any(marker in lower for marker in _MINUTE_QUOTA_MARKERS):
+        base = parsed_s if parsed_s is not None else _MINUTE_COOLDOWN_MIN_S
+        return min(max(base, _MINUTE_COOLDOWN_MIN_S), _MINUTE_COOLDOWN_MAX_S)
+    if parsed_s is not None and parsed_s > 0:
+        return min(max(parsed_s, _MINUTE_COOLDOWN_MIN_S), _DAILY_COOLDOWN_MAX_S)
+    return _DEFAULT_QUOTA_COOLDOWN_S
 
 
 def _serialize_message(
@@ -163,6 +217,7 @@ class OpenAICompatibleTextGenerator:
         max_attempts: int = 5,
         retry_base_delay_s: float = 1.0,
         retry_max_delay_s: float = 8.0,
+        quota_cooldown_enabled: bool = True,
     ) -> None:
         if not base_url.startswith(("http://", "https://")) or not model:
             raise ValueError("base_url (http/https) and model are required")
@@ -186,6 +241,8 @@ class OpenAICompatibleTextGenerator:
         self._max_attempts = max(1, max_attempts)
         self._retry_base_delay_s = max(0.0, retry_base_delay_s)
         self._retry_max_delay_s = max(0.0, retry_max_delay_s)
+        self._quota_cooldown_enabled = quota_cooldown_enabled
+        self._quota_cooldown_until: float = 0.0
         self._tool_call_extra: dict[str, dict[str, Any]] = {}
 
     def _payload(self, request: ChatRequest) -> dict[str, Any]:
@@ -246,9 +303,16 @@ class OpenAICompatibleTextGenerator:
         return payload
 
     async def stream(self, request: ChatRequest) -> AsyncIterator[ChatEvent]:
+        if self._quota_cooldown_enabled:
+            now_mono = time.monotonic()
+            if now_mono < self._quota_cooldown_until:
+                remaining_cooldown = max(1, int(self._quota_cooldown_until - now_mono))
+                raise ProviderUnavailableError(
+                    f"quota_exhausted: cooldown active ({remaining_cooldown}s remaining)"
+                )
         started = time.perf_counter()
         deadline = started + request.timeout_s
-        timeout = httpx.Timeout(request.timeout_s, connect=min(5.0, request.timeout_s))
+        timeout = httpx.Timeout(request.timeout_s, connect=min(10.0, request.timeout_s))
         usage: dict[str, int] = {}
         calls: dict[int, dict[str, Any]] = {}
         pre_call_extra: dict[str, Any] = {}
@@ -259,9 +323,13 @@ class OpenAICompatibleTextGenerator:
                     calls.clear()
                     pre_call_extra.clear()
                     remaining = max(deadline - time.perf_counter(), 1.0)
+                    if attempt == 0 and self._max_attempts > 1 and remaining >= 45.0:
+                        read_timeout = min(remaining * 0.6, 35.0)
+                    else:
+                        read_timeout = min(request.timeout_s, remaining)
                     attempt_timeout = httpx.Timeout(
-                        min(request.timeout_s, remaining),
-                        connect=min(5.0, remaining),
+                        read_timeout,
+                        connect=min(10.0, remaining),
                     )
                     try:
                         async with client.stream(
@@ -297,6 +365,17 @@ class OpenAICompatibleTextGenerator:
                                     bounded_snippet,
                                 )
                                 if _is_quota_exhausted(sanitized_snippet):
+                                    if self._quota_cooldown_enabled:
+                                        cooldown_s = _parse_quota_cooldown_s(
+                                            sanitized_snippet,
+                                            response.headers.get("retry-after", ""),
+                                        )
+                                        self._quota_cooldown_until = time.monotonic() + cooldown_s
+                                        logger.info(
+                                            "Quota cooldown armed for %.0fs on model=%s",
+                                            cooldown_s,
+                                            self._model,
+                                        )
                                     raise ProviderUnavailableError(
                                         f"quota_exhausted: {bounded_snippet}"
                                     )

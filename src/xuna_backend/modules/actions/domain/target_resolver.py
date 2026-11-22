@@ -67,6 +67,7 @@ _OTHER_TARGET_PRONOUNS: frozenset[str] = frozenset(
         "other one",
         "other machine",
         "other pc",
+        "other computer",
         "other host",
         "other phone",
     }
@@ -96,6 +97,12 @@ def _fold_text(raw: str) -> str:
     decomposed = unicodedata.normalize("NFD", lowered)
     stripped = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
     return " ".join(stripped.split())
+
+
+def is_target_pronoun(raw: str) -> bool:
+    """Returns True if `raw` folds to a known same-target or other-target pronoun."""
+    folded = _fold_text(raw)
+    return folded in _SAME_TARGET_PRONOUNS or folded in _OTHER_TARGET_PRONOUNS
 
 
 def _is_desktop(host: Host) -> bool:

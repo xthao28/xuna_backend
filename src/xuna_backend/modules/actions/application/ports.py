@@ -12,6 +12,7 @@ from xuna_backend.modules.actions.domain.entities import (
     ApprovalState,
     LocalActionReport,
 )
+from xuna_backend.modules.actions.domain.habits import HostDefaultRecord, HostRoutingHabit
 from xuna_backend.modules.actions.domain.standing_approval import StandingApproval
 from xuna_backend.modules.hosts.domain.entities import HostId
 
@@ -23,7 +24,9 @@ class ApprovalRepository(Protocol):
 
     async def get(self, approval_id: uuid.UUID) -> ApprovalRequest | None: ...
 
-    async def reject_pending_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int: ...
+    async def reject_pending_for_owner(
+        self, owner_id: uuid.UUID, now: datetime, host_id: HostId | None = None
+    ) -> int: ...
 
     async def count_approved(
         self,
@@ -86,7 +89,9 @@ class ApprovalBroker(Protocol):
         """Applies `decision` if `owner_id` owns the request. Idempotent on repeat calls."""
         ...
 
-    def reject_all_for_owner(self, owner_id: uuid.UUID, now: datetime) -> list[ApprovalRequest]: ...
+    def reject_all_for_owner(
+        self, owner_id: uuid.UUID, now: datetime, host_id: HostId | None = None
+    ) -> list[ApprovalRequest]: ...
 
     def cancel(self, approval_id: uuid.UUID) -> None: ...
 
@@ -149,26 +154,33 @@ class ApprovalScopeStore(Protocol):
         now: datetime,
     ) -> datetime: ...
 
-    async def clear_owner(self, owner_id: uuid.UUID) -> int: ...
+    async def clear_owner(self, owner_id: uuid.UUID, host_id: HostId | None = None) -> int: ...
 
 
 class ComputerUseSessionStore(Protocol):
-    """Desktop control sessions as the backend enforces them (UDC-8, UDC-17 S17.6).
+    """Desktop control sessions as the backend enforces them (UDC-8, UDC-17 S17.6, Mesh §5.1.2).
 
-    One running session per owner. Writes go through these methods so a durable store
-    persists them; callers never rely on mutating a returned state. `cached_nodes` and
-    `typed_since_commit` stay in process memory in every implementation.
+    One running session per `(owner_id, host_id)` lane. Writes go through these methods so
+    a durable store persists them; callers never rely on mutating a returned state.
+    `cached_nodes` and `typed_since_commit` stay in process memory in every implementation.
     """
 
     async def get(self, session_id: str) -> ComputerUseSessionState | None: ...
 
-    async def get_active_for_owner(self, owner_id: uuid.UUID) -> ComputerUseSessionState | None:
-        """The owner's running session, before budgets and the heartbeat are applied."""
+    async def get_active_for_owner(
+        self, owner_id: uuid.UUID, host_id: HostId | None = None
+    ) -> ComputerUseSessionState | None:
+        """The owner's running session (scoped to `host_id` when given, or latest active
+        across hosts when `None`), before budgets and the heartbeat are applied."""
+        ...
+
+    async def list_active_for_owner(self, owner_id: uuid.UUID) -> list[ComputerUseSessionState]:
+        """All running CU sessions for `owner_id`, ordered latest-started first."""
         ...
 
     async def start(self, state: ComputerUseSessionState, now: datetime) -> None:
-        """Stores a new running session; any other running one of the owner ends as
-        `replaced`."""
+        """Stores a new running session; any other running one for `(owner_id, host_id)`
+        ends as `replaced`."""
         ...
 
     async def mark_ended(
@@ -178,7 +190,13 @@ class ComputerUseSessionStore(Protocol):
         goal, cached UI tree and draft text."""
         ...
 
-    async def stop_all_for_owner(self, owner_id: uuid.UUID, reason: str, now: datetime) -> int: ...
+    async def stop_all_for_owner(
+        self,
+        owner_id: uuid.UUID,
+        reason: str,
+        now: datetime,
+        host_id: HostId | None = None,
+    ) -> int: ...
 
     async def record_step(self, session_id: str) -> int | None:
         """Atomically counts one step of a running session; returns the new count, or `None`
@@ -201,8 +219,49 @@ class ComputerUseSessionStore(Protocol):
         ...
 
 
+class HabitRepository(Protocol):
+    """Durable store for `HostRoutingHabit` and `HostDefaultRecord` (Spatial Mesh §5.1.3-§5.1.4)."""
+
+    async def get_habit(
+        self,
+        owner_id: uuid.UUID,
+        pet_id: str,
+        context_key: str,
+        host_id: HostId,
+    ) -> HostRoutingHabit | None: ...
+
+    async def get_habit_by_id(
+        self, owner_id: uuid.UUID, habit_id: uuid.UUID
+    ) -> HostRoutingHabit | None: ...
+
+    async def list_habits(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        pet_id: str | None = None,
+        context_key: str | None = None,
+    ) -> list[HostRoutingHabit]: ...
+
+    async def upsert_habit(self, habit: HostRoutingHabit) -> HostRoutingHabit: ...
+
+    async def delete_habit(self, owner_id: uuid.UUID, habit_id: uuid.UUID) -> bool: ...
+
+    async def delete_all_habits(self, owner_id: uuid.UUID, *, pet_id: str | None = None) -> int: ...
+
+    async def get_default(
+        self, owner_id: uuid.UUID, pet_id: str, scope_key: str
+    ) -> HostDefaultRecord | None: ...
+
+    async def list_defaults(
+        self, owner_id: uuid.UUID, *, pet_id: str | None = None
+    ) -> list[HostDefaultRecord]: ...
+
+    async def upsert_default(self, default: HostDefaultRecord) -> HostDefaultRecord: ...
+
+    async def delete_default(self, owner_id: uuid.UUID, pet_id: str, scope_key: str) -> bool: ...
+
+
 # Re-export from domain.ports for application-layer consumers (Wave D)
 from xuna_backend.modules.actions.domain.ports import (  # noqa: E402
     AutonomousJobRepository as AutonomousJobRepository,
 )
-

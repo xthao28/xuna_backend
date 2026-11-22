@@ -53,11 +53,31 @@ from xuna_backend.modules.actions.application.computer_use import (
     session_expiry_reason,
 )
 from xuna_backend.modules.actions.application.cu_template import CuTemplatePin
+from xuna_backend.modules.actions.application.mesh_call_helper import (
+    build_cu_mission_envelope,
+    build_pipeline_runner,
+    dispatch_mesh_tool,
+    emit_host_action_result,
+    emit_no_host_required,
+    emit_pending_with_battery,
+    emit_unresolved_ctx,
+    handle_pre_route_ctx,
+    resolve_effective_target_reason,
+    validate_cu_session_goal,
+)
+from xuna_backend.modules.actions.application.mesh_prober import MeshProber
+from xuna_backend.modules.actions.application.mesh_router import (
+    PendingIntentStore,
+    PreRouteOutcome,
+    record_execution_habit,
+    resolve_host_target_for_call,
+)
 from xuna_backend.modules.actions.application.ports import (
     ApprovalBroker,
     ApprovalRepository,
     ApprovalScopeStore,
     ComputerUseSessionStore,
+    HabitRepository,
     LastTargetStore,
     LocalResultBroker,
     StandingApprovalRepository,
@@ -94,7 +114,6 @@ from xuna_backend.modules.actions.application.workflows import (
 from xuna_backend.modules.actions.domain.entities import (
     APPROVAL_TTL_SECONDS,
     ActionPendingEvent,
-    ActionResultEvent,
     ActionStreamEvent,
     ActionSummary,
     ApprovalDecision,
@@ -104,7 +123,6 @@ from xuna_backend.modules.actions.domain.entities import (
     ComputerUseSessionEvent,
     EmergencyStopSummary,
     LocalActionRequestEvent,
-    gesture_for_action_status,
 )
 from xuna_backend.modules.actions.domain.job import AutonomousJobState
 from xuna_backend.modules.actions.domain.personalization import (
@@ -121,10 +139,6 @@ from xuna_backend.modules.actions.domain.standing_approval import (
     STANDING_SUGGEST_WINDOW,
     is_standing_eligible,
 )
-from xuna_backend.modules.actions.domain.target_resolver import (
-    TargetResolutionStatus,
-    TargetResolver,
-)
 from xuna_backend.modules.actions.domain.tool_names import (
     AUTONOMOUS_JOB_SCHEMA,
     AUTONOMOUS_JOB_TOOL,
@@ -133,6 +147,7 @@ from xuna_backend.modules.actions.domain.tool_names import (
     from_function_name,
     is_forbidden_tool_name,
 )
+from xuna_backend.modules.actions.domain.wake_queue import InMemoryWakeQueueStore
 from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.audit.domain.event import AuditAction, AuditEvent
 from xuna_backend.modules.cognition.application.ports import TextGenerator
@@ -314,6 +329,13 @@ class ActionContext:
     cu_template: CuTemplatePin | None = None
     # Wave E (UDC-18): Optional envelope representing a multi-step mission or AutonomousJob plan.
     mission_envelope: dict[str, object] | None = None
+    pinned_host_id: HostId | None = None
+    follow_me: bool = False
+    client_subnet_hash: str | None = None
+    client_tz_offset_minutes: int | None = None
+    habit_recorded_in_preroute: bool = False
+    pre_route_target_required: PreRouteOutcome | None = None
+    pinned_target_reason: str | None = None
 
 
 class Orchestrator:
@@ -338,9 +360,16 @@ class Orchestrator:
         standing_repo: StandingApprovalRepository | None = None,
         cu_session_store: ComputerUseSessionStore | None = None,
         job_runner: "AutonomousJobRunner | None" = None,
+        habit_repo: HabitRepository | None = None,
+        pending_intent_store: PendingIntentStore | None = None,
+        mesh_prober: MeshProber | None = None,
+        wake_queue: InMemoryWakeQueueStore | None = None,
     ) -> None:
         self._standing_repo = standing_repo
         self._job_runner = job_runner
+        self._habit_repo = habit_repo
+        self._pending_intent_store = pending_intent_store
+        self._wake_queue = wake_queue
         self._cu_session_store: ComputerUseSessionStore = (
             cu_session_store if cu_session_store is not None else InMemoryComputerUseSessionStore()
         )
@@ -354,6 +383,7 @@ class Orchestrator:
         self._scope_store = scope_store
         self._verifier = verifier
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._mesh_prober = mesh_prober or MeshProber(hub=hub, clock=self._clock)
         self._code_synthesizer = (
             CodeSpecialistSynthesizer(code_generator) if code_generator is not None else None
         )
@@ -381,6 +411,13 @@ class Orchestrator:
             slot_store=self._workflow_slot_store,
             clock=self._clock,
         )
+        self._cross_host_pipelines = build_pipeline_runner(
+            self._approval_and_board,
+            self._mesh_prober,
+            standing_repo,
+            pending_intent_store,
+            wake_queue,
+        )
 
     async def emergency_stop(
         self,
@@ -388,19 +425,22 @@ class Orchestrator:
         owner_id: uuid.UUID,
         reason: str = "owner_app",
         request_id: str = "",
+        host_id: HostId | None = None,
     ) -> EmergencyStopSummary:
-        """Cancels all active invocations, rejects pending approvals, sends `xuna/stop`
-        to every live host, suspends R2+ grants, and audits `host.stopped` (`UDC-7` S7.3)."""
+        """Cancels active invocations, rejects approvals, sends `xuna/stop` (`UDC-7` S7.3)."""
         now = self._clock()
-        running = await self._cu_session_store.get_active_for_owner(owner_id)
-        if running is not None:
-            await self._end_cu_state(running, reason, now, request_id)
-        await self._cu_session_store.stop_all_for_owner(owner_id, reason, now)
-        return await self._approval_and_board.emergency_stop(
-            owner_id=owner_id,
-            reason=reason,
-            request_id=request_id,
+        for running in await self._cu_session_store.list_active_for_owner(owner_id):
+            if host_id is None or running.host_id == host_id:
+                await self._end_cu_state(running, reason, now, request_id)
+        await self._cu_session_store.stop_all_for_owner(owner_id, reason, now, host_id=host_id)
+        summary = await self._approval_and_board.emergency_stop(
+            owner_id=owner_id, reason=reason, request_id=request_id, host_id=host_id
         )
+        if self._job_runner is not None:
+            await self._job_runner.cancel_all_for_owner(owner_id, reason=reason, host_id=host_id)
+        if self._wake_queue is not None:
+            self._wake_queue.clear_owner(owner_id, host_id=host_id)
+        return summary
 
     async def active_cu_session_event(
         self, owner_id: uuid.UUID, request_id: str = ""
@@ -425,7 +465,7 @@ class Orchestrator:
         ends here. On a lost heartbeat the host is also told to end its session, since the
         host does not see the phone.
         """
-        state = await self._cu_session_store.get_active_for_owner(owner_id)
+        state = await self._cu_session_store.get_active_for_owner(owner_id, host_id=host_id)
         if state is None:
             return None
         reason = session_expiry_reason(state, now)
@@ -550,6 +590,7 @@ class Orchestrator:
         self,
         *,
         owner_id: uuid.UUID,
+        host_id: HostId | None = None,
         reason: str = "turn_aborted",
         request_id: str = "",
     ) -> ComputerUseSessionEvent | None:
@@ -565,7 +606,7 @@ class Orchestrator:
 
         now = self._clock()
         try:
-            state = await self._cu_session_store.get_active_for_owner(owner_id)
+            state = await self._cu_session_store.get_active_for_owner(owner_id, host_id=host_id)
         except Exception:
             _logger.warning("cleanup_dangling_cu_session: store lookup failed", exc_info=True)
             return None
@@ -705,7 +746,10 @@ class Orchestrator:
         timed out does not revive it. Returns the running session, or `None`.
         """
         now = self._clock()
-        state = await self._live_cu_session(owner_id, None, now, request_id)
+        raw_state = await self._cu_session_store.get(session_id)
+        if raw_state is None or raw_state.owner_id != owner_id or not raw_state.active:
+            return None
+        state = await self._live_cu_session(owner_id, raw_state.host_id, now, request_id)
         if state is None or state.session_id != session_id:
             return None
         if not await self._cu_session_store.touch_heartbeat(session_id, owner_id, now):
@@ -1043,7 +1087,7 @@ class Orchestrator:
                 structured_content["nodes"] = redacted_nodes
             if status != "ok":
                 return
-            previous = await self._cu_session_store.get_active_for_owner(owner_id)
+            previous = await self._cu_session_store.get_active_for_owner(owner_id, host_id=host_id)
             if previous is not None:
                 await self._end_cu_state(previous, "replaced", now)
             raw_sid = structured_content.get("sessionId")
@@ -1323,7 +1367,11 @@ class Orchestrator:
                 self_host_id=ctx.self_host_id,
             )
             online_hosts = [
-                h for h in hosts if h.status == HostStatus.ACTIVE and str(h.host_id) in online_ids
+                h
+                for h in hosts
+                if h.status == HostStatus.ACTIVE
+                and str(h.host_id) in online_ids
+                and (ctx.pinned_host_id is None or h.host_id == ctx.pinned_host_id)
             ]
             if not online_hosts:
                 return Message(
@@ -1390,7 +1438,9 @@ class Orchestrator:
             domains = [str(d) for d in domains_raw] if isinstance(domains_raw, list) else []
 
             planned_sub_goals = runner.planner.generate_plan(goal, title=title)
-            active_cu = await self._cu_session_store.get_active_for_owner(ctx.owner_id)
+            active_cu = await self._cu_session_store.get_active_for_owner(
+                ctx.owner_id, host_id=target_host.host_id
+            )
             if (apps or domains) and (
                 active_cu is None or active_cu.host_id != target_host.host_id
             ):
@@ -1414,6 +1464,7 @@ class Orchestrator:
                     host_defaults=ctx.host_defaults,
                     host_screen_consent=ctx.host_screen_consent,
                     cu_template=ctx.cu_template,
+                    pinned_host_id=ctx.pinned_host_id,
                     mission_envelope={
                         "goal": goal[:200],
                         "apps": apps,
@@ -1439,7 +1490,9 @@ class Orchestrator:
                         content=cu_msg.content,
                         tool_call_id=call.id,
                     )
-                active_cu = await self._cu_session_store.get_active_for_owner(ctx.owner_id)
+                active_cu = await self._cu_session_store.get_active_for_owner(
+                    ctx.owner_id, host_id=target_host.host_id
+                )
 
             job = await runner.start_job(
                 job_id=uuid.uuid4(),
@@ -1519,10 +1572,13 @@ class Orchestrator:
                     now = self._clock()
                     expires_at = now + timedelta(seconds=APPROVAL_TTL_SECONDS)
                     target_label = prev_req.target_alias
-                    if prev_req.host_id is not None:
-                        host_obj = await self._host_repo.get_host(prev_req.host_id)
-                        if host_obj is not None:
-                            target_label = str(host_obj.alias)
+                    host_obj = (
+                        await self._host_repo.get_host(prev_req.host_id)
+                        if prev_req.host_id is not None
+                        else None
+                    )
+                    if host_obj is not None:
+                        target_label = str(host_obj.alias)
                     fresh_req = ApprovalRequest(
                         approval_id=uuid.uuid4(),
                         owner_id=ctx.owner_id,
@@ -1549,6 +1605,9 @@ class Orchestrator:
                             ),
                             args_sha256=fresh_req.args_sha256,
                             expires_at=expires_at.astimezone(UTC).isoformat(),
+                            target_platform=(
+                                host_obj.platform.value if host_obj is not None else None
+                            ),
                         )
                     )
                     decision = await self._approval_broker.wait(
@@ -1709,8 +1768,21 @@ class Orchestrator:
             online_host_ids=online,
             host_screen_consent=ctx.host_screen_consent,
             now=self._clock(),
+            pinned_host_id=ctx.pinned_host_id,
         )
         try:
+            mesh_msg = await dispatch_mesh_tool(
+                call,
+                ctx,
+                self._mesh_prober,
+                self._cross_host_pipelines,
+                hosts,
+                manifests,
+                grants,
+                online,
+            )
+            if mesh_msg is not None:
+                return mesh_msg
             if call.name == TOOL_SEARCH_FUNCTION:
                 output = search_tools(
                     eligible, call.arguments.get("query"), call.arguments.get("limit")
@@ -1756,13 +1828,17 @@ class Orchestrator:
                         "_".join(a.strip().lower().split()) if isinstance(a, str) else a
                         for a in raw_apps
                     ]
+        pinned = ctx.pinned_host_id if isinstance(ctx.pinned_host_id, HostId) else None
         hosts = await self._host_repo.list_hosts(ctx.owner_id)
-        active_hosts = [h for h in hosts if h.status == HostStatus.ACTIVE]
+        active_hosts = [
+            h
+            for h in hosts
+            if h.status == HostStatus.ACTIVE and (pinned is None or h.host_id == pinned)
+        ]
 
         manifests_by_host: dict[HostId, Manifest] = {}
         grants_by_host: dict[HostId, list[Grant]] = {}
         online_hosts_with_tool: list[Host] = []
-        eligible_hosts: list[Host] = []
         eligible_descriptors: list[ToolDescriptor] = []
         online_descriptors: list[ToolDescriptor] = []
         offline_descriptors: list[ToolDescriptor] = []
@@ -1774,11 +1850,11 @@ class Orchestrator:
             descriptor = manifest.find_tool(tool_name)
             if descriptor is None:
                 continue
+            manifests_by_host[host.host_id] = manifest
             is_self = ctx.self_host_id is not None and str(host.host_id) == ctx.self_host_id
             if not self._hub.is_online(str(host.host_id)) and not is_self:
                 offline_descriptors.append(descriptor)
                 continue
-            manifests_by_host[host.host_id] = manifest
             grants = await self._host_repo.get_grants(host.host_id)
             grants_by_host[host.host_id] = grants
             online_hosts_with_tool.append(host)
@@ -1789,15 +1865,12 @@ class Orchestrator:
                 now,
                 host_screen_consent=ctx.host_screen_consent,
             ):
-                eligible_hosts.append(host)
                 eligible_descriptors.append(descriptor)
 
         candidate_descriptors = eligible_descriptors or online_descriptors or offline_descriptors
         if not candidate_descriptors:
-            return Message(
-                role=Role.TOOL,
-                content=_encode_tool_payload("unknown_tool"),
-                tool_call_id=call.id,
+            return await emit_no_host_required(
+                ctx, call.id, tool_name, self._pending_intent_store, now, self._wake_queue
             )
 
         valid_schema_descriptors: list[ToolDescriptor] = []
@@ -1835,6 +1908,14 @@ class Orchestrator:
                 tool_call_id=call.id,
             )
 
+        goal_err = validate_cu_session_goal(tool_name, clean_args)
+        if goal_err is not None:
+            return Message(
+                role=Role.TOOL,
+                content=_encode_tool_payload("invalid_args", {"errorCode": goal_err}),
+                tool_call_id=call.id,
+            )
+
         if tool_name == "web.navigate":
             raw_url = str(clean_args.get("url", ""))
             try:
@@ -1869,47 +1950,50 @@ class Orchestrator:
                         tool_call_id=call.id,
                     )
 
-        last_target = self._last_target_store.get_last_target(ctx.owner_id, ctx.pet_id, now)
-        last_alias = last_target[0] if last_target is not None else None
-        last_at = last_target[1] if last_target is not None else None
-        family_key = reference_descriptor.family.value
-        default_alias = (
-            ctx.host_defaults.get(family_key)
-            if ctx.host_defaults is not None and family_key in ctx.host_defaults
-            else self._host_default_store.get_default_alias(
-                owner_id=ctx.owner_id,
-                pet_id=ctx.pet_id,
-                family=reference_descriptor.family,
+        if ctx.pre_route_target_required is not None:
+            return await handle_pre_route_ctx(
+                ctx,
+                call.id,
+                tool_name,
+                clean_args,
+                reference_descriptor,
+                self._pending_intent_store,
+                now,
+                self._wake_queue,
             )
-        )
 
-        resolution = TargetResolver.resolve(
+        routing = await resolve_host_target_for_call(
+            tool_name=tool_name,
+            clean_args=clean_args,
             requested_target=requested_target,
-            eligible_hosts=(
-                eligible_hosts
-                if eligible_hosts or requested_target is not None
-                else online_hosts_with_tool
-            ),
-            all_tool_hosts=online_hosts_with_tool,
-            last_target_alias=last_alias,
-            last_target_at=last_at,
+            ctx=ctx,
+            active_hosts=active_hosts,
+            manifests_by_host=manifests_by_host,
+            grants_by_host=grants_by_host,
+            online_hosts_with_tool=online_hosts_with_tool,
+            reference_descriptor=reference_descriptor,
+            hub=self._hub,
+            last_target_store=self._last_target_store,
+            host_default_store=self._host_default_store,
+            habit_repo=self._habit_repo,
+            pending_store=self._pending_intent_store,
+            cu_session_store=self._cu_session_store,
             now=now,
-            host_default_alias=default_alias,
         )
-        if resolution.status == TargetResolutionStatus.NO_HOST:
-            return Message(
-                role=Role.TOOL,
-                content=_encode_tool_payload("no_host"),
-                tool_call_id=call.id,
-            )
-        if resolution.status == TargetResolutionStatus.ASK_TARGET or resolution.host is None:
-            return Message(
-                role=Role.TOOL,
-                content=_encode_tool_payload("ask_target", choices=list(resolution.choices)),
-                tool_call_id=call.id,
+        if not routing.resolved or routing.host is None:
+            return await emit_unresolved_ctx(
+                ctx,
+                call.id,
+                tool_name,
+                routing,
+                clean_args,
+                reference_descriptor,
+                now,
+                self._wake_queue,
             )
 
-        host = resolution.host
+        host = routing.host
+        eff_target_reason = resolve_effective_target_reason(ctx.pinned_target_reason, routing)
         target_alias = str(host.alias)
         host_manifest = manifests_by_host[host.host_id]
         descriptor = host_manifest.find_tool(tool_name)
@@ -1954,16 +2038,14 @@ class Orchestrator:
                     },
                 )
             )
-            await ctx.emit_event(
-                ActionResultEvent(
-                    invocation_id=invocation_id,
-                    target=target_alias,
-                    summary=ActionSummary.format_result(
-                        descriptor.name, clean_args, target_alias, "unsupported", ctx.locale
-                    ),
-                    status="unsupported",
-                    gesture=gesture_for_action_status("unsupported"),
-                )
+            await emit_host_action_result(
+                ctx,
+                invocation_id,
+                host,
+                descriptor.name,
+                clean_args,
+                "unsupported",
+                eff_target_reason,
             )
             return Message(
                 role=Role.TOOL,
@@ -2004,18 +2086,15 @@ class Orchestrator:
                     },
                 )
             )
-            await ctx.emit_event(
-                ActionResultEvent(
-                    invocation_id=invocation_id,
-                    target=target_alias,
-                    summary=ActionSummary.format_result(
-                        descriptor.name, clean_args, target_alias, "denied", ctx.locale
-                    ),
-                    status="denied",
-                    gesture=gesture_for_action_status("denied"),
-                    error_code=deny_reason,
-                    host_id=str(host.host_id),
-                )
+            await emit_host_action_result(
+                ctx,
+                invocation_id,
+                host,
+                descriptor.name,
+                clean_args,
+                "denied",
+                eff_target_reason,
+                deny_reason,
             )
             return Message(
                 role=Role.TOOL,
@@ -2059,18 +2138,15 @@ class Orchestrator:
                     },
                 )
             )
-            await ctx.emit_event(
-                ActionResultEvent(
-                    invocation_id=invocation_id,
-                    target=target_alias,
-                    summary=ActionSummary.format_result(
-                        descriptor.name, clean_args, target_alias, preflight.status, ctx.locale
-                    ),
-                    status=preflight.status,
-                    gesture=gesture_for_action_status(preflight.status),
-                    error_code=refusal_code,
-                    host_id=str(host.host_id),
-                )
+            await emit_host_action_result(
+                ctx,
+                invocation_id,
+                host,
+                descriptor.name,
+                clean_args,
+                preflight.status,
+                eff_target_reason,
+                refusal_code,
             )
             if active_cu is not None and not active_cu.active:
                 await ctx.emit_event(build_session_event(active_cu, now, ""))
@@ -2114,18 +2190,15 @@ class Orchestrator:
                     },
                 )
             )
-            await ctx.emit_event(
-                ActionResultEvent(
-                    invocation_id=invocation_id,
-                    target=target_alias,
-                    summary=ActionSummary.format_result(
-                        descriptor.name, summary_args, target_alias, "denied", ctx.locale
-                    ),
-                    status="denied",
-                    gesture=gesture_for_action_status("denied"),
-                    error_code="risk_above_grant",
-                    host_id=str(host.host_id),
-                )
+            await emit_host_action_result(
+                ctx,
+                invocation_id,
+                host,
+                descriptor.name,
+                summary_args,
+                "denied",
+                eff_target_reason,
+                "risk_above_grant",
             )
             # The step needs a higher risk than any active grant allows (for example the
             # host raised it to R3 and the family grant stops at R2): say so, with a code
@@ -2197,18 +2270,15 @@ class Orchestrator:
                         },
                     )
                 )
-                await ctx.emit_event(
-                    ActionResultEvent(
-                        invocation_id=invocation_id,
-                        target=target_alias,
-                        summary=ActionSummary.format_result(
-                            descriptor.name, summary_args, target_alias, "denied", ctx.locale
-                        ),
-                        status="denied",
-                        gesture=gesture_for_action_status("denied"),
-                        error_code="password_field_forbidden",
-                        host_id=str(host.host_id),
-                    )
+                await emit_host_action_result(
+                    ctx,
+                    invocation_id,
+                    host,
+                    descriptor.name,
+                    summary_args,
+                    "denied",
+                    eff_target_reason,
+                    "password_field_forbidden",
                 )
                 return Message(
                     role=Role.TOOL,
@@ -2337,9 +2407,6 @@ class Orchestrator:
                         reused_output["targetAlreadyFocused"] = True
                 if active_cu.last_window_title is not None:
                     reused_output["windowTitle"] = active_cu.last_window_title
-                reuse_summary = ActionSummary.format_result(
-                    descriptor.name, clean_args, target_alias, "ok", ctx.locale
-                )
                 await self._audit.record(
                     AuditEvent(
                         owner_id=ctx.owner_id,
@@ -2357,14 +2424,8 @@ class Orchestrator:
                         },
                     )
                 )
-                await ctx.emit_event(
-                    ActionResultEvent(
-                        invocation_id=invocation_id,
-                        target=target_alias,
-                        summary=reuse_summary,
-                        status="ok",
-                        gesture=gesture_for_action_status("ok"),
-                    )
+                reuse_summary = await emit_host_action_result(
+                    ctx, invocation_id, host, descriptor.name, clean_args, "ok", eff_target_reason
                 )
                 await ctx.emit_event(build_session_event(active_cu, now, reuse_summary))
                 reuse_hint = (
@@ -2555,70 +2616,24 @@ class Orchestrator:
                     if prompts is not None:
                         active_cu.owner_prompts = prompts
 
-                mission_env = ctx.mission_envelope
-                if mission_env is None and descriptor.name in (
-                    "cu.session_start",
-                    "cu.session_extend",
-                ):
-                    mission_goal = str(clean_args.get("goal") or "")
-                    if (
-                        not mission_goal
-                        and active_cu is not None
-                        and getattr(active_cu, "goal", None)
-                    ):
-                        mission_goal = str(active_cu.goal)
-                    apps_raw = clean_args.get("apps")
-                    apps_list = (
-                        [str(a) for a in apps_raw] if isinstance(apps_raw, list | tuple) else []
-                    )
-                    if (
-                        not apps_list
-                        and active_cu is not None
-                        and getattr(active_cu, "allowed_apps", None)
-                    ):
-                        apps_list = [str(a) for a in active_cu.allowed_apps]
-                    domains_raw = clean_args.get("domains")
-                    domains_list = (
-                        [str(d) for d in domains_raw]
-                        if isinstance(domains_raw, list | tuple)
-                        else []
-                    )
-                    if (
-                        not domains_list
-                        and active_cu is not None
-                        and getattr(active_cu, "allowed_domains", None)
-                    ):
-                        domains_list = [str(d) for d in active_cu.allowed_domains]
-                    max_steps_val = clean_args.get("maxSteps")
-                    max_steps = int(max_steps_val) if isinstance(max_steps_val, int | str) else 12
-                    max_mins_val = clean_args.get("maxMinutes")
-                    max_mins = int(max_mins_val) if isinstance(max_mins_val, int | str) else 5
-                    mission_env = {
-                        "goal": mission_goal,
-                        "apps": apps_list,
-                        "domains": domains_list,
-                        "maxSteps": max_steps,
-                        "maxMinutes": max_mins,
-                    }
-                    plan_steps_raw = clean_args.get("planSteps")
-                    if isinstance(plan_steps_raw, list | tuple):
-                        mission_env["planSteps"] = [str(s) for s in plan_steps_raw]
+                mission_env = ctx.mission_envelope or build_cu_mission_envelope(
+                    descriptor.name, clean_args, active_cu
+                )
 
-                await ctx.emit_event(
-                    ActionPendingEvent(
-                        approval_id=str(approval_req.approval_id),
-                        target=target_alias,
-                        summary=card_summary,
-                        risk=approval_req.risk.value,
-                        expires_in=APPROVAL_TTL_SECONDS,
-                        host_id=str(host.host_id),
-                        args_sha256=approval_req.args_sha256,
-                        expires_at=expires_at.astimezone(UTC).isoformat(),
-                        standing_tool=standing_offer_tool,
-                        standing_arguments=standing_offer_args,
-                        standing_approved_count=standing_approved_count,
-                        mission_envelope=mission_env,
-                    )
+                await emit_pending_with_battery(
+                    ctx=ctx,
+                    hosts=hosts,
+                    hub=self._hub,
+                    host=host,
+                    approval_req=approval_req,
+                    card_summary=card_summary,
+                    expires_at_iso=expires_at.astimezone(UTC).isoformat(),
+                    standing_tool=standing_offer_tool,
+                    standing_args=standing_offer_args,
+                    standing_count=standing_approved_count,
+                    mission_env=mission_env,
+                    eff_target_reason=eff_target_reason,
+                    host_repo=self._host_repo,
                 )
 
                 decision_state = await self._approval_broker.wait(
@@ -2633,20 +2648,14 @@ class Orchestrator:
                     final_status = (
                         "rejected" if decision_state == ApprovalState.REJECTED else "expired"
                     )
-                    await ctx.emit_event(
-                        ActionResultEvent(
-                            invocation_id=invocation_id,
-                            target=target_alias,
-                            summary=ActionSummary.format_result(
-                                descriptor.name,
-                                summary_args,
-                                target_alias,
-                                final_status,
-                                ctx.locale,
-                            ),
-                            status=final_status,
-                            gesture=gesture_for_action_status(final_status),
-                        )
+                    await emit_host_action_result(
+                        ctx,
+                        invocation_id,
+                        host,
+                        descriptor.name,
+                        summary_args,
+                        final_status,
+                        eff_target_reason,
                     )
                     return Message(
                         role=Role.TOOL,
@@ -2678,20 +2687,14 @@ class Orchestrator:
                         await grant_res
 
             if args_sha256(clean_args) != approval_req.args_sha256:
-                await ctx.emit_event(
-                    ActionResultEvent(
-                        invocation_id=invocation_id,
-                        target=target_alias,
-                        summary=ActionSummary.format_result(
-                            descriptor.name,
-                            summary_args,
-                            target_alias,
-                            "denied",
-                            ctx.locale,
-                        ),
-                        status="denied",
-                        gesture=gesture_for_action_status("denied"),
-                    )
+                await emit_host_action_result(
+                    ctx,
+                    invocation_id,
+                    host,
+                    descriptor.name,
+                    summary_args,
+                    "denied",
+                    eff_target_reason,
                 )
                 return Message(
                     role=Role.TOOL,
@@ -2904,6 +2907,15 @@ class Orchestrator:
                 active_cu.typed_count = 0
                 await self._cu_session_store.set_typed_count(active_cu.session_id, 0)
 
+        if status == "ok" and self._habit_repo is not None:
+            await record_execution_habit(
+                self._habit_repo,
+                ctx=ctx,
+                descriptor=descriptor,
+                clean_args=clean_args,
+                host_id=host.host_id,
+                now=self._clock(),
+            )
         audit_action = (
             AuditAction.HOST_TOOL_DENIED if status == "denied" else AuditAction.HOST_TOOL_INVOKED
         )
@@ -2924,26 +2936,17 @@ class Orchestrator:
             )
         )
 
-        result_summary = ActionSummary.format_result(
+        raw_error = structured_content.get("errorCode")
+        err_code = raw_error[:64] if status != "ok" and isinstance(raw_error, str) else None
+        result_summary = await emit_host_action_result(
+            ctx,
+            invocation_id,
+            host,
             descriptor.name,
             summary_args if live_label is not None else clean_args,
-            target_alias,
             status,
-            ctx.locale,
-        )
-        raw_error = structured_content.get("errorCode")
-        await ctx.emit_event(
-            ActionResultEvent(
-                invocation_id=invocation_id,
-                target=target_alias,
-                summary=result_summary,
-                status=status,
-                gesture=gesture_for_action_status(status),
-                error_code=raw_error[:64]
-                if status != "ok" and isinstance(raw_error, str)
-                else None,
-                host_id=str(host.host_id) if status != "ok" else None,
-            )
+            eff_target_reason,
+            err_code,
         )
         if descriptor.family in (
             ToolFamily.CU,

@@ -338,6 +338,8 @@ def _extract_tool_names(tools: Sequence[ToolSpec] | Collection[str] | None) -> s
 def tool_system_prompt(
     locale: Locale,
     tools: Sequence[ToolSpec] | Collection[str] | None = None,
+    *,
+    host_roster: str | None = None,
 ) -> str:
     """Composes a minimal, capability-scoped system prompt for the active `tools` in this turn.
 
@@ -346,7 +348,10 @@ def tool_system_prompt(
     """
     is_en = locale == Locale.EN
     if tools is None:
-        return SYSTEM_PROMPT_EN if is_en else SYSTEM_PROMPT_VI
+        base = SYSTEM_PROMPT_EN if is_en else SYSTEM_PROMPT_VI
+        if host_roster and host_roster.strip():
+            return f"{base}\n\n{host_roster.strip()}"
+        return base
 
     active_names = _extract_tool_names(tools)
     if not active_names:
@@ -367,6 +372,9 @@ def tool_system_prompt(
         name.startswith("forge__custom_") for name in active_names
     ):
         parts.append(_FORGE_SKILL_MODULE_EN if is_en else _FORGE_SKILL_MODULE_VI)
+
+    if host_roster and host_roster.strip():
+        parts.append(f"\n\n{host_roster.strip()}")
 
     return "".join(parts)
 

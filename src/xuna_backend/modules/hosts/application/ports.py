@@ -13,6 +13,13 @@ from xuna_backend.modules.hosts.domain.entities import (
     Manifest,
     PendingEnrollment,
 )
+from xuna_backend.modules.hosts.domain.twin import (
+    HostFocusChangedNotice,
+    HostFocusState,
+    HostPresence,
+    HostResources,
+    HostTwin,
+)
 
 
 class EnrollmentRepository(Protocol):
@@ -36,9 +43,7 @@ class HostRepository(Protocol):
 
     async def set_grants(self, host_id: HostId, grants: list[Grant]) -> None: ...
 
-    async def suspend_r2_plus_grants_for_owner(
-        self, owner_id: uuid.UUID, now: datetime
-    ) -> int: ...
+    async def suspend_r2_plus_grants_for_owner(self, owner_id: uuid.UUID, now: datetime) -> int: ...
 
     async def get_manifest(self, host_id: HostId) -> Manifest | None: ...
 
@@ -65,12 +70,42 @@ class HostSessionHub(Protocol):
         send_text: Callable[[str], Awaitable[None]],
         close_duplicate: Callable[[], Awaitable[None]],
         close_revoked: Callable[[], Awaitable[None]],
+        owner_id: uuid.UUID | None = None,
     ) -> bool:
         """Registers a live session. Returns `False` if a session was already live,
         after closing the previous session with `duplicate_session`."""
         ...
 
     def close_session(self, host_id: str, token: object) -> bool: ...
+
+    def get_twin(self, host_id: str) -> HostTwin | None: ...
+
+    def get_twins_for_owner(self, owner_id: uuid.UUID) -> list[HostTwin]: ...
+
+    def update_presence(self, host_id: str, presence: HostPresence) -> HostTwin | None: ...
+
+    def update_resources(self, host_id: str, resources: HostResources) -> HostTwin | None: ...
+
+    def get_focus_state(self, owner_id: uuid.UUID) -> HostFocusState | None: ...
+
+    def set_focus_state(
+        self,
+        owner_id: uuid.UUID,
+        *,
+        focused_host_id: HostId | None = None,
+        keep_focused_host: bool = False,
+        follow_me: bool | None = None,
+        source: str,
+        now: datetime,
+    ) -> HostFocusState: ...
+
+    def subscribe_focus(
+        self,
+        owner_id: uuid.UUID,
+        listener: Callable[[HostFocusChangedNotice], Awaitable[None]],
+    ) -> Callable[[], None]: ...
+
+    async def publish_focus_changed(self, notice: HostFocusChangedNotice) -> None: ...
 
     def on_response(
         self, host_id: str, request_id: int | str, result: dict[str, object]

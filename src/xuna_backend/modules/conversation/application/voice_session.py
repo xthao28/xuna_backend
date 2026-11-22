@@ -25,6 +25,7 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     ReplyBudget,
     ToolCallRunner,
     TurnContext,
+    TurnEvent,
     build_request,
     chat_turn,
 )
@@ -180,12 +181,15 @@ class VoiceSession:
         budget: ReplyBudget | None = None,
         generator: TextGenerator | None = None,
         code_generator: TextGenerator | None = None,
+        code_timeout_s: float | None = None,
         tools: tuple[ToolSpec, ...] = (),
         tool_runner: ToolCallRunner | None = None,
         turn_note: str | Callable[[Locale], str] | None = None,
         cu_cleanup: CuCleanupCallback | None = None,
+        host_roster: str | None = None,
+        source_events: AsyncIterator[TurnEvent] | None = None,
     ) -> AsyncIterator[SpokenTurnEvent]:
-        if not text.strip():
+        if not text.strip() and source_events is None:
             self.state = SessionState.IDLE
             return
 
@@ -202,25 +206,30 @@ class VoiceSession:
 
         self.state = SessionState.REPLYING
         try:
-            req = build_request(
-                text,
-                context=context,
-                locale=self.locale,
-                mode=mode,
-                budget=budget,
-                tools=tools,
-                turn_note=resolved_note,
-            )
-            chosen_gen = generator or self.generator
-            text_events = chat_turn(
-                chosen_gen,
-                req,
-                sections=(mode == TurnMode.EXPERT),
-                locale_vi=(req.locale == Locale.VI),
-                tool_runner=tool_runner,
-                code_generator=code_generator,
-                cu_cleanup=cu_cleanup,
-            )
+            if source_events is not None:
+                text_events = source_events
+            else:
+                req = build_request(
+                    text,
+                    context=context,
+                    locale=self.locale,
+                    mode=mode,
+                    budget=budget,
+                    tools=tools,
+                    turn_note=resolved_note,
+                    host_roster=host_roster,
+                )
+                chosen_gen = generator or self.generator
+                text_events = chat_turn(
+                    chosen_gen,
+                    req,
+                    sections=(mode == TurnMode.EXPERT),
+                    locale_vi=(req.locale == Locale.VI),
+                    tool_runner=tool_runner,
+                    code_generator=code_generator,
+                    code_timeout_s=code_timeout_s,
+                    cu_cleanup=cu_cleanup,
+                )
             chosen_voice = voice or self.voice
             if self.speak and self.synthesizer is not None:
                 async for event in spoken_turn(
