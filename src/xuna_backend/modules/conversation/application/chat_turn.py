@@ -18,6 +18,10 @@ from xuna_backend.modules.actions.application.orchestrator import (
     EventSink,
     tool_system_prompt,
 )
+from xuna_backend.modules.actions.application.yield_detach import (
+    DEFAULT_YIELD_MS,
+    YieldDetachResult,
+)
 from xuna_backend.modules.actions.domain.entities import (
     APPROVAL_TTL_SECONDS,
     MAX_CALLS_PER_ROUND,
@@ -33,6 +37,7 @@ from xuna_backend.modules.actions.domain.entities import (
     HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
+from xuna_backend.modules.actions.domain.watch import TurnDetachedEvent
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
     TextGenerator,
@@ -490,10 +495,15 @@ TurnEvent = (
     | ActionResultEvent
     | ComputerUseSessionEvent
     | HostFocusChangedNotice
+    | TurnDetachedEvent
 )
 
 ToolCallRunner = Callable[[ToolCall, EventSink], Awaitable[Message]]
 CuCleanupCallback = Callable[[str], Awaitable[ComputerUseSessionEvent | None]]
+YieldDetachCallback = Callable[
+    [tuple[ToolCall, ...], int, str | None],
+    Awaitable[YieldDetachResult | None],
+]
 
 
 async def _shielded_cu_cleanup(
@@ -611,6 +621,8 @@ async def chat_turn(
     code_generator: TextGenerator | None = None,
     code_timeout_s: float | None = None,
     cu_cleanup: CuCleanupCallback | None = None,
+    yield_detach: YieldDetachCallback | None = None,
+    yield_ms: int = DEFAULT_YIELD_MS,
 ) -> AsyncIterator[TurnEvent]:
     """Streams the reply with gesture tags removed, splits say/detail when `sections=True`,
     and executes up to `MAX_TOOL_ROUNDS` x `MAX_CALLS_PER_ROUND` tool calls when
@@ -792,12 +804,17 @@ async def chat_turn(
             tool_messages: list[Message] = []
             approval_wait_box: list[float] = [0.0]
             timed_out_box: list[bool] = [False]
+            yield_result_box: list[YieldDetachResult | None] = [None]
             async for item in _execute_round_tool_calls(
                 round_calls,
                 guarded_runner,
                 remaining_budget=max(TURN_BUDGET_SECONDS - (time.monotonic() - turn_started), 0.5),
                 approval_wait_out=approval_wait_box,
                 timed_out_out=timed_out_box,
+                yield_detach=yield_detach,
+                yield_ms=yield_ms,
+                yield_result_out=yield_result_box,
+                last_action_summary=last_action_summary,
             ):
                 if isinstance(item, Message):
                     tool_messages.append(item)
@@ -806,6 +823,21 @@ async def chat_turn(
                         last_action_summary = item.summary
                     yield item
             turn_started += approval_wait_box[0]
+            detached_res = yield_result_box[0]
+            if detached_res is not None and detached_res.detached:
+                if detached_res.event is not None:
+                    yield detached_res.event
+                if detached_res.notice_text:
+                    emitted_any_text = True
+                    yield TextDelta(detached_res.notice_text)
+                yield ChatFinished(
+                    provider="yield_detach",
+                    model="autonomous_job",
+                    latency_ms=int((time.monotonic() - turn_started) * 1000),
+                    input_tokens=0,
+                    output_tokens=0,
+                )
+                return
             if timed_out_box[0]:
                 timed_out = True
                 break
@@ -860,6 +892,10 @@ async def _execute_round_tool_calls(
     remaining_budget: float,
     approval_wait_out: list[float] | None = None,
     timed_out_out: list[bool] | None = None,
+    yield_detach: YieldDetachCallback | None = None,
+    yield_ms: int = DEFAULT_YIELD_MS,
+    yield_result_out: list[YieldDetachResult | None] | None = None,
+    last_action_summary: str | None = None,
 ) -> AsyncIterator[ActionStreamEvent | Message]:
     """Runs up to `MAX_CALLS_PER_ROUND` tool calls sequentially while streaming
     any `ActionStreamEvent`s (`ActionPendingEvent`, `BoardHidRequestEvent`,
@@ -891,25 +927,54 @@ async def _execute_round_tool_calls(
             await queue.put(None)
 
     task = asyncio.create_task(worker())
-    compute_deadline = time.monotonic() + remaining_budget
+    started_mono = time.monotonic()
+    compute_deadline = started_mono + remaining_budget
+    yield_deadline: float | None = (
+        started_mono + max(yield_ms, 1) / 1000.0
+        if yield_detach is not None and yield_ms > 0
+        else None
+    )
     pending_approval_since: float | None = None
     total_approval_wait = 0.0
     try:
         while True:
             now_mono = time.monotonic()
+            waiting_for_yield = False
             if pending_approval_since is not None:
                 wait_limit = max(
                     float(APPROVAL_TTL_SECONDS) + 5.0 - (now_mono - pending_approval_since), 0.5
                 )
             else:
-                wait_limit = compute_deadline - now_mono
-                if wait_limit <= 0:
+                compute_wait = compute_deadline - now_mono
+                if compute_wait <= 0:
                     raise TimeoutError
-            item = await asyncio.wait_for(queue.get(), timeout=wait_limit)
+                wait_limit = compute_wait
+                if yield_deadline is not None:
+                    yield_wait = max(yield_deadline - now_mono, 0.001)
+                    if yield_wait < compute_wait:
+                        wait_limit = yield_wait
+                        waiting_for_yield = True
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=wait_limit)
+            except TimeoutError:
+                if waiting_for_yield and yield_detach is not None:
+                    elapsed_ms = int((time.monotonic() - started_mono) * 1000)
+                    detached_res = await yield_detach(tuple(calls), elapsed_ms, last_action_summary)
+                    if detached_res is not None and detached_res.detached:
+                        if yield_result_out is not None:
+                            yield_result_out[0] = detached_res
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        return
+                    yield_deadline = None
+                    continue
+                raise
             if pending_approval_since is not None:
                 waited = max(0.0, time.monotonic() - pending_approval_since)
                 total_approval_wait += waited
                 compute_deadline += waited
+                if yield_deadline is not None:
+                    yield_deadline += waited
                 pending_approval_since = None
             if item is None:
                 break

@@ -285,3 +285,107 @@ class HostDefaultModel(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class JobWatchModel(Base):
+    """Durable watch subscription for `WAITING_WATCH` autonomous jobs (`0023`)."""
+
+    __tablename__ = "job_watches"
+
+    watch_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomous_jobs.job_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("owners.owner_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    host_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("hosts.host_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    mode: Mapped[str] = mapped_column(String(24), nullable=False)
+    signals: Mapped[list[str]] = mapped_column(
+        sa.JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    target_spec: Mapped[dict[str, Any]] = mapped_column(
+        sa.JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    done_criteria: Mapped[str] = mapped_column(String(240), nullable=False)
+    continuation_mode: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="report_and_ask", server_default="report_and_ask"
+    )
+    quiescence_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=8, server_default="8"
+    )
+    max_wait_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=300, server_default="300"
+    )
+    max_wake_checks: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=8, server_default="8"
+    )
+    wake_checks_used: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    status: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    last_event_kind: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class WakeInboxItemModel(Base):
+    """Durable non-intrusive wake inbox notification (`0023`, Consent U5 redacted)."""
+
+    __tablename__ = "wake_inbox_items"
+
+    item_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    owner_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("owners.owner_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    pet_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomous_jobs.job_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    host_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("hosts.host_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    suggested_actions: Mapped[list[str]] = mapped_column(
+        sa.JSON().with_variant(postgresql.JSONB, "postgresql"),
+        nullable=False,
+        default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    gesture_cue: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )

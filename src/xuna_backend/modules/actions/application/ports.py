@@ -261,7 +261,9 @@ class HabitRepository(Protocol):
     async def delete_default(self, owner_id: uuid.UUID, pet_id: str, scope_key: str) -> bool: ...
 
 
-# Re-export from domain.ports for application-layer consumers (Wave D)
-from xuna_backend.modules.actions.domain.ports import (  # noqa: E402
+# Re-export from domain.ports for application-layer consumers (Wave D / AW-M2)
+from xuna_backend.modules.actions.domain.ports import (  # noqa: E402, I001
     AutonomousJobRepository as AutonomousJobRepository,
+    JobWatchRepository as JobWatchRepository,
+    WakeInboxRepository as WakeInboxRepository,
 )

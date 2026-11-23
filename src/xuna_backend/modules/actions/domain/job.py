@@ -9,6 +9,11 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
+from xuna_backend.modules.actions.domain.watch import (
+    WakeInboxKind,
+    WakeSuggestedAction,
+    WatchGestureCue,
+)
 from xuna_backend.modules.hosts.domain.entities import HostId
 
 
@@ -19,6 +24,7 @@ class AutonomousJobState(StrEnum):
     RUNNING = "running"
     AWAITING_R3_CHECKPOINT = "awaiting_r3_checkpoint"
     WAITING_WAKE = "waiting_wake"
+    WAITING_WATCH = "waiting_watch"
     PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -43,6 +49,7 @@ _VALID_TRANSITIONS: dict[AutonomousJobState, set[AutonomousJobState]] = {
     AutonomousJobState.RUNNING: {
         AutonomousJobState.AWAITING_R3_CHECKPOINT,
         AutonomousJobState.WAITING_WAKE,
+        AutonomousJobState.WAITING_WATCH,
         AutonomousJobState.PAUSED,
         AutonomousJobState.COMPLETED,
         AutonomousJobState.FAILED,
@@ -60,8 +67,15 @@ _VALID_TRANSITIONS: dict[AutonomousJobState, set[AutonomousJobState]] = {
         AutonomousJobState.CANCELLED,
         AutonomousJobState.FAILED,
     },
+    AutonomousJobState.WAITING_WATCH: {
+        AutonomousJobState.RUNNING,
+        AutonomousJobState.PAUSED,
+        AutonomousJobState.CANCELLED,
+        AutonomousJobState.FAILED,
+    },
     AutonomousJobState.PAUSED: {
         AutonomousJobState.RUNNING,
+        AutonomousJobState.WAITING_WATCH,
         AutonomousJobState.CANCELLED,
     },
     AutonomousJobState.COMPLETED: set(),
@@ -125,16 +139,40 @@ class SubGoal:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingWakeInboxItem:
+    """Deferred Wake Inbox item emitted strictly after job state is persisted."""
+
+    owner_id: uuid.UUID
+    pet_id: str
+    kind: WakeInboxKind
+    title: str
+    summary: str
+    job_id: uuid.UUID | None = None
+    host_id: HostId | None = None
+    suggested_actions: tuple[WakeSuggestedAction, ...] = ()
+    gesture_cue: WatchGestureCue | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class JobStepOutcome:
     """Outcome of executing a single autonomous step."""
 
-    kind: Literal["progress", "await_r3", "waiting_wake", "completed", "failed"]
+    kind: Literal[
+        "progress",
+        "await_r3",
+        "waiting_wake",
+        "waiting_watch",
+        "paused",
+        "completed",
+        "failed",
+    ]
     sub_goals: tuple[SubGoal, ...] | None = None
     active_sub_goal_index: int | None = None
     checkpoint_data: dict[str, Any] | None = None
     pending_approval_id: uuid.UUID | None = None
     error_message: str | None = None
     stop_reason: str | None = None
+    pending_wake_inbox: PendingWakeInboxItem | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +208,7 @@ class AutonomousJob:
             AutonomousJobState.RUNNING,
             AutonomousJobState.AWAITING_R3_CHECKPOINT,
             AutonomousJobState.WAITING_WAKE,
+            AutonomousJobState.WAITING_WATCH,
             AutonomousJobState.PAUSED,
         }
 

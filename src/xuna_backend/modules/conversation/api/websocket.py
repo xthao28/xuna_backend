@@ -11,7 +11,7 @@ import contextlib
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -39,6 +39,12 @@ from xuna_backend.modules.actions.application.orchestrator import (
     EventSink,
     Orchestrator,
 )
+from xuna_backend.modules.actions.application.yield_detach import (
+    DEFAULT_YIELD_MS,
+    YieldDetachRequest,
+    YieldDetachResult,
+    YieldDetachService,
+)
 from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
@@ -50,6 +56,7 @@ from xuna_backend.modules.actions.domain.entities import (
     HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
+from xuna_backend.modules.actions.domain.watch import TurnDetachedEvent
 from xuna_backend.modules.cognition.application.ports import TextGenerator
 from xuna_backend.modules.cognition.domain.language_detector import detect_text_language
 from xuna_backend.modules.cognition.domain.types import (
@@ -99,6 +106,7 @@ from xuna_backend.modules.conversation.application.turn_preparation import (
     prepare_turn,
 )
 from xuna_backend.modules.conversation.application.voice_session import (
+    SessionState,
     VoiceSession,
     VoiceSessionError,
 )
@@ -420,6 +428,34 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
 
     ws_hub = getattr(app.state, "host_session_hub", None)
     ws_focus_unsub: Callable[[], None] | None = None
+    ws_wake_unsub: Callable[[], None] | None = None
+    pending_wake_items: list[dict[str, Any]] = []
+    wake_flush_tasks: set[asyncio.Task[None]] = set()
+    wake_send_lock = asyncio.Lock()
+
+    def _turn_is_busy() -> bool:
+        return session.state != SessionState.IDLE or (
+            active_turn_task is not None and not active_turn_task.done()
+        )
+
+    async def _flush_pending_wake_items() -> None:
+        async with wake_send_lock:
+            while not ws_closing and not _turn_is_busy() and pending_wake_items:
+                next_item = pending_wake_items.pop(0)
+                with contextlib.suppress(Exception):
+                    await websocket.send_json({"type": "wake_inbox_item", **next_item})
+
+    async def _on_ws_wake_inbox(payload: dict[str, Any]) -> None:
+        if ws_closing:
+            return
+        pending_wake_items.append(payload)
+        if not _turn_is_busy():
+            await _flush_pending_wake_items()
+
+    wake_svc = getattr(app.state, "wake_inbox_service", None)
+    wake_sub_fn = getattr(wake_svc, "subscribe", None) if wake_svc is not None else None
+    if callable(wake_sub_fn):
+        ws_wake_unsub = wake_sub_fn(owner.owner_id, _on_ws_wake_inbox)
 
     async def _on_ws_focus(notice: HostFocusChangedNotice) -> None:
         if not ws_closing:
@@ -795,6 +831,42 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         _pin: HostId | None = turn_pinned_host_id,
                         _eff_loc: Locale = eff_locale,
                     ) -> None:
+                        yield_svc: YieldDetachService | None = getattr(
+                            app.state, "yield_detach_service", None
+                        )
+                        ws_yield_cb: (
+                            Callable[
+                                [tuple[ToolCall, ...], int, str | None],
+                                Awaitable[YieldDetachResult | None],
+                            ]
+                            | None
+                        ) = None
+                        if yield_svc is not None and _orch is not None:
+                            _y_svc = yield_svc
+                            _y_goal = target_text
+                            _y_pin = _pin
+                            _y_loc = _eff_loc
+
+                            async def _ws_yield_detach(
+                                calls: tuple[ToolCall, ...],
+                                elapsed_ms: int,
+                                last_summary: str | None,
+                            ) -> YieldDetachResult | None:
+                                return await _y_svc.try_detach(
+                                    YieldDetachRequest(
+                                        owner_id=owner.owner_id,
+                                        pet_id=pet_id.value,
+                                        host_id=_y_pin,
+                                        goal=_y_goal,
+                                        tool_calls=calls,
+                                        elapsed_ms=elapsed_ms,
+                                        locale=_y_loc,
+                                        last_action_summary=last_summary,
+                                        request_id=session_id,
+                                    )
+                                )
+
+                            ws_yield_cb = _ws_yield_detach
                         signals = {
                             "signals": list(
                                 conversation_signals(target_text, len(prep.context.history))
@@ -874,6 +946,8 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                     code_generator=_code_gen,
                                     code_timeout_s=_code_timeout_s,
                                     cu_cleanup=_cu_cleanup,
+                                    yield_detach=ws_yield_cb,
+                                    yield_ms=DEFAULT_YIELD_MS,
                                 )
                             elif _mesh.pre_route_target_required is not None:
                                 ws_req = build_request(
@@ -895,6 +969,8 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                     code_generator=_code_gen,
                                     code_timeout_s=_code_timeout_s,
                                     cu_cleanup=_cu_cleanup,
+                                    yield_detach=ws_yield_cb,
+                                    yield_ms=DEFAULT_YIELD_MS,
                                 )
                                 src_events = stream_with_target_fallback(
                                     raw_ev, _mesh.target_required_event
@@ -915,10 +991,16 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                                 cu_cleanup=_cu_cleanup,
                                 host_roster=_roster if tools_arg else None,
                                 source_events=src_events,
+                                yield_detach=ws_yield_cb,
+                                yield_ms=DEFAULT_YIELD_MS,
                             ):
                                 if isinstance(event, GestureChosen):
                                     await websocket.send_json(
                                         {"type": "gesture", "name": event.gesture.value}
+                                    )
+                                elif isinstance(event, TurnDetachedEvent):
+                                    await websocket.send_json(
+                                        {"type": "autonomous_job", **event.wire_payload()}
                                     )
                                 elif isinstance(event, ActionPendingEvent):
                                     await websocket.send_json(
@@ -1053,6 +1135,14 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                         )
                     )
 
+                    def _on_turn_done(_t: asyncio.Task[None]) -> None:
+                        if not _is_closing():
+                            ft = asyncio.create_task(_flush_pending_wake_items())
+                            wake_flush_tasks.add(ft)
+                            ft.add_done_callback(wake_flush_tasks.discard)
+
+                    active_turn_task.add_done_callback(_on_turn_done)
+
                 elif msg_type == "action.decide":
                     raw_aid = payload.get("approvalId")
                     raw_dec = payload.get("decision")
@@ -1138,6 +1228,7 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
                 elif msg_type == "abort":
                     await _cancel_active_turn()
                     session.abort(str(payload.get("reason", "cancel")))
+                    await _flush_pending_wake_items()
 
                 elif msg_type == "bye":
                     ws_closing = True
@@ -1163,6 +1254,12 @@ async def voice_websocket_endpoint(websocket: WebSocket) -> None:
         if callable(ws_focus_unsub):
             with contextlib.suppress(BaseException):
                 ws_focus_unsub()
+        if callable(ws_wake_unsub):
+            with contextlib.suppress(BaseException):
+                ws_wake_unsub()
+        for ft in list(wake_flush_tasks):
+            if not ft.done():
+                ft.cancel()
         was_turn_running = active_turn_task is not None and not active_turn_task.done()
         await _cancel_active_turn()
         if was_turn_running and active_turn_orch is not None:

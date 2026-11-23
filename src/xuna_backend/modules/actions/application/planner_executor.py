@@ -22,6 +22,7 @@ from xuna_backend.modules.actions.domain.job import (
     SubGoal,
     SubGoalStatus,
 )
+from xuna_backend.modules.actions.domain.redaction import sanitize_wake_text
 
 _logger = logging.getLogger(__name__)
 
@@ -278,12 +279,13 @@ class JobPlannerExecutor:
 
         if not is_tool_ok:
             # Rule H1 Violation Prevention: Tool failed!
-            error_detail = (
+            raw_error_detail = (
                 tool_result.get("error")
                 or tool_result.get("errorMessage")
                 or tool_result.get("errorCode")
                 or f"tool returned status '{tool_status or 'unknown'}'"
             )
+            error_detail = sanitize_wake_text(str(raw_error_detail)) or "tool execution failed"
             failed_sg = SubGoal(
                 id=current_sg.id,
                 title=current_sg.title,
@@ -333,7 +335,10 @@ class JobPlannerExecutor:
 
         if mark_sub_goal_complete:
             # Honestly complete this sub-goal
-            effective_summary = outcome_summary or f"Tool '{tool_name}' executed successfully"
+            raw_summary = outcome_summary or f"Tool '{tool_name}' executed successfully"
+            effective_summary = (
+                sanitize_wake_text(raw_summary) or f"Tool '{tool_name}' executed successfully"
+            )
             completed_sg = SubGoal(
                 id=current_sg.id,
                 title=current_sg.title,
@@ -505,9 +510,13 @@ class JobPlannerExecutor:
                 stop_reason="no_tool_executed",
             )
 
-        effective_summary = (
+        raw_summary = (
             outcome_summary
             or current_sg.result_summary
+            or f"Completed '{current_sg.title}' ({current_sg.tool_call_count} verified tool calls)"
+        )
+        effective_summary = (
+            sanitize_wake_text(raw_summary)
             or f"Completed '{current_sg.title}' ({current_sg.tool_call_count} verified tool calls)"
         )
         completed_sg = SubGoal(

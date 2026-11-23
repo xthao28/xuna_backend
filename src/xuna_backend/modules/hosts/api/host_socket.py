@@ -53,6 +53,8 @@ from xuna_backend.modules.hosts.application.xtp_frames import (
     ParsedRpcResponse,
     ParsedStop,
     ParsedToolsListChanged,
+    ParsedWatchEvent,
+    WatchEventParamsModel,
     challenge_notification_frame,
     enroll_pending_notification_frame,
     enrolled_notification_frame,
@@ -304,133 +306,174 @@ async def _serve_session(
         if phone_keys:
             await websocket.send_text(lan_peer_notification_frame(phone_keys))
 
-    while True:
-        raw = await _receive_text(
-            websocket, limits.idle_timeout_s, limits.max_frame_bytes, IDLE_TIMEOUT
-        )
-        msg = parse_agent_frame(raw, max_bytes=limits.max_frame_bytes)
-
-        if isinstance(msg, ParsedPing):
-            async with app.state.database.sessions() as db:
-                repos = _Repos(app, db)
-                close = await touch_host_session(repos.hosts, host.host_id, datetime.now(UTC))
-                await db.commit()
-            if close is not None:
-                raise HostSessionRejected(close)
-            await websocket.send_text(ping_response_frame(msg.request_id))
-            continue
-
-        if isinstance(msg, ParsedToolsListChanged):
-            req_id = f"tools_list_{abs(next_manifest_req_id)}"
-            next_manifest_req_id -= 1
-            pending_manifest_ids.add(req_id)
-            await websocket.send_text(rpc_request_frame(req_id, "tools/list", {}))
-            continue
-
-        if isinstance(msg, ParsedProgress):
-            continue
-
-        if isinstance(msg, ParsedPresence):
-            presence = HostPresence(
-                idle_seconds=msg.params.idleSeconds,
-                screen_locked=msg.params.screenLocked,
-                media_playing=msg.params.mediaPlaying,
-                updated_at=msg.params.parsed_updated_at(),
-                battery_percent=msg.params.batteryPercent,
-                is_charging=msg.params.isCharging,
-                subnet_hash=msg.params.subnetHash,
-                foreground_app_id=msg.params.foregroundAppId,
+    pending_watch_tasks: set[asyncio.Task[None]] = set()
+    try:
+        while True:
+            raw = await _receive_text(
+                websocket, limits.idle_timeout_s, limits.max_frame_bytes, IDLE_TIMEOUT
             )
-            hub.update_presence(str(host.host_id), presence)
-            continue
+            msg = parse_agent_frame(raw, max_bytes=limits.max_frame_bytes)
 
-        if isinstance(msg, ParsedResources):
-            resources = HostResources(
-                installed_apps=tuple(msg.params.installedApps),
-                workspaces=tuple(msg.params.workspaces),
-                updated_at=datetime.now(UTC),
-                capabilities_version=msg.params.capabilitiesVersion,
-            )
-            hub.update_resources(str(host.host_id), resources)
-            continue
-
-        if isinstance(msg, ParsedFocusRequest):
-            now_utc = datetime.now(UTC)
-            async with app.state.database.sessions() as db:
-                repos = _Repos(app, db)
-                fresh_host = await repos.hosts.get_host(host.host_id)
-            effective_host = fresh_host or host
-            focus_state = hub.set_focus_state(
-                effective_host.owner_id,
-                focused_host_id=effective_host.host_id,
-                follow_me=msg.params.followMe,
-                source=msg.params.source,
-                now=now_utc,
-            )
-            notice = HostFocusChangedNotice(
-                owner_id=effective_host.owner_id,
-                host_id=effective_host.host_id,
-                alias=effective_host.alias.value,
-                platform=effective_host.platform.value,
-                follow_me=focus_state.follow_me,
-                source=msg.params.source,
-                updated_at=focus_state.updated_at,
-            )
-            await hub.publish_focus_changed(notice)
-            on_focus = getattr(app.state, "on_host_focus_changed", None)
-            if callable(on_focus):
-                with contextlib.suppress(Exception):
-                    maybe_awaitable = on_focus(notice)
-                    if inspect.isawaitable(maybe_awaitable):
-                        await maybe_awaitable
-            continue
-
-        if isinstance(msg, ParsedLanPeer):
-            async with app.state.database.sessions() as db:
-                repos = _Repos(app, db)
-                await update_host_lan_peer(
-                    repos.hosts,
-                    host.host_id,
-                    msg.params.enabled,
-                    msg.params.certFingerprint,
-                    msg.params.port,
-                    datetime.now(UTC),
-                )
-                await db.commit()
-            continue
-
-        if isinstance(msg, ParsedStop):
-            logger.info("host stop notification reason=%s", msg.params.reason)
-            if hasattr(app.state, "approval_broker"):
-                from xuna_backend.modules.actions.api.routes import build_stream_orchestrator
-
-                orch = build_stream_orchestrator(app.state)
-                await orch.emergency_stop(
-                    owner_id=host.owner_id,
-                    reason=msg.params.reason,
-                )
-            continue
-
-        if isinstance(msg, ParsedRpcResponse):
-            if msg.request_id in pending_manifest_ids:
-                pending_manifest_ids.discard(msg.request_id)
-                try:
-                    tools = parse_tools_list_result(msg.result)
-                except ValueError as error:
-                    raise HostSessionRejected(UNSUPPORTED_PROTOCOL) from error
+            if isinstance(msg, ParsedPing):
                 async with app.state.database.sessions() as db:
                     repos = _Repos(app, db)
-                    await record_manifest(repos.hosts, host.host_id, tools, datetime.now(UTC))
+                    close = await touch_host_session(repos.hosts, host.host_id, datetime.now(UTC))
                     await db.commit()
-            hub.on_response(str(host.host_id), msg.request_id, msg.result)
-            continue
+                if close is not None:
+                    raise HostSessionRejected(close)
+                await websocket.send_text(ping_response_frame(msg.request_id))
+                continue
 
-        if isinstance(msg, ParsedRpcError):
-            hub.on_error_response(str(host.host_id), msg.request_id, msg.code, msg.message)
-            continue
+            if isinstance(msg, ParsedToolsListChanged):
+                req_id = f"tools_list_{abs(next_manifest_req_id)}"
+                next_manifest_req_id -= 1
+                pending_manifest_ids.add(req_id)
+                await websocket.send_text(rpc_request_frame(req_id, "tools/list", {}))
+                continue
 
-        # Any handshake frame (`xuna/hello`, `xuna/proof`) received after `ready` is out of order.
-        raise HostSessionRejected(UNAUTHORIZED)
+            if isinstance(msg, ParsedProgress):
+                continue
+
+            if isinstance(msg, ParsedPresence):
+                presence = HostPresence(
+                    idle_seconds=msg.params.idleSeconds,
+                    screen_locked=msg.params.screenLocked,
+                    media_playing=msg.params.mediaPlaying,
+                    updated_at=msg.params.parsed_updated_at(),
+                    battery_percent=msg.params.batteryPercent,
+                    is_charging=msg.params.isCharging,
+                    subnet_hash=msg.params.subnetHash,
+                    foreground_app_id=msg.params.foregroundAppId,
+                )
+                hub.update_presence(str(host.host_id), presence)
+                continue
+
+            if isinstance(msg, ParsedResources):
+                resources = HostResources(
+                    installed_apps=tuple(msg.params.installedApps),
+                    workspaces=tuple(msg.params.workspaces),
+                    updated_at=datetime.now(UTC),
+                    capabilities_version=msg.params.capabilitiesVersion,
+                )
+                hub.update_resources(str(host.host_id), resources)
+                continue
+
+            if isinstance(msg, ParsedFocusRequest):
+                now_utc = datetime.now(UTC)
+                async with app.state.database.sessions() as db:
+                    repos = _Repos(app, db)
+                    fresh_host = await repos.hosts.get_host(host.host_id)
+                effective_host = fresh_host or host
+                focus_state = hub.set_focus_state(
+                    effective_host.owner_id,
+                    focused_host_id=effective_host.host_id,
+                    follow_me=msg.params.followMe,
+                    source=msg.params.source,
+                    now=now_utc,
+                )
+                notice = HostFocusChangedNotice(
+                    owner_id=effective_host.owner_id,
+                    host_id=effective_host.host_id,
+                    alias=effective_host.alias.value,
+                    platform=effective_host.platform.value,
+                    follow_me=focus_state.follow_me,
+                    source=msg.params.source,
+                    updated_at=focus_state.updated_at,
+                )
+                await hub.publish_focus_changed(notice)
+                on_focus = getattr(app.state, "on_host_focus_changed", None)
+                if callable(on_focus):
+                    with contextlib.suppress(Exception):
+                        maybe_awaitable = on_focus(notice)
+                        if inspect.isawaitable(maybe_awaitable):
+                            await maybe_awaitable
+                continue
+
+            if isinstance(msg, ParsedLanPeer):
+                async with app.state.database.sessions() as db:
+                    repos = _Repos(app, db)
+                    await update_host_lan_peer(
+                        repos.hosts,
+                        host.host_id,
+                        msg.params.enabled,
+                        msg.params.certFingerprint,
+                        msg.params.port,
+                        datetime.now(UTC),
+                    )
+                    await db.commit()
+                continue
+
+            if isinstance(msg, ParsedWatchEvent):
+                on_watch_event = getattr(app.state, "on_host_watch_event", None)
+                if callable(on_watch_event):
+                    watch_params = msg.params
+
+                    async def _dispatch_watch_event(
+                        handler: Any = on_watch_event,
+                        owner_id: Any = host.owner_id,
+                        hid: HostId = host.host_id,
+                        params: WatchEventParamsModel = watch_params,
+                    ) -> None:
+                        maybe = handler(owner_id, hid, params)
+                        if inspect.isawaitable(maybe):
+                            await maybe
+
+                    watch_task = asyncio.create_task(_dispatch_watch_event())
+                    pending_watch_tasks.add(watch_task)
+
+                    def _on_watch_task_done(t: asyncio.Task[None]) -> None:
+                        pending_watch_tasks.discard(t)
+                        if not t.cancelled() and t.exception() is not None:
+                            logger.warning("watch_event_handler_failed", exc_info=t.exception())
+
+                    watch_task.add_done_callback(_on_watch_task_done)
+                continue
+
+            if isinstance(msg, ParsedStop):
+                logger.info("host stop notification reason=%s", msg.params.reason)
+                if hasattr(app.state, "approval_broker"):
+                    from xuna_backend.modules.actions.api.routes import build_stream_orchestrator
+
+                    orch = build_stream_orchestrator(app.state)
+                    await orch.emergency_stop(
+                        owner_id=host.owner_id,
+                        reason=msg.params.reason,
+                    )
+                continue
+
+            if isinstance(msg, ParsedRpcResponse):
+                if msg.request_id in pending_manifest_ids:
+                    pending_manifest_ids.discard(msg.request_id)
+                    try:
+                        tools = parse_tools_list_result(msg.result)
+                    except ValueError as error:
+                        raise HostSessionRejected(UNSUPPORTED_PROTOCOL) from error
+                    async with app.state.database.sessions() as db:
+                        repos = _Repos(app, db)
+                        await record_manifest(repos.hosts, host.host_id, tools, datetime.now(UTC))
+                        await db.commit()
+                hub.on_response(str(host.host_id), msg.request_id, msg.result)
+                continue
+
+            if isinstance(msg, ParsedRpcError):
+                hub.on_error_response(str(host.host_id), msg.request_id, msg.code, msg.message)
+                continue
+
+            # Any handshake frame (`xuna/hello`, `xuna/proof`) received after `ready`
+            # is out of order.
+            raise HostSessionRejected(UNAUTHORIZED)
+    except asyncio.CancelledError:
+        for wt in list(pending_watch_tasks):
+            if not wt.done():
+                wt.cancel()
+        raise
+    finally:
+        if pending_watch_tasks:
+            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(
+                    asyncio.gather(*list(pending_watch_tasks), return_exceptions=True),
+                    timeout=5.0,
+                )
 
 
 @router.websocket("/hosts/connect")

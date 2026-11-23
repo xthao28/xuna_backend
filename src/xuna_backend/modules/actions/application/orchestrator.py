@@ -669,6 +669,8 @@ class Orchestrator:
         *,
         app_id: object = None,
         window_title: object = None,
+        pid: object = None,
+        window_id: object = None,
         clear_title_if_app_changed: bool = False,
     ) -> None:
         if state is None or not state.active:
@@ -680,14 +682,27 @@ class Orchestrator:
             if cleaned_app:
                 next_app = cleaned_app
                 state.last_app_id = cleaned_app
-        if isinstance(window_title, str) and window_title.strip():
-            state.last_window_title = window_title
-        elif (
+        app_changed = (
             clear_title_if_app_changed
             and next_app is not None
             and (prev_app or "").lower() != next_app.lower()
-        ):
+        )
+        if isinstance(window_title, str) and window_title.strip():
+            state.last_window_title = window_title
+        elif app_changed:
             state.last_window_title = None
+        if isinstance(pid, int) and not isinstance(pid, bool) and 1 <= pid <= 2_147_483_647:
+            state.last_window["pid"] = str(pid)
+        elif app_changed:
+            state.last_window.pop("pid", None)
+        if (
+            isinstance(window_id, int)
+            and not isinstance(window_id, bool)
+            and 0 <= window_id <= 2_147_483_647
+        ):
+            state.last_window["windowId"] = str(window_id)
+        elif app_changed:
+            state.last_window.pop("windowId", None)
 
     async def active_cu_session_prompt_note(
         self,
@@ -1079,6 +1094,8 @@ class Orchestrator:
                 new_state,
                 app_id=structured_content.get("foregroundApp"),
                 window_title=structured_content.get("windowTitle"),
+                pid=structured_content.get("pid"),
+                window_id=structured_content.get("windowId"),
             )
             await self._cu_session_store.start(new_state, now)
             return
@@ -1111,6 +1128,8 @@ class Orchestrator:
                 active_cu,
                 app_id=structured_content.get("appName"),
                 window_title=structured_content.get("windowTitle"),
+                pid=structured_content.get("pid"),
+                window_id=structured_content.get("windowId"),
                 clear_title_if_app_changed=True,
             )
             return
@@ -1120,6 +1139,8 @@ class Orchestrator:
                 active_cu,
                 app_id=structured_content.get("id") or clean_args.get("id"),
                 window_title=structured_content.get("windowTitle"),
+                pid=structured_content.get("pid"),
+                window_id=structured_content.get("windowId"),
                 clear_title_if_app_changed=True,
             )
             return
@@ -1137,6 +1158,8 @@ class Orchestrator:
                 active_cu,
                 app_id=structured_content.get("appId"),
                 window_title=structured_content.get("windowTitle"),
+                pid=structured_content.get("pid"),
+                window_id=structured_content.get("windowId"),
                 clear_title_if_app_changed=True,
             )
             return
@@ -1155,6 +1178,8 @@ class Orchestrator:
                 active_cu,
                 app_id=structured_content.get("appId"),
                 window_title=structured_content.get("windowTitle"),
+                pid=structured_content.get("pid"),
+                window_id=structured_content.get("windowId"),
                 clear_title_if_app_changed=True,
             )
             return

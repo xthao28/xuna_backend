@@ -1,0 +1,607 @@
+{
+  "schemaVersion": 1,
+  "frames": {
+    "watchRegisterCompositeRequest": {
+      "jsonrpc": "2.0",
+      "id": 701,
+      "method": "xuna/watchRegister",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "mode": "composite",
+        "signals": [
+          "ui_quiescence",
+          "process_idle"
+        ],
+        "target": {
+          "pid": 48210,
+          "windowId": 1042,
+          "appId": "editor",
+          "workspaceAlias": "xuna_pet"
+        },
+        "quiescenceSeconds": 8,
+        "minWaitSeconds": 3,
+        "maxWaitSeconds": 300,
+        "requireInitialChange": true,
+        "releaseFocus": true
+      }
+    },
+    "watchRegisterUiChangeRequest": {
+      "jsonrpc": "2.0",
+      "id": 702,
+      "method": "xuna/watchRegister",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111112",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "mode": "ui_change",
+        "target": {
+          "pid": 48210,
+          "windowId": 1042,
+          "appId": "editor"
+        },
+        "quiescenceSeconds": 2,
+        "minWaitSeconds": 0,
+        "maxWaitSeconds": 120,
+        "requireInitialChange": true,
+        "releaseFocus": true
+      }
+    },
+    "watchRegisterFsQuiescenceRequest": {
+      "jsonrpc": "2.0",
+      "id": 703,
+      "method": "xuna/watchRegister",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111113",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "mode": "fs_quiescence",
+        "target": {
+          "workspaceAlias": "xuna_pet"
+        },
+        "quiescenceSeconds": 5,
+        "minWaitSeconds": 0,
+        "maxWaitSeconds": 600,
+        "requireInitialChange": false,
+        "releaseFocus": true
+      }
+    },
+    "watchRegisterCdpIdleRequest": {
+      "jsonrpc": "2.0",
+      "id": 704,
+      "method": "xuna/watchRegister",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111114",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "mode": "cdp_idle",
+        "target": {
+          "appId": "browser_app",
+          "tabId": "tab_9f3c1a"
+        },
+        "quiescenceSeconds": 4,
+        "minWaitSeconds": 1,
+        "maxWaitSeconds": 180,
+        "requireInitialChange": true,
+        "releaseFocus": true
+      }
+    },
+    "watchRegisterTimerRequest": {
+      "jsonrpc": "2.0",
+      "id": 705,
+      "method": "xuna/watchRegister",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111115",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "mode": "timer",
+        "target": {},
+        "quiescenceSeconds": 2,
+        "minWaitSeconds": 0,
+        "maxWaitSeconds": 5,
+        "requireInitialChange": false,
+        "releaseFocus": true
+      }
+    },
+    "watchRegisterProtocolAsyncRequest": {
+      "jsonrpc": "2.0",
+      "id": 706,
+      "method": "xuna/watchRegister",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111116",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "mode": "protocol_async",
+        "target": {
+          "mcpServerId": "build_mcp",
+          "protocolTaskId": "task_01"
+        },
+        "quiescenceSeconds": 5,
+        "minWaitSeconds": 0,
+        "maxWaitSeconds": 900,
+        "requireInitialChange": false,
+        "releaseFocus": true
+      }
+    },
+    "watchRegisterAcceptedResponse": {
+      "jsonrpc": "2.0",
+      "id": 701,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": true,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "activeSignals": [
+          "ui_quiescence",
+          "process_idle"
+        ],
+        "eventDriven": true,
+        "fallbackUsed": false
+      }
+    },
+    "watchRegisterRejectedTargetNotFoundResponse": {
+      "jsonrpc": "2.0",
+      "id": 701,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": false,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "errorCode": "target_not_found"
+      }
+    },
+    "watchRegisterRejectedWorkspaceNotFoundResponse": {
+      "jsonrpc": "2.0",
+      "id": 701,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": false,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "errorCode": "workspace_not_found"
+      }
+    },
+    "watchRegisterRejectedWatchLimitReachedResponse": {
+      "jsonrpc": "2.0",
+      "id": 701,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": false,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "errorCode": "watch_limit_reached"
+      }
+    },
+    "watchRegisterRejectedNeedsPermissionResponse": {
+      "jsonrpc": "2.0",
+      "id": 701,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": false,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "errorCode": "needs_permission"
+      }
+    },
+    "watchRegisterRejectedPolicyBlockedResponse": {
+      "jsonrpc": "2.0",
+      "id": 701,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": false,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "errorCode": "policy_blocked"
+      }
+    },
+    "watchRegisterRejectedWatchUnsupportedResponse": {
+      "jsonrpc": "2.0",
+      "id": 701,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": false,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "errorCode": "watch_unsupported"
+      }
+    },
+    "watchRegisterRejectedStoppedResponse": {
+      "jsonrpc": "2.0",
+      "id": 701,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": false,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "errorCode": "stopped"
+      }
+    },
+    "watchRegisterRejectedInvalidArgsResponse": {
+      "jsonrpc": "2.0",
+      "id": 701,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": false,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "errorCode": "invalid_args"
+      }
+    },
+    "watchCancelTargetedRequest": {
+      "jsonrpc": "2.0",
+      "id": 710,
+      "method": "xuna/watchCancel",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "reason": "owner_cancel"
+      }
+    },
+    "watchCancelByJobIdRequest": {
+      "jsonrpc": "2.0",
+      "id": 711,
+      "method": "xuna/watchCancel",
+      "params": {
+        "schemaVersion": 1,
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "reason": "job_ended"
+      }
+    },
+    "watchCancelEstopRequest": {
+      "jsonrpc": "2.0",
+      "id": 712,
+      "method": "xuna/watchCancel",
+      "params": {
+        "schemaVersion": 1,
+        "reason": "estop"
+      }
+    },
+    "watchCancelResponse": {
+      "jsonrpc": "2.0",
+      "id": 710,
+      "result": {
+        "schemaVersion": 1,
+        "cancelledCount": 1
+      }
+    },
+    "watchEventSettledNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/watchEvent",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "kind": "settled",
+        "observedSignals": [
+          "ui_quiescence",
+          "process_idle"
+        ],
+        "elapsedSeconds": 47,
+        "changeCount": 14,
+        "digestChanged": true,
+        "occurredAt": "2026-11-22T12:45:00Z"
+      }
+    },
+    "watchEventChangedNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/watchEvent",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111112",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "kind": "changed",
+        "observedSignals": [
+          "ui_change"
+        ],
+        "elapsedSeconds": 12,
+        "changeCount": 1,
+        "digestChanged": true,
+        "occurredAt": "2026-11-22T12:45:12Z"
+      }
+    },
+    "watchEventTimeoutNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/watchEvent",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "kind": "timeout",
+        "observedSignals": [
+          "ui_quiescence"
+        ],
+        "elapsedSeconds": 300,
+        "changeCount": 9,
+        "digestChanged": true,
+        "occurredAt": "2026-11-22T12:50:00Z"
+      }
+    },
+    "watchEventTargetLostNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/watchEvent",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "kind": "target_lost",
+        "observedSignals": [],
+        "elapsedSeconds": 18,
+        "changeCount": 2,
+        "digestChanged": false,
+        "occurredAt": "2026-11-22T12:45:18Z"
+      }
+    },
+    "watchEventErrorNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/watchEvent",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111111",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "kind": "error",
+        "observedSignals": [],
+        "elapsedSeconds": 5,
+        "changeCount": 0,
+        "digestChanged": false,
+        "occurredAt": "2026-11-22T12:45:05Z",
+        "errorCode": "needs_permission"
+      }
+    }
+  },
+  "invalidFrames": {
+    "watchRegisterCompositeMissingSignals": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 720,
+        "method": "xuna/watchRegister",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "mode": "composite",
+          "target": {
+            "pid": 48210,
+            "appId": "editor"
+          },
+          "quiescenceSeconds": 8,
+          "minWaitSeconds": 0,
+          "maxWaitSeconds": 300,
+          "requireInitialChange": true,
+          "releaseFocus": true
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "composite_requires_2_to_3_signals"
+    },
+    "watchRegisterNonCompositeWithSignals": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 721,
+        "method": "xuna/watchRegister",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "mode": "timer",
+          "signals": [
+            "ui_quiescence",
+            "process_idle"
+          ],
+          "target": {},
+          "quiescenceSeconds": 2,
+          "minWaitSeconds": 0,
+          "maxWaitSeconds": 30,
+          "requireInitialChange": false,
+          "releaseFocus": true
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "signals_forbidden_when_not_composite"
+    },
+    "watchRegisterCompositeDuplicateSignals": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 722,
+        "method": "xuna/watchRegister",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "mode": "composite",
+          "signals": [
+            "ui_quiescence",
+            "ui_quiescence"
+          ],
+          "target": {
+            "pid": 48210,
+            "appId": "editor"
+          },
+          "quiescenceSeconds": 8,
+          "minWaitSeconds": 0,
+          "maxWaitSeconds": 300,
+          "requireInitialChange": true,
+          "releaseFocus": true
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "composite_signals_must_be_distinct"
+    },
+    "watchRegisterMaxWaitAbove900": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 723,
+        "method": "xuna/watchRegister",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "mode": "timer",
+          "target": {},
+          "quiescenceSeconds": 2,
+          "minWaitSeconds": 0,
+          "maxWaitSeconds": 901,
+          "requireInitialChange": false,
+          "releaseFocus": true
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "maxWaitSeconds_exceeds_900"
+    },
+    "watchRegisterMinWaitExceedsMaxWait": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 724,
+        "method": "xuna/watchRegister",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "mode": "timer",
+          "target": {},
+          "quiescenceSeconds": 2,
+          "minWaitSeconds": 30,
+          "maxWaitSeconds": 10,
+          "requireInitialChange": false,
+          "releaseFocus": true
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "minWaitSeconds_exceeds_maxWaitSeconds"
+    },
+    "watchRegisterRawPathInWorkspaceAlias": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 725,
+        "method": "xuna/watchRegister",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "mode": "fs_quiescence",
+          "target": {
+            "workspaceAlias": "/opt/work/repo"
+          },
+          "quiescenceSeconds": 5,
+          "minWaitSeconds": 0,
+          "maxWaitSeconds": 120,
+          "requireInitialChange": false,
+          "releaseFocus": true
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "raw_os_path_forbidden_in_workspaceAlias"
+    },
+    "watchRegisterExtraParam": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 726,
+        "method": "xuna/watchRegister",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "mode": "timer",
+          "target": {},
+          "quiescenceSeconds": 2,
+          "minWaitSeconds": 0,
+          "maxWaitSeconds": 30,
+          "requireInitialChange": false,
+          "releaseFocus": true,
+          "windowTitle": "secret_title"
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "additional_properties_forbidden"
+    },
+    "watchCancelMissingIdsWithoutEstop": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 727,
+        "method": "xuna/watchCancel",
+        "params": {
+          "schemaVersion": 1,
+          "reason": "owner_cancel"
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "watchId_or_jobId_required_unless_estop"
+    },
+    "watchEventWithId": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 728,
+        "method": "xuna/watchEvent",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "kind": "settled",
+          "observedSignals": [
+            "ui_quiescence"
+          ],
+          "elapsedSeconds": 10,
+          "changeCount": 1,
+          "digestChanged": true,
+          "occurredAt": "2026-11-22T12:45:00Z"
+        }
+      },
+      "expectedJsonRpcCode": -32601,
+      "reason": "notification_must_omit_id"
+    },
+    "watchEventErrorMissingErrorCode": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "method": "xuna/watchEvent",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "kind": "error",
+          "observedSignals": [],
+          "elapsedSeconds": 5,
+          "changeCount": 0,
+          "digestChanged": false,
+          "occurredAt": "2026-11-22T12:45:05Z"
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "errorCode_required_when_kind_is_error"
+    },
+    "watchEventSettledWithUnexpectedErrorCode": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "method": "xuna/watchEvent",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "kind": "settled",
+          "observedSignals": [
+            "ui_quiescence"
+          ],
+          "elapsedSeconds": 10,
+          "changeCount": 2,
+          "digestChanged": true,
+          "occurredAt": "2026-11-22T12:45:10Z",
+          "errorCode": "unexpected_code"
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "errorCode_forbidden_when_kind_not_error"
+    },
+    "watchEventNaiveTimestamp": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "method": "xuna/watchEvent",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111111",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "kind": "settled",
+          "observedSignals": [
+            "ui_quiescence"
+          ],
+          "elapsedSeconds": 10,
+          "changeCount": 2,
+          "digestChanged": true,
+          "occurredAt": "2026-11-22T12:45:00"
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "occurredAt_requires_utc_timezone"
+    }
+  }
+}

@@ -25,6 +25,7 @@ from xuna_backend.modules.actions.domain.entities import (
     HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
+from xuna_backend.modules.actions.domain.watch import TurnDetachedEvent
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
     SpeechSynthesizer,
@@ -97,6 +98,7 @@ SpokenTurnEvent = (
     | ActionResultEvent
     | ComputerUseSessionEvent
     | HostFocusChangedNotice
+    | TurnDetachedEvent
     | SpokenAudio
     | SpeechUnavailable
     | SpokenFinished

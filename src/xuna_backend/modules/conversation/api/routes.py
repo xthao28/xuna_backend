@@ -32,6 +32,12 @@ from xuna_backend.modules.actions.application.orchestrator import (
     EventSink,
     Orchestrator,
 )
+from xuna_backend.modules.actions.application.yield_detach import (
+    DEFAULT_YIELD_MS,
+    YieldDetachRequest,
+    YieldDetachResult,
+    YieldDetachService,
+)
 from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionResultEvent,
@@ -41,6 +47,7 @@ from xuna_backend.modules.actions.domain.entities import (
     HostWakeRequestEvent,
     LocalActionRequestEvent,
 )
+from xuna_backend.modules.actions.domain.watch import TurnDetachedEvent
 from xuna_backend.modules.cognition.application.ports import (
     ProviderUnavailableError,
     SpeechRecognizer,
@@ -76,6 +83,7 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     ReplyBudget,
     ToolCallRunner,
     TurnContext,
+    YieldDetachCallback,
     build_request,
     chat_turn,
 )
@@ -611,6 +619,7 @@ async def turn(
 
     tool_runner: ToolCallRunner | None = None
     cu_cleanup: CuCleanupCallback | None = None
+    yield_detach: YieldDetachCallback | None = None
 
     def _make_action_ctx(emit: EventSink) -> ActionContext:
         return ActionContext(
@@ -649,6 +658,32 @@ async def turn(
 
         tool_runner = _run_tool
         cu_cleanup = _cleanup_sse_cu
+        yield_svc: YieldDetachService | None = getattr(
+            request.app.state, "yield_detach_service", None
+        )
+        if yield_svc is not None:
+            _sse_yield_svc = yield_svc
+
+            async def _sse_yield_detach(
+                calls: tuple[ToolCall, ...],
+                elapsed_ms: int,
+                last_summary: str | None,
+            ) -> YieldDetachResult | None:
+                return await _sse_yield_svc.try_detach(
+                    YieldDetachRequest(
+                        owner_id=owner.owner_id,
+                        pet_id=pet_id,
+                        host_id=pinned_host_id,
+                        goal=mesh_prep.effective_text,
+                        tool_calls=calls,
+                        elapsed_ms=elapsed_ms,
+                        locale=chat_request.locale,
+                        last_action_summary=last_summary,
+                        request_id=request_id_str,
+                    )
+                )
+
+            yield_detach = _sse_yield_detach
 
     async def events() -> AsyncIterator[str]:
         if body.mode is not None:
@@ -679,6 +714,8 @@ async def turn(
                 code_generator=code_gen,
                 code_timeout_s=code_timeout_s,
                 cu_cleanup=cu_cleanup,
+                yield_detach=yield_detach,
+                yield_ms=DEFAULT_YIELD_MS,
             )
         else:
             raw_text_events = chat_turn(
@@ -690,6 +727,8 @@ async def turn(
                 code_generator=code_gen,
                 code_timeout_s=code_timeout_s,
                 cu_cleanup=cu_cleanup,
+                yield_detach=yield_detach,
+                yield_ms=DEFAULT_YIELD_MS,
             )
             text_events = (
                 stream_with_target_fallback(raw_text_events, mesh_prep.target_required_event)
@@ -785,6 +824,8 @@ async def turn(
                         yield _sse("action_result", act_res.wire_payload())
                     case ComputerUseSessionEvent() as cu_ev:
                         yield _sse("cu_session", session_event_payload(cu_ev))
+                    case TurnDetachedEvent() as detached:
+                        yield _sse("autonomous_job", detached.wire_payload())
                     case ToolCallRequested():
                         continue
                     case ChatFinished() as done:

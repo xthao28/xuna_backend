@@ -23,7 +23,16 @@ _ACTIVE_STATES = (
     AutonomousJobState.QUEUED.value,
     AutonomousJobState.RUNNING.value,
     AutonomousJobState.AWAITING_R3_CHECKPOINT.value,
+    AutonomousJobState.WAITING_WAKE.value,
+    AutonomousJobState.WAITING_WATCH.value,
     AutonomousJobState.PAUSED.value,
+)
+_TERMINAL_STATES = frozenset(
+    {
+        AutonomousJobState.COMPLETED.value,
+        AutonomousJobState.FAILED.value,
+        AutonomousJobState.CANCELLED.value,
+    }
 )
 
 
@@ -63,6 +72,9 @@ class InMemoryAutonomousJobStore(AutonomousJobRepository):
         self._jobs: dict[uuid.UUID, AutonomousJob] = {}
 
     async def save(self, job: AutonomousJob) -> None:
+        existing = self._jobs.get(job.job_id)
+        if existing is not None and existing.is_terminal and job.state != existing.state:
+            return
         self._jobs[job.job_id] = job
 
     async def get(self, job_id: uuid.UUID) -> AutonomousJob | None:
@@ -117,6 +129,8 @@ class SqlAutonomousJobStore(AutonomousJobRepository):
             host_uuid = job.host_id.value if isinstance(job.host_id, HostId) else job.host_id
 
             if existing is not None:
+                if existing.state in _TERMINAL_STATES and job.state.value != existing.state:
+                    return
                 existing.pet_id = job.pet_id
                 existing.host_id = host_uuid
                 existing.session_id = job.session_id
@@ -179,7 +193,10 @@ class SqlAutonomousJobStore(AutonomousJobRepository):
                 .order_by(AutonomousJobModel.updated_at.desc())
                 .limit(1)
             )
-            row = (await s.execute(stmt)).scalars().first()
+            res = await s.execute(stmt)
+            if res is None:
+                return None
+            row = res.scalars().first()
             return _row_to_entity(row) if row is not None else None
 
     async def list_for_owner(
@@ -196,7 +213,10 @@ class SqlAutonomousJobStore(AutonomousJobRepository):
             if states:
                 stmt = stmt.where(AutonomousJobModel.state.in_([st.value for st in states]))
             stmt = stmt.order_by(AutonomousJobModel.created_at.desc()).offset(offset).limit(limit)
-            rows = (await s.execute(stmt)).scalars().all()
+            res = await s.execute(stmt)
+            if res is None:
+                return []
+            rows = res.scalars().all()
             return [_row_to_entity(r) for r in rows]
 
     async def count_for_owner(
@@ -212,7 +232,10 @@ class SqlAutonomousJobStore(AutonomousJobRepository):
             )
             if states:
                 stmt = stmt.where(AutonomousJobModel.state.in_([st.value for st in states]))
-            count = (await s.execute(stmt)).scalar_one()
+            res = await s.execute(stmt)
+            if res is None:
+                return 0
+            count = res.scalar_one()
             return int(count)
 
 

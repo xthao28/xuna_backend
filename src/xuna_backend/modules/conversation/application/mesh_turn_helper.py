@@ -35,6 +35,7 @@ from xuna_backend.modules.actions.application.orchestrator import (
     EventSink,
     Orchestrator,
 )
+from xuna_backend.modules.actions.application.yield_detach import DEFAULT_YIELD_MS
 from xuna_backend.modules.actions.domain.entities import (
     ActionStreamEvent,
     ActionTargetRequiredEvent,
@@ -64,6 +65,7 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     MAX_EXPERT_INPUT_CHARS,
     CuCleanupCallback,
     TurnEvent,
+    YieldDetachCallback,
     chat_turn,
 )
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
@@ -550,6 +552,8 @@ async def execute_repair_dispatch(
     code_generator: TextGenerator | None = None,
     code_timeout_s: float | None = None,
     cu_cleanup: CuCleanupCallback | None = None,
+    yield_detach: YieldDetachCallback | None = None,
+    yield_ms: int = DEFAULT_YIELD_MS,
 ) -> AsyncIterator[TurnEvent]:
     if not outcome.replay_tool:
 
@@ -565,6 +569,8 @@ async def execute_repair_dispatch(
             code_generator=code_generator,
             code_timeout_s=code_timeout_s,
             cu_cleanup=cu_cleanup,
+            yield_detach=yield_detach,
+            yield_ms=yield_ms,
         ):
             yield ev
         return

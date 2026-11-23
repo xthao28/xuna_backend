@@ -51,7 +51,9 @@ async def test_t1_f3_01_migration_0022_schema_indexes_and_roundtrip(clean_mesh_d
     try:
         with psycopg.connect(dsn) as conn:
             rev = fetch_scalar(conn, "SELECT version_num FROM alembic_version")
-            assert rev == "0022", f"Expected Alembic head '0022', got {rev!r}"
+            assert (
+                rev is not None and int(str(rev)) >= 22
+            ), f"Expected Alembic head >= '0022', got {rev!r}"
 
             host_cols = {
                 r[0]
@@ -96,7 +98,7 @@ async def test_t1_f3_01_migration_0022_schema_indexes_and_roundtrip(clean_mesh_d
 
         with psycopg.connect(dsn) as conn:
             rev_after = fetch_scalar(conn, "SELECT version_num FROM alembic_version")
-            assert rev_after == "0022"
+            assert rev_after is not None and int(str(rev_after)) >= 22
     finally:
         run_alembic(clean_mesh_db, "upgrade", "head")
 
@@ -160,7 +162,7 @@ async def test_t1_f3_02_migration_0022_hosts_spatial_backfill_from_0021(
 
         with psycopg.connect(dsn) as conn:
             rev = fetch_scalar(conn, "SELECT version_num FROM alembic_version")
-            assert rev == "0022"
+            assert rev is not None and int(str(rev)) >= 22
             rows = conn.execute(
                 """
                 SELECT host_id, host_kind, alias_folded, nicknames, place, wol_mac

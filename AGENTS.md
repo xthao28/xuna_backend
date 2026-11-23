@@ -133,6 +133,11 @@ XUNA_TEST_DATABASE_URL=postgresql+psycopg://<user>@localhost/xuna_test scripts/c
   It runs `ruff format --check`, `ruff check`, `mypy --strict`, `alembic upgrade head` and `pytest`. All must pass. Report anything skipped.
 
   The owner has two machines with **separate** PostgreSQL servers (Mac 14.15, user `$(whoami)`, no password; Windows 16.15, user `xuna`/`xuna`, `.venv/Scripts`). Check which machine you are on (`uname` / platform) and use the matching URL from the table in [README.md](README.md#owner-machines-mac-vs-windows-do-not-mix-them-up); say which machine ran the checks in every report.
+- **Anti-bloat, H5 & timing guardrails (learned 2026-11-23):**
+  - Keep `workflows.py` at `0` diff and `orchestrator.py` `< 50` net LOC (`test_scoped_catalog.py`); place new logic in focused sibling modules.
+  - Keep pure domain utilities (such as `redaction.py`) concise (~300–500 LOC) and strictly linear `O(n)`; do not pile up thousands of lines of ad-hoc branches or synthetic fuzz tests across repeated challenger loops.
+  - Never include literal OS paths (`C:\\...`, `/Users/...`, `/home/...`) or app names in docstrings of generic layers — `TestRuleH5GenericLayerCompliance` scans non-`#` lines including docstrings.
+  - Use Unicode-aware `(?<!\w)` rather than `(?<![A-Za-z0-9_])` before drive-letter regexes so Vietnamese words ending with ASCII letters before `:/` are not mangled; never inject unsolicited RPC frames during XTP WebSocket handshake (`test_hosts_api.py`).
 
 ## 10. Style
 

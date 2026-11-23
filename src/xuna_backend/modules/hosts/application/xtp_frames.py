@@ -3,12 +3,22 @@
 import base64
 import binascii
 import json
+import re
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from xuna_backend.modules.hosts.domain.crypto import (
     NONCE_SIZE,
@@ -182,6 +192,277 @@ class FocusRequestParamsModel(_StrictModel):
     followMe: bool | None = None
 
 
+_UUID_CANONICAL_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+_WATCH_SHORT_CODE_RE = r"^[a-z0-9_.-]{1,64}$"
+_WATCH_WORKSPACE_ALIAS_RE = r"^[a-zA-Z0-9_.-]{1,64}$"
+
+WatchModeWire = Literal[
+    "ui_quiescence",
+    "ui_change",
+    "process_idle",
+    "fs_quiescence",
+    "cdp_idle",
+    "composite",
+    "timer",
+    "protocol_async",
+]
+WatchCompositeSignalWire = Literal[
+    "ui_quiescence",
+    "process_idle",
+    "fs_quiescence",
+    "cdp_idle",
+]
+WatchObservedSignalWire = Literal[
+    "ui_quiescence",
+    "ui_change",
+    "process_idle",
+    "fs_quiescence",
+    "cdp_idle",
+    "timer",
+    "protocol_async",
+]
+WatchRegisterErrorWire = Literal[
+    "watch_unsupported",
+    "target_not_found",
+    "workspace_not_found",
+    "watch_limit_reached",
+    "needs_permission",
+    "policy_blocked",
+    "stopped",
+    "invalid_args",
+]
+WatchCancelReasonWire = Literal[
+    "owner_cancel",
+    "estop",
+    "job_ended",
+    "replaced",
+    "expired",
+]
+WatchEventKindWire = Literal["settled", "changed", "timeout", "target_lost", "error"]
+
+
+def _validate_non_zero_uuid_str(value: str) -> str:
+    if "\n" in value or "\r" in value or not _UUID_CANONICAL_RE.fullmatch(value):
+        raise ValueError("must be a canonical UUID")
+    parsed = uuid.UUID(value)
+    if parsed.int == 0:
+        raise ValueError("UUID cannot be zero")
+    return value
+
+
+def _reject_control_chars(value: str | None, field_name: str) -> str | None:
+    if value is not None and any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(f"control characters are not allowed in {field_name}")
+    return value
+
+
+def _require_strict_schema_version_1(value: object) -> int:
+    if type(value) is not int or value != 1:
+        raise ValueError("schemaVersion must be strict integer 1")
+    return value
+
+
+StrictSchemaVersion1 = Annotated[Literal[1], BeforeValidator(_require_strict_schema_version_1)]
+
+
+class WatchTargetModel(_StrictModel):
+    """Normalized, content-free target specification (`XUNA_XTP_V1_CONTRACT.md` §4.2.14)."""
+
+    pid: int | None = Field(default=None, ge=1, le=2_147_483_647)
+    windowId: int | None = Field(default=None, ge=0, le=2_147_483_647)
+    appId: str | None = Field(default=None, pattern=_WATCH_SHORT_CODE_RE)
+    workspaceAlias: str | None = Field(default=None, pattern=_WATCH_WORKSPACE_ALIAS_RE)
+    tabId: str | None = Field(default=None, min_length=1, max_length=128)
+    mcpServerId: str | None = Field(default=None, pattern=_WATCH_SHORT_CODE_RE)
+    protocolTaskId: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @field_validator("appId", "mcpServerId")
+    @classmethod
+    def _reject_code_newlines(cls, value: str | None) -> str | None:
+        if value is not None and ("\n" in value or "\r" in value):
+            raise ValueError("newline characters are not allowed")
+        return value
+
+    @field_validator("workspaceAlias")
+    @classmethod
+    def _validate_workspace_alias(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if "\n" in value or "\r" in value or "/" in value or "\\" in value:
+            raise ValueError("invalid character in workspaceAlias")
+        if value in {".", ".."} or ".." in value:
+            raise ValueError("path traversal tokens are not allowed in workspaceAlias")
+        return value
+
+    @field_validator("tabId", "protocolTaskId")
+    @classmethod
+    def _validate_opaque_ids(cls, value: str | None) -> str | None:
+        return _reject_control_chars(value, "target identifier")
+
+
+class WatchRegisterParamsModel(_StrictModel):
+    """`xuna/watchRegister` request params (`XUNA_XTP_V1_CONTRACT.md` §4.2.14)."""
+
+    schemaVersion: StrictSchemaVersion1
+    watchId: str
+    jobId: str
+    mode: WatchModeWire
+    signals: list[WatchCompositeSignalWire] | None = None
+    target: WatchTargetModel
+    quiescenceSeconds: int = Field(ge=2, le=120)
+    minWaitSeconds: int = Field(ge=0, le=60)
+    maxWaitSeconds: int = Field(ge=5, le=900)
+    requireInitialChange: bool
+    releaseFocus: bool
+
+    @field_validator("watchId", "jobId")
+    @classmethod
+    def _validate_uuids(cls, value: str) -> str:
+        return _validate_non_zero_uuid_str(value)
+
+    @model_validator(mode="after")
+    def _validate_cross_fields(self) -> "WatchRegisterParamsModel":
+        if self.minWaitSeconds > self.maxWaitSeconds:
+            raise ValueError("minWaitSeconds must not exceed maxWaitSeconds")
+        if self.mode == "composite":
+            if (
+                self.signals is None
+                or not 2 <= len(self.signals) <= 3
+                or len(set(self.signals)) != len(self.signals)
+            ):
+                raise ValueError("composite mode requires 2..3 distinct signals")
+        elif "signals" in self.model_fields_set or self.signals is not None:
+            raise ValueError("signals is forbidden when mode is not composite")
+        return self
+
+
+class WatchRegisterResultModel(_StrictModel):
+    """`xuna/watchRegister` response body (`XUNA_XTP_V1_CONTRACT.md` §4.2.14)."""
+
+    schemaVersion: StrictSchemaVersion1
+    accepted: bool
+    watchId: str
+    activeSignals: list[WatchObservedSignalWire] | None = None
+    eventDriven: bool | None = None
+    fallbackUsed: bool | None = None
+    errorCode: WatchRegisterErrorWire | None = None
+
+    @field_validator("watchId")
+    @classmethod
+    def _validate_watch_id(cls, value: str) -> str:
+        return _validate_non_zero_uuid_str(value)
+
+    @model_validator(mode="after")
+    def _validate_outcome(self) -> "WatchRegisterResultModel":
+        if self.accepted:
+            if (
+                self.activeSignals is None
+                or not 1 <= len(self.activeSignals) <= 3
+                or len(set(self.activeSignals)) != len(self.activeSignals)
+            ):
+                raise ValueError(
+                    "accepted watchRegister result requires 1..3 distinct activeSignals"
+                )
+            if self.eventDriven is None or self.fallbackUsed is None:
+                raise ValueError(
+                    "accepted watchRegister result requires eventDriven and fallbackUsed"
+                )
+            if "errorCode" in self.model_fields_set or self.errorCode is not None:
+                raise ValueError("accepted watchRegister result must omit errorCode")
+        else:
+            if self.errorCode is None:
+                raise ValueError("rejected watchRegister result requires errorCode")
+            if any(
+                k in self.model_fields_set for k in ("activeSignals", "eventDriven", "fallbackUsed")
+            ):
+                raise ValueError("rejected watchRegister result must omit acceptance fields")
+        return self
+
+
+class WatchCancelParamsModel(_StrictModel):
+    """`xuna/watchCancel` request params (`XUNA_XTP_V1_CONTRACT.md` §4.2.15)."""
+
+    schemaVersion: StrictSchemaVersion1
+    watchId: str | None = None
+    jobId: str | None = None
+    reason: WatchCancelReasonWire
+
+    @field_validator("watchId", "jobId")
+    @classmethod
+    def _validate_optional_uuids(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _validate_non_zero_uuid_str(value)
+
+    @model_validator(mode="after")
+    def _validate_target_ids(self) -> "WatchCancelParamsModel":
+        if self.reason != "estop" and self.watchId is None and self.jobId is None:
+            raise ValueError("watchId or jobId is required unless reason is estop")
+        return self
+
+
+class WatchCancelResultModel(_StrictModel):
+    """`xuna/watchCancel` response body (`XUNA_XTP_V1_CONTRACT.md` §4.2.15)."""
+
+    schemaVersion: StrictSchemaVersion1
+    cancelledCount: int = Field(ge=0)
+
+
+class WatchEventParamsModel(_StrictModel):
+    """`xuna/watchEvent` notification params (`XUNA_XTP_V1_CONTRACT.md` §4.2.16)."""
+
+    schemaVersion: StrictSchemaVersion1
+    watchId: str
+    jobId: str
+    kind: WatchEventKindWire
+    observedSignals: list[WatchObservedSignalWire] = Field(max_length=3)
+    elapsedSeconds: int = Field(ge=0)
+    changeCount: int = Field(ge=0)
+    digestChanged: bool
+    occurredAt: str = Field(min_length=10, max_length=64)
+    errorCode: str | None = Field(default=None, pattern=_WATCH_SHORT_CODE_RE)
+
+    @field_validator("watchId", "jobId")
+    @classmethod
+    def _validate_uuids(cls, value: str) -> str:
+        return _validate_non_zero_uuid_str(value)
+
+    @field_validator("errorCode")
+    @classmethod
+    def _reject_error_code_newlines(cls, value: str | None) -> str | None:
+        if value is not None and ("\n" in value or "\r" in value):
+            raise ValueError("newline characters are not allowed")
+        return value
+
+    @field_validator("occurredAt")
+    @classmethod
+    def _validate_occurred_at(cls, value: str) -> str:
+        if "\n" in value or "\r" in value or ("T" not in value and "t" not in value):
+            raise ValueError("occurredAt must be an ISO-8601 datetime string")
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            raise ValueError("occurredAt must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_event_fields(self) -> "WatchEventParamsModel":
+        if len(set(self.observedSignals)) != len(self.observedSignals):
+            raise ValueError("observedSignals must be distinct")
+        if self.kind in ("settled", "changed") and not self.observedSignals:
+            raise ValueError("observedSignals must be non-empty for settled/changed")
+        if self.kind == "error":
+            if self.errorCode is None:
+                raise ValueError("errorCode is required when kind is error")
+        elif "errorCode" in self.model_fields_set or self.errorCode is not None:
+            raise ValueError("errorCode is forbidden when kind is not error")
+        return self
+
+    def parsed_occurred_at(self) -> datetime:
+        return datetime.fromisoformat(self.occurredAt).astimezone(UTC)
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedHelloEnroll:
     request_id: int | str
@@ -241,6 +522,11 @@ class ParsedFocusRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ParsedWatchEvent:
+    params: WatchEventParamsModel
+
+
+@dataclass(frozen=True, slots=True)
 class ParsedRpcResponse:
     request_id: int | str
     result: dict[str, object]
@@ -265,6 +551,7 @@ InboundAgentMessage = (
     | ParsedPresence
     | ParsedResources
     | ParsedFocusRequest
+    | ParsedWatchEvent
     | ParsedRpcResponse
     | ParsedRpcError
 )
@@ -397,6 +684,8 @@ def _parse_agent_notification(method: str, params: dict[str, object]) -> Inbound
             return ParsedResources(params=ResourcesParamsModel.model_validate(params))
         if method == "xuna/focusRequest":
             return ParsedFocusRequest(params=FocusRequestParamsModel.model_validate(params))
+        if method == "xuna/watchEvent":
+            return ParsedWatchEvent(params=WatchEventParamsModel.model_validate(params))
     except (ValidationError, ValueError) as error:
         raise HostSessionRejected(UNSUPPORTED_PROTOCOL) from error
     raise HostSessionRejected(UNSUPPORTED_PROTOCOL)
@@ -480,6 +769,86 @@ def parse_tools_list_result(result: dict[str, object]) -> list[ToolDescriptor]:
             raise ValueError("each tool in tools/list must be an object")
         descriptors.append(ToolDescriptor.from_wire(item))
     return descriptors
+
+
+def parse_watch_register_params(params: dict[str, object]) -> WatchRegisterParamsModel:
+    """Strictly validates `xuna/watchRegister` params; raises `ValueError` on deviation."""
+    try:
+        return WatchRegisterParamsModel.model_validate(params)
+    except ValidationError as error:
+        raise ValueError("invalid xuna/watchRegister params") from error
+
+
+def parse_watch_register_result(result: dict[str, object]) -> WatchRegisterResultModel:
+    """Strictly validates `xuna/watchRegister` result; raises `ValueError` on deviation."""
+    try:
+        return WatchRegisterResultModel.model_validate(result)
+    except ValidationError as error:
+        raise ValueError("invalid xuna/watchRegister result") from error
+
+
+def parse_watch_cancel_params(params: dict[str, object]) -> WatchCancelParamsModel:
+    """Strictly validates `xuna/watchCancel` params; raises `ValueError` on deviation."""
+    try:
+        return WatchCancelParamsModel.model_validate(params)
+    except ValidationError as error:
+        raise ValueError("invalid xuna/watchCancel params") from error
+
+
+def parse_watch_cancel_result(result: dict[str, object]) -> WatchCancelResultModel:
+    """Strictly validates `xuna/watchCancel` result; raises `ValueError` on deviation."""
+    try:
+        return WatchCancelResultModel.model_validate(result)
+    except ValidationError as error:
+        raise ValueError("invalid xuna/watchCancel result") from error
+
+
+def build_watch_register_params(
+    *,
+    watch_id: str,
+    job_id: str,
+    mode: WatchModeWire,
+    signals: list[WatchCompositeSignalWire] | None,
+    target: WatchTargetModel,
+    quiescence_seconds: int,
+    min_wait_seconds: int,
+    max_wait_seconds: int,
+    require_initial_change: bool,
+    release_focus: bool,
+) -> dict[str, object]:
+    """Builds and validates `xuna/watchRegister` JSON-RPC params, omitting `None` fields."""
+    kwargs: dict[str, object] = {
+        "schemaVersion": 1,
+        "watchId": watch_id,
+        "jobId": job_id,
+        "mode": mode,
+        "target": target,
+        "quiescenceSeconds": quiescence_seconds,
+        "minWaitSeconds": min_wait_seconds,
+        "maxWaitSeconds": max_wait_seconds,
+        "requireInitialChange": require_initial_change,
+        "releaseFocus": release_focus,
+    }
+    if signals is not None:
+        kwargs["signals"] = signals
+    model = WatchRegisterParamsModel.model_validate(kwargs)
+    return model.model_dump(mode="json", exclude_none=True)
+
+
+def build_watch_cancel_params(
+    *,
+    reason: WatchCancelReasonWire,
+    watch_id: str | None = None,
+    job_id: str | None = None,
+) -> dict[str, object]:
+    """Builds and validates `xuna/watchCancel` JSON-RPC params, omitting `None` fields."""
+    kwargs: dict[str, object] = {"schemaVersion": 1, "reason": reason}
+    if watch_id is not None:
+        kwargs["watchId"] = watch_id
+    if job_id is not None:
+        kwargs["jobId"] = job_id
+    model = WatchCancelParamsModel.model_validate(kwargs)
+    return model.model_dump(mode="json", exclude_none=True)
 
 
 def hello_response_frame(request_id: int | str) -> str:

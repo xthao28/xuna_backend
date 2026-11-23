@@ -10,6 +10,7 @@ from xuna_backend.modules.actions.api.routes import (
     build_stream_orchestrator,
 )
 from xuna_backend.modules.actions.api.routes import router as actions_router
+from xuna_backend.modules.actions.api.watch_routes import router as watch_router
 from xuna_backend.modules.actions.application.compactor import SubGoalCompactor
 from xuna_backend.modules.actions.application.cross_host_pipelines import (
     handle_host_ready_wake_queue,
@@ -21,6 +22,9 @@ from xuna_backend.modules.actions.application.job_runner import (
 from xuna_backend.modules.actions.application.mesh_prober import MeshProber
 from xuna_backend.modules.actions.application.mesh_router import InMemoryPendingIntentStore
 from xuna_backend.modules.actions.application.planner_executor import JobPlannerExecutor
+from xuna_backend.modules.actions.application.wake_inbox import WakeInboxService
+from xuna_backend.modules.actions.application.watch_coordinator import WatchCoordinator
+from xuna_backend.modules.actions.application.yield_detach import YieldDetachService
 from xuna_backend.modules.actions.domain.wake_queue import InMemoryWakeQueueStore
 from xuna_backend.modules.actions.infrastructure.approval_scope_store import (
     SqlApprovalScopeStore,
@@ -38,6 +42,10 @@ from xuna_backend.modules.actions.infrastructure.job_store import SqlAutonomousJ
 from xuna_backend.modules.actions.infrastructure.repository import SqlApprovalRepository
 from xuna_backend.modules.actions.infrastructure.standing_repository import (
     SqlStandingApprovalRepository,
+)
+from xuna_backend.modules.actions.infrastructure.watch_repository import (
+    SqlJobWatchRepository,
+    SqlWakeInboxRepository,
 )
 
 
@@ -87,6 +95,48 @@ def wire_actions(app: FastAPI) -> None:
         runner._step_executor = step_executor
         app.state.job_runner = runner
 
+    if not hasattr(app.state, "watch_repository"):
+        app.state.watch_repository = SqlJobWatchRepository(lambda: app.state.database.sessions())
+    if not hasattr(app.state, "wake_inbox_repository"):
+        app.state.wake_inbox_repository = SqlWakeInboxRepository(
+            lambda: app.state.database.sessions()
+        )
+    if not hasattr(app.state, "wake_inbox_service"):
+        app.state.wake_inbox_service = WakeInboxService(repo=app.state.wake_inbox_repository)
+    if not hasattr(app.state, "watch_coordinator"):
+        app.state.watch_coordinator = WatchCoordinator(
+            watch_repo=app.state.watch_repository,
+            job_store=app.state.job_store,
+            hub=app.state.host_session_hub,
+            cu_session_store=app.state.cu_session_store,
+            wake_inbox=app.state.wake_inbox_service,
+            job_runner=getattr(app.state, "job_runner", None),
+        )
+    if not hasattr(app.state, "yield_detach_service"):
+        app.state.yield_detach_service = YieldDetachService(
+            job_store=app.state.job_store,
+            watch_coordinator=app.state.watch_coordinator,
+            hub=app.state.host_session_hub,
+            cu_session_store=app.state.cu_session_store,
+        )
+
+    runner_obj = getattr(app.state, "job_runner", None)
+    if runner_obj is not None:
+        if hasattr(runner_obj, "set_watch_coordinator"):
+            runner_obj.set_watch_coordinator(app.state.watch_coordinator)
+        if hasattr(app.state.watch_coordinator, "set_job_runner") and (
+            getattr(app.state.watch_coordinator, "_job_runner", None) is None
+        ):
+            app.state.watch_coordinator.set_job_runner(runner_obj)
+        if hasattr(runner_obj, "set_wake_inbox"):
+            runner_obj.set_wake_inbox(app.state.wake_inbox_service)
+        step_exec = getattr(runner_obj, "_step_executor", None)
+        if step_exec is not None:
+            if hasattr(step_exec, "set_watch_coordinator"):
+                step_exec.set_watch_coordinator(app.state.watch_coordinator)
+            if hasattr(step_exec, "set_wake_inbox"):
+                step_exec.set_wake_inbox(app.state.wake_inbox_service)
+
     async def _on_host_ready(owner_id: object, host_id: object) -> None:
         await handle_host_ready_wake_queue(
             owner_id=owner_id,  # type: ignore[arg-type]
@@ -95,8 +145,25 @@ def wire_actions(app: FastAPI) -> None:
             pending_intent_store=getattr(app.state, "pending_intent_store", None),
             job_runner=getattr(app.state, "job_runner", None),
         )
+        watch_coord = getattr(app.state, "watch_coordinator", None)
+        if watch_coord is not None:
+            await watch_coord.on_host_ready(
+                owner_id=owner_id,
+                host_id=host_id,
+            )
+
+    async def _on_host_watch_event(owner_id: object, host_id: object, params: object) -> None:
+        watch_coord = getattr(app.state, "watch_coordinator", None)
+        if watch_coord is not None:
+            await watch_coord.on_watch_event(
+                owner_id=owner_id,
+                host_id=host_id,
+                event=params,
+            )
 
     app.state.on_host_ready = _on_host_ready
+    app.state.on_host_watch_event = _on_host_watch_event
     app.include_router(actions_router)
     app.include_router(job_router)
     app.include_router(mesh_router)
+    app.include_router(watch_router)

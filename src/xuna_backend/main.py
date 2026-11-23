@@ -227,9 +227,17 @@ def create_app(
             logging.getLogger("xuna.startup").warning(
                 "database.warm_pool_skipped error=%s", type(exc).__name__
             )
+        watch_coord = getattr(app.state, "watch_coordinator", None)
+        if watch_coord is not None and hasattr(watch_coord, "start_sweep"):
+            watch_coord.start_sweep()
         try:
             yield
         finally:
+            if watch_coord is not None and hasattr(watch_coord, "stop_sweep"):
+                await watch_coord.stop_sweep()
+            runner = getattr(app.state, "job_runner", None)
+            if runner is not None and hasattr(runner, "shutdown"):
+                await runner.shutdown()
             await app.state.database.dispose()
             close = getattr(app.state.speech_recognizer, "aclose", None)
             if close is not None:

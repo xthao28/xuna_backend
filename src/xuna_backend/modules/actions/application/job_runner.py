@@ -12,6 +12,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Collection
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -29,6 +30,12 @@ from xuna_backend.modules.actions.application.planner_executor import JobPlanner
 from xuna_backend.modules.actions.application.ports import (
     ComputerUseSessionStore,
 )
+from xuna_backend.modules.actions.application.wake_inbox import WakeInboxService
+from xuna_backend.modules.actions.application.watch_coordinator import (
+    ReentrantJobLock,
+    WatchCoordinator,
+    unify_job_locks,
+)
 from xuna_backend.modules.actions.domain.entities import (
     ActionPendingEvent,
     ActionStreamEvent,
@@ -37,16 +44,31 @@ from xuna_backend.modules.actions.domain.job import (
     AutonomousJob,
     AutonomousJobState,
     JobStepOutcome,
+    PendingWakeInboxItem,
     SubGoal,
     SubGoalStatus,
 )
 from xuna_backend.modules.actions.domain.ports import AutonomousJobRepository
+from xuna_backend.modules.actions.domain.schema_validator import (
+    ArgumentValidationError,
+    SchemaValidator,
+)
 from xuna_backend.modules.actions.domain.tool_names import from_function_name
 from xuna_backend.modules.actions.domain.wake_queue import (
     WAKE_QUEUE_TTL,
     DeferredWakeStep,
     InMemoryWakeQueueStore,
     WakeQueueFullError,
+)
+from xuna_backend.modules.actions.domain.watch import (
+    JOB_WAIT_FUNCTION_NAME,
+    JOB_WAIT_SCHEMA,
+    ContinuationMode,
+    JobWatch,
+    WakeInboxKind,
+    WakeSuggestedAction,
+    WatchCancelReason,
+    WatchGestureCue,
 )
 from xuna_backend.modules.audit.application.ports import AuditLog
 from xuna_backend.modules.cognition.application.ports import (
@@ -61,6 +83,7 @@ from xuna_backend.modules.cognition.domain.types import (
     TextDelta,
     ToolCall,
     ToolCallRequested,
+    ToolSpec,
 )
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
 from xuna_backend.modules.hosts.domain.entities import HostId, HostStatus, RiskTier
@@ -101,6 +124,9 @@ class AutonomousJobRunner:
         compactor: SubGoalCompactor | None = None,
         clock_utc: Callable[[], datetime] = lambda: datetime.now(UTC),
         sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        watch_coordinator: WatchCoordinator | None = None,
+        wake_inbox: WakeInboxService | None = None,
+        job_locks: dict[uuid.UUID, ReentrantJobLock] | None = None,
     ) -> None:
         self._store = job_store
         self._cu_store = cu_session_store
@@ -111,8 +137,52 @@ class AutonomousJobRunner:
         self._planner = planner or JobPlannerExecutor(
             compactor=self._compactor, clock_utc=self._clock
         )
+        self._watch_coordinator = watch_coordinator
+        self._wake_inbox = wake_inbox
         self._active_tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
         self._waiting_r3_jobs: dict[uuid.UUID, uuid.UUID] = {}
+        self._job_locks: dict[uuid.UUID, ReentrantJobLock] = (
+            job_locks if job_locks is not None else {}
+        )
+        self._cancelling_scopes: list[tuple[uuid.UUID, HostId | None]] = []
+        self._cancelling_jobs: set[uuid.UUID] = set()
+        if watch_coordinator is not None:
+            self.set_watch_coordinator(watch_coordinator)
+
+    def set_watch_coordinator(self, watch_coordinator: WatchCoordinator) -> None:
+        self._watch_coordinator = watch_coordinator
+        coord_locks = getattr(watch_coordinator, "_job_locks", None)
+        if isinstance(coord_locks, dict):
+            unify_job_locks(coord_locks, self._job_locks)
+            self._job_locks = coord_locks
+        coord_scopes = getattr(watch_coordinator, "_cancelling_scopes", None)
+        if isinstance(coord_scopes, list) and coord_scopes is not self._cancelling_scopes:
+            coord_scopes.extend(self._cancelling_scopes)
+            self._cancelling_scopes = coord_scopes
+        coord_jobs = getattr(watch_coordinator, "_cancelling_jobs", None)
+        if isinstance(coord_jobs, set) and coord_jobs is not self._cancelling_jobs:
+            coord_jobs.update(self._cancelling_jobs)
+            self._cancelling_jobs = coord_jobs
+
+    def _lock_for_job(self, job_id: uuid.UUID) -> ReentrantJobLock:
+        if self._watch_coordinator is not None:
+            return self._watch_coordinator._lock_for_job(job_id)
+        lock = self._job_locks.get(job_id)
+        if lock is None:
+            lock = ReentrantJobLock()
+            self._job_locks[job_id] = lock
+        return lock
+
+    def _is_cancel_pending(self, job: AutonomousJob) -> bool:
+        if job.job_id in self._cancelling_jobs:
+            return True
+        return any(
+            oid == job.owner_id and (hid is None or job.host_id == hid)
+            for oid, hid in self._cancelling_scopes
+        )
+
+    def set_wake_inbox(self, wake_inbox: WakeInboxService) -> None:
+        self._wake_inbox = wake_inbox
 
     @property
     def planner(self) -> JobPlannerExecutor:
@@ -213,15 +283,37 @@ class AutonomousJobRunner:
         return job
 
     async def pause_job(self, job_id: uuid.UUID) -> AutonomousJob:
-        """Pauses a running or queued job."""
-        job = await self._store.get(job_id)
-        if job is None:
-            raise ValueError(f"Job {job_id} not found")
+        """Pauses an active job and cancels any active host watch."""
+        cancelled_watches: list[JobWatch] = []
+        updated: AutonomousJob
+        async with self._lock_for_job(job_id):
+            job = await self._store.get(job_id)
+            if job is None:
+                raise ValueError(f"Job {job_id} not found")
+            job.validate_transition(AutonomousJobState.PAUSED)
 
-        self._cancel_task(job_id)
-        now = self._clock()
-        updated = job.with_state(AutonomousJobState.PAUSED, now=now)
-        await self._store.save(updated)
+            self._cancel_task(job_id)
+            if self._watch_coordinator is not None:
+                cancelled_watches = (
+                    await self._watch_coordinator.cancel_active_watches_for_job_db_locked(
+                        job_id,
+                        reason=WatchCancelReason.OWNER_CANCEL.value,
+                        now=self._clock(),
+                    )
+                )
+            latest = await self._store.get(job_id) or job
+            if latest.is_terminal or latest.state == AutonomousJobState.PAUSED:
+                updated = latest
+            else:
+                updated = latest.with_state(AutonomousJobState.PAUSED, now=self._clock())
+                await self._store.save(updated)
+
+        if cancelled_watches and self._watch_coordinator is not None:
+            await self._watch_coordinator._send_watch_cancels(
+                cancelled_watches,
+                host_id=updated.host_id,
+                reason=WatchCancelReason.OWNER_CANCEL.value,
+            )
         return updated
 
     async def resume_job(
@@ -230,62 +322,69 @@ class AutonomousJobRunner:
         approval_id: uuid.UUID | str | None = None,
     ) -> AutonomousJob:
         """Resumes a paused or checkpointed job, clearing pending approval if supplied."""
-        job = await self._store.get(job_id)
-        if job is None:
-            raise ValueError(f"Job {job_id} not found")
+        async with self._lock_for_job(job_id):
+            job = await self._store.get(job_id)
+            if job is None:
+                raise ValueError(f"Job {job_id} not found")
 
-        if job.state not in {
-            AutonomousJobState.AWAITING_R3_CHECKPOINT,
-            AutonomousJobState.WAITING_WAKE,
-            AutonomousJobState.PAUSED,
-        }:
-            raise ValueError(f"Cannot resume job in state {job.state.value}")
+            if job.is_terminal or job.state not in {
+                AutonomousJobState.AWAITING_R3_CHECKPOINT,
+                AutonomousJobState.WAITING_WAKE,
+                AutonomousJobState.WAITING_WATCH,
+                AutonomousJobState.PAUSED,
+                AutonomousJobState.QUEUED,
+            }:
+                raise ValueError(f"Cannot resume job in state {job.state.value}")
 
-        now = self._clock()
-        appr_uuid = uuid.UUID(str(approval_id)) if approval_id else None
+            if self._is_cancel_pending(job):
+                return job
 
-        cp = dict(job.checkpoint_data or {})
-        cp.pop("wake_expires_at", None)
-        if appr_uuid or job.state == AutonomousJobState.AWAITING_R3_CHECKPOINT:
-            cp["pending_approval_id"] = None
+            now = self._clock()
+            appr_uuid = uuid.UUID(str(approval_id)) if approval_id else None
 
-        updated = job.with_state(
-            AutonomousJobState.RUNNING,
-            now=now,
-            pending_approval_id=None,
-            checkpoint_data=sanitize_checkpoint_data(cp),
-        )
-        await self._store.save(updated)
-        self._spawn_loop_task(job_id)
-        return updated
+            cp = dict(job.checkpoint_data or {})
+            cp.pop("wake_expires_at", None)
+            if appr_uuid or job.state == AutonomousJobState.AWAITING_R3_CHECKPOINT:
+                cp["pending_approval_id"] = None
+
+            updated = job.with_state(
+                AutonomousJobState.RUNNING,
+                now=now,
+                pending_approval_id=None,
+                checkpoint_data=sanitize_checkpoint_data(cp),
+            )
+            await self._store.save(updated)
+            self._spawn_loop_task(job_id)
+            return updated
 
     async def steer_job(self, job_id: uuid.UUID, steering_prompt: str) -> AutonomousJob:
         """Injects live human guidance into active job checkpoint data."""
-        job = await self._store.get(job_id)
-        if job is None:
-            raise ValueError(f"Job {job_id} not found")
+        async with self._lock_for_job(job_id):
+            job = await self._store.get(job_id)
+            if job is None:
+                raise ValueError(f"Job {job_id} not found")
 
-        if job.is_terminal:
-            raise ValueError(f"Cannot steer terminal job ({job.state.value})")
+            if job.is_terminal:
+                raise ValueError(f"Cannot steer terminal job ({job.state.value})")
 
-        now = self._clock()
-        cp = dict(job.checkpoint_data or {})
-        steering_notes = list(cp.get("steering_notes", []))
-        steering_notes.append(
-            {
-                "instruction": steering_prompt,
-                "steered_at": now.isoformat(),
-            }
-        )
-        cp["steering_notes"] = steering_notes
+            now = self._clock()
+            cp = dict(job.checkpoint_data or {})
+            steering_notes = list(cp.get("steering_notes", []))
+            steering_notes.append(
+                {
+                    "instruction": steering_prompt,
+                    "steered_at": now.isoformat(),
+                }
+            )
+            cp["steering_notes"] = steering_notes
 
-        updated = job.with_state(
-            job.state,
-            now=now,
-            checkpoint_data=sanitize_checkpoint_data(cp),
-        )
-        await self._store.save(updated)
-        return updated
+            updated = job.with_state(
+                job.state,
+                now=now,
+                checkpoint_data=sanitize_checkpoint_data(cp),
+            )
+            await self._store.save(updated)
+            return updated
 
     async def cancel_job(
         self,
@@ -293,18 +392,44 @@ class AutonomousJobRunner:
         reason: str = "user_cancelled",
     ) -> AutonomousJob:
         """Cancels a job and tears down its detached background loop."""
-        job = await self._store.get(job_id)
-        if job is None:
-            raise ValueError(f"Job {job_id} not found")
+        cancelled_watches: list[JobWatch] = []
+        updated: AutonomousJob
+        self._cancelling_jobs.add(job_id)
+        try:
+            async with self._lock_for_job(job_id):
+                job = await self._store.get(job_id)
+                if job is None:
+                    raise ValueError(f"Job {job_id} not found")
 
-        self._cancel_task(job_id)
-        now = self._clock()
-        updated = job.with_state(
-            AutonomousJobState.CANCELLED,
-            now=now,
-            stop_reason=reason,
-        )
-        await self._store.save(updated)
+                self._cancel_task(job_id)
+                now = self._clock()
+                if self._watch_coordinator is not None:
+                    cancelled_watches = (
+                        await self._watch_coordinator.cancel_active_watches_for_job_db_locked(
+                            job_id,
+                            reason=WatchCancelReason.OWNER_CANCEL.value,
+                            now=now,
+                        )
+                    )
+                latest = await self._store.get(job_id) or job
+                if latest.is_terminal:
+                    updated = latest
+                else:
+                    updated = latest.with_state(
+                        AutonomousJobState.CANCELLED,
+                        now=now,
+                        stop_reason=reason,
+                    )
+                    await self._store.save(updated)
+        finally:
+            self._cancelling_jobs.discard(job_id)
+
+        if cancelled_watches and self._watch_coordinator is not None:
+            await self._watch_coordinator._send_watch_cancels(
+                cancelled_watches,
+                host_id=updated.host_id,
+                reason=WatchCancelReason.OWNER_CANCEL.value,
+            )
         return updated
 
     async def cancel_all_for_owner(
@@ -319,14 +444,73 @@ class AutonomousJobRunner:
             AutonomousJobState.RUNNING,
             AutonomousJobState.AWAITING_R3_CHECKPOINT,
             AutonomousJobState.WAITING_WAKE,
+            AutonomousJobState.WAITING_WATCH,
             AutonomousJobState.PAUSED,
         )
-        jobs = await self._store.list_for_owner(owner_id, limit=100, states=active_states)
+        scope = (owner_id, host_id)
+        self._cancelling_scopes.append(scope)
         count = 0
-        for job in jobs:
-            if not job.is_terminal and (host_id is None or job.host_id == host_id):
-                await self.cancel_job(job.job_id, reason=reason)
-                count += 1
+        pre_cancelled_watches: list[JobWatch] = []
+        now = self._clock()
+        try:
+
+            async def _cancel_matching_jobs_locked() -> int:
+                cancelled_now = 0
+                jobs = await self._store.list_for_owner(owner_id, limit=100, states=active_states)
+                matching_ids: set[uuid.UUID] = {
+                    j.job_id
+                    for j in jobs
+                    if not j.is_terminal and (host_id is None or j.host_id == host_id)
+                }
+                if self._watch_coordinator is not None:
+                    watch_job_ids = (
+                        await self._watch_coordinator.list_active_watch_job_ids_for_owner(
+                            owner_id, host_id=host_id
+                        )
+                    )
+                    matching_ids.update(watch_job_ids)
+                for jid in sorted(matching_ids, key=str):
+                    async with self._lock_for_job(jid):
+                        self._cancel_task(jid)
+                        latest = await self._store.get(jid)
+                        if (
+                            latest is not None
+                            and not latest.is_terminal
+                            and latest.owner_id == owner_id
+                            and (host_id is None or latest.host_id == host_id)
+                        ):
+                            updated = latest.with_state(
+                                AutonomousJobState.CANCELLED,
+                                now=self._clock(),
+                                stop_reason=reason,
+                            )
+                            await self._store.save(updated)
+                            cancelled_now += 1
+                        if self._watch_coordinator is not None:
+                            coord = self._watch_coordinator
+                            pre_cancelled_watches.extend(
+                                await coord.cancel_active_watches_for_job_db_locked(
+                                    jid,
+                                    reason=reason,
+                                    now=now,
+                                )
+                            )
+                return cancelled_now
+
+            count += await _cancel_matching_jobs_locked()
+            if self._watch_coordinator is not None:
+                await self._watch_coordinator.finish_owner_cancel(
+                    owner_id,
+                    reason=reason,
+                    host_id=host_id,
+                    pre_cancelled=pre_cancelled_watches,
+                    now=now,
+                )
+                # Re-sweep under lock in case a job started concurrently during network RPCs
+                count += await _cancel_matching_jobs_locked()
+        finally:
+            with contextlib.suppress(ValueError):
+                self._cancelling_scopes.remove(scope)
         return count
 
     async def mark_live_pending_approval(
@@ -335,19 +519,24 @@ class AutonomousJobRunner:
         approval_id: uuid.UUID,
     ) -> None:
         """Reflects an in-flight `ActionPendingEvent` on the stored job immediately."""
-        current = await self._store.get(job_id)
-        if current is None or current.state != AutonomousJobState.RUNNING:
-            return
-        now = self._clock()
-        cp = dict(current.checkpoint_data or {})
-        cp["pending_approval_id"] = str(approval_id)
-        waiting = current.with_state(
-            AutonomousJobState.AWAITING_R3_CHECKPOINT,
-            now=now,
-            pending_approval_id=approval_id,
-            checkpoint_data=sanitize_checkpoint_data(cp),
-        )
-        await self._store.save(waiting)
+        async with self._lock_for_job(job_id):
+            current = await self._store.get(job_id)
+            if (
+                current is None
+                or current.state != AutonomousJobState.RUNNING
+                or self._is_cancel_pending(current)
+            ):
+                return
+            now = self._clock()
+            cp = dict(current.checkpoint_data or {})
+            cp["pending_approval_id"] = str(approval_id)
+            waiting = current.with_state(
+                AutonomousJobState.AWAITING_R3_CHECKPOINT,
+                now=now,
+                pending_approval_id=approval_id,
+                checkpoint_data=sanitize_checkpoint_data(cp),
+            )
+            await self._store.save(waiting)
 
     async def on_approval_resolved(
         self,
@@ -359,18 +548,19 @@ class AutonomousJobRunner:
         if target_job_id is not None:
             if approved:
                 return await self.resume_job(target_job_id, approval_id=approval_id)
-            now = self._clock()
-            latest = await self._store.get(target_job_id)
-            if latest and not latest.is_terminal:
-                failed = latest.with_state(
-                    AutonomousJobState.FAILED,
-                    now=now,
-                    error_message="r3_approval_denied",
-                    stop_reason="approval_denied",
-                )
-                await self._store.save(failed)
-                return failed
-            return latest
+            async with self._lock_for_job(target_job_id):
+                now = self._clock()
+                latest = await self._store.get(target_job_id)
+                if latest and not latest.is_terminal:
+                    failed = latest.with_state(
+                        AutonomousJobState.FAILED,
+                        now=now,
+                        error_message="r3_approval_denied",
+                        stop_reason="approval_denied",
+                    )
+                    await self._store.save(failed)
+                    return failed
+                return latest
         return None
 
     async def resume_waiting_wake_jobs(
@@ -443,6 +633,8 @@ class AutonomousJobRunner:
                 job = await self._store.get(job_id)
                 if job is None or job.state != AutonomousJobState.RUNNING:
                     break
+                if self._is_cancel_pending(job):
+                    break
 
                 now = self._clock()
 
@@ -457,19 +649,30 @@ class AutonomousJobRunner:
 
                 # Check step budget
                 if job.steps_used >= job.max_steps:
-                    all_done = bool(job.sub_goals) and all(
-                        sg.status == SubGoalStatus.COMPLETED for sg in job.sub_goals
-                    )
-                    final_state = (
-                        AutonomousJobState.COMPLETED if all_done else AutonomousJobState.FAILED
-                    )
-                    completed = job.with_state(
-                        final_state,
-                        now=now,
-                        stop_reason="max_steps_exceeded",
-                        error_message="Step budget exhausted" if not all_done else None,
-                    )
-                    await self._store.save(completed)
+                    async with self._lock_for_job(job_id):
+                        latest_budget = await self._store.get(job_id)
+                        if (
+                            latest_budget is not None
+                            and not latest_budget.is_terminal
+                            and latest_budget.state == AutonomousJobState.RUNNING
+                            and not self._is_cancel_pending(latest_budget)
+                        ):
+                            all_done = bool(latest_budget.sub_goals) and all(
+                                sg.status == SubGoalStatus.COMPLETED
+                                for sg in latest_budget.sub_goals
+                            )
+                            final_state = (
+                                AutonomousJobState.COMPLETED
+                                if all_done
+                                else AutonomousJobState.FAILED
+                            )
+                            completed = latest_budget.with_state(
+                                final_state,
+                                now=now,
+                                stop_reason="max_steps_exceeded",
+                                error_message="Step budget exhausted" if not all_done else None,
+                            )
+                            await self._store.save(completed)
                     break
 
                 # Step execution
@@ -478,148 +681,228 @@ class AutonomousJobRunner:
                 else:
                     outcome = await self._default_step(job)
 
-                # Re-check store in case owner paused, cancelled, or steered mid-step
-                latest_after = await self._store.get(job_id)
-                if latest_after is None or latest_after.is_terminal:
-                    break
-                if latest_after.state == AutonomousJobState.PAUSED:
-                    break
+                should_break = False
+                should_emit = False
+                async with self._lock_for_job(job_id):
+                    # Re-check store in case owner paused, cancelled, or steered mid-step
+                    latest_after = await self._store.get(job_id)
+                    if (
+                        latest_after is None
+                        or latest_after.is_terminal
+                        or latest_after.state == AutonomousJobState.PAUSED
+                        or self._is_cancel_pending(latest_after)
+                    ):
+                        break
 
-                now = self._clock()
+                    now = self._clock()
 
-                raw_cp = dict(outcome.checkpoint_data or latest_after.checkpoint_data or {})
-                if (
-                    latest_after.checkpoint_data
-                    and "steering_notes" in latest_after.checkpoint_data
-                    and "steering_notes" not in raw_cp
-                ):
-                    raw_cp["steering_notes"] = latest_after.checkpoint_data["steering_notes"]
-                clean_cp = sanitize_checkpoint_data(raw_cp)
-                clean_cp = self._compactor.sanitize_checkpoint(clean_cp)
+                    raw_cp = dict(outcome.checkpoint_data or latest_after.checkpoint_data or {})
+                    if (
+                        latest_after.checkpoint_data
+                        and "steering_notes" in latest_after.checkpoint_data
+                        and "steering_notes" not in raw_cp
+                    ):
+                        raw_cp["steering_notes"] = latest_after.checkpoint_data["steering_notes"]
+                    clean_cp = sanitize_checkpoint_data(raw_cp)
+                    clean_cp = self._compactor.sanitize_checkpoint(clean_cp)
 
-                # Ensure base job is in RUNNING before terminal/progress transition if live-marked
-                base_job = (
-                    latest_after.with_state(
-                        AutonomousJobState.RUNNING,
-                        now=now,
-                        pending_approval_id=None,
-                    )
-                    if latest_after.state == AutonomousJobState.AWAITING_R3_CHECKPOINT
-                    and outcome.kind != "await_r3"
-                    else latest_after
-                )
-
-                if outcome.kind == "await_r3":
-                    if outcome.pending_approval_id:
-                        self._waiting_r3_jobs[outcome.pending_approval_id] = job.job_id
-                    clean_cp["pending_approval_id"] = (
-                        str(outcome.pending_approval_id) if outcome.pending_approval_id else None
-                    )
-                    updated = (
-                        latest_after
-                        if latest_after.state == AutonomousJobState.AWAITING_R3_CHECKPOINT
-                        else latest_after.with_state(
-                            AutonomousJobState.AWAITING_R3_CHECKPOINT,
+                    # Ensure base job is RUNNING before terminal/progress step if live-marked
+                    base_job = (
+                        latest_after.with_state(
+                            AutonomousJobState.RUNNING,
                             now=now,
-                            pending_approval_id=outcome.pending_approval_id,
-                            checkpoint_data=clean_cp,
-                            steps_used=job.steps_used + 1,
+                            pending_approval_id=None,
                         )
+                        if latest_after.state == AutonomousJobState.AWAITING_R3_CHECKPOINT
+                        and outcome.kind != "await_r3"
+                        else latest_after
                     )
-                    if latest_after.state == AutonomousJobState.AWAITING_R3_CHECKPOINT:
-                        updated = AutonomousJob(
-                            job_id=latest_after.job_id,
-                            owner_id=latest_after.owner_id,
-                            pet_id=latest_after.pet_id,
-                            host_id=latest_after.host_id,
-                            session_id=latest_after.session_id,
-                            title=latest_after.title,
-                            goal=latest_after.goal,
-                            state=AutonomousJobState.AWAITING_R3_CHECKPOINT,
-                            sub_goals=(
-                                outcome.sub_goals
-                                if outcome.sub_goals is not None
-                                else latest_after.sub_goals
-                            ),
-                            active_sub_goal_index=(
-                                outcome.active_sub_goal_index
-                                if outcome.active_sub_goal_index is not None
-                                else latest_after.active_sub_goal_index
-                            ),
-                            max_steps=latest_after.max_steps,
-                            steps_used=job.steps_used + 1,
-                            pending_approval_id=outcome.pending_approval_id,
-                            checkpoint_data=clean_cp,
-                            error_message=latest_after.error_message,
-                            stop_reason=latest_after.stop_reason,
-                            created_at=latest_after.created_at,
-                            updated_at=now,
-                            started_at=latest_after.started_at,
-                            completed_at=latest_after.completed_at,
+
+                    if outcome.kind == "await_r3":
+                        if outcome.pending_approval_id:
+                            self._waiting_r3_jobs[outcome.pending_approval_id] = job.job_id
+                        clean_cp["pending_approval_id"] = (
+                            str(outcome.pending_approval_id)
+                            if outcome.pending_approval_id
+                            else None
                         )
-                    await self._store.save(updated)
-                    break  # Pauses execution until resume_job is invoked
+                        updated = (
+                            latest_after
+                            if latest_after.state == AutonomousJobState.AWAITING_R3_CHECKPOINT
+                            else latest_after.with_state(
+                                AutonomousJobState.AWAITING_R3_CHECKPOINT,
+                                now=now,
+                                pending_approval_id=outcome.pending_approval_id,
+                                checkpoint_data=clean_cp,
+                                steps_used=job.steps_used + 1,
+                            )
+                        )
+                        if latest_after.state == AutonomousJobState.AWAITING_R3_CHECKPOINT:
+                            updated = AutonomousJob(
+                                job_id=latest_after.job_id,
+                                owner_id=latest_after.owner_id,
+                                pet_id=latest_after.pet_id,
+                                host_id=latest_after.host_id,
+                                session_id=latest_after.session_id,
+                                title=latest_after.title,
+                                goal=latest_after.goal,
+                                state=AutonomousJobState.AWAITING_R3_CHECKPOINT,
+                                sub_goals=(
+                                    outcome.sub_goals
+                                    if outcome.sub_goals is not None
+                                    else latest_after.sub_goals
+                                ),
+                                active_sub_goal_index=(
+                                    outcome.active_sub_goal_index
+                                    if outcome.active_sub_goal_index is not None
+                                    else latest_after.active_sub_goal_index
+                                ),
+                                max_steps=latest_after.max_steps,
+                                steps_used=job.steps_used + 1,
+                                pending_approval_id=outcome.pending_approval_id,
+                                checkpoint_data=clean_cp,
+                                error_message=latest_after.error_message,
+                                stop_reason=latest_after.stop_reason,
+                                created_at=latest_after.created_at,
+                                updated_at=now,
+                                started_at=latest_after.started_at,
+                                completed_at=latest_after.completed_at,
+                            )
+                        await self._store.save(updated)
+                        should_emit = True
+                        should_break = True  # Pauses execution until resume_job is invoked
 
-                elif outcome.kind == "waiting_wake":
-                    wake_cp = dict(clean_cp)
-                    wake_cp["wake_expires_at"] = (now + WAKE_QUEUE_TTL).isoformat()
-                    updated = base_job.with_state(
-                        AutonomousJobState.WAITING_WAKE,
-                        now=now,
-                        checkpoint_data=wake_cp,
-                        stop_reason=outcome.stop_reason or "waiting_wake",
-                    )
-                    await self._store.save(updated)
-                    break
+                    elif outcome.kind == "waiting_wake":
+                        wake_cp = dict(clean_cp)
+                        wake_cp["wake_expires_at"] = (now + WAKE_QUEUE_TTL).isoformat()
+                        updated = base_job.with_state(
+                            AutonomousJobState.WAITING_WAKE,
+                            now=now,
+                            checkpoint_data=wake_cp,
+                            stop_reason=outcome.stop_reason or "waiting_wake",
+                        )
+                        await self._store.save(updated)
+                        should_emit = True
+                        should_break = True
 
-                elif outcome.kind == "progress":
-                    sub_goals_val = (
-                        outcome.sub_goals if outcome.sub_goals is not None else base_job.sub_goals
-                    )
-                    next_active_idx = (
-                        outcome.active_sub_goal_index
-                        if outcome.active_sub_goal_index is not None
-                        else base_job.active_sub_goal_index
-                    )
-                    updated = base_job.with_state(
-                        AutonomousJobState.RUNNING,
-                        now=now,
-                        steps_used=job.steps_used + 1,
-                        active_sub_goal_index=next_active_idx,
-                        sub_goals=sub_goals_val,
-                        checkpoint_data=clean_cp,
-                    )
-                    await self._store.save(updated)
+                    elif outcome.kind == "waiting_watch":
+                        if latest_after.state == AutonomousJobState.WAITING_WATCH:
+                            break
+                        outcome_watch_id = clean_cp.get("active_watch_id")
+                        last_resumed_id = (latest_after.checkpoint_data or {}).get(
+                            "last_resumed_watch_id"
+                        )
+                        if outcome_watch_id is not None and last_resumed_id == outcome_watch_id:
+                            break
+                        sub_goals_val = (
+                            outcome.sub_goals
+                            if outcome.sub_goals is not None
+                            else base_job.sub_goals
+                        )
+                        next_active_idx = (
+                            outcome.active_sub_goal_index
+                            if outcome.active_sub_goal_index is not None
+                            else base_job.active_sub_goal_index
+                        )
+                        updated = base_job.with_state(
+                            AutonomousJobState.WAITING_WATCH,
+                            now=now,
+                            steps_used=job.steps_used + 1,
+                            sub_goals=sub_goals_val,
+                            active_sub_goal_index=next_active_idx,
+                            checkpoint_data=clean_cp,
+                            stop_reason=outcome.stop_reason or "waiting_watch",
+                        )
+                        await self._store.save(updated)
+                        should_emit = True
+                        should_break = True
 
-                elif outcome.kind == "completed":
-                    sub_goals_val = (
-                        outcome.sub_goals if outcome.sub_goals is not None else base_job.sub_goals
-                    )
-                    updated = base_job.with_state(
-                        AutonomousJobState.COMPLETED,
-                        now=now,
-                        steps_used=job.steps_used + 1,
-                        sub_goals=sub_goals_val,
-                        checkpoint_data=clean_cp,
-                        stop_reason=outcome.stop_reason or "completed",
-                    )
-                    await self._store.save(updated)
-                    break
+                    elif outcome.kind == "paused":
+                        sub_goals_val = (
+                            outcome.sub_goals
+                            if outcome.sub_goals is not None
+                            else base_job.sub_goals
+                        )
+                        next_active_idx = (
+                            outcome.active_sub_goal_index
+                            if outcome.active_sub_goal_index is not None
+                            else base_job.active_sub_goal_index
+                        )
+                        updated = base_job.with_state(
+                            AutonomousJobState.PAUSED,
+                            now=now,
+                            steps_used=job.steps_used + 1,
+                            sub_goals=sub_goals_val,
+                            active_sub_goal_index=next_active_idx,
+                            checkpoint_data=clean_cp,
+                            stop_reason=outcome.stop_reason or "paused",
+                        )
+                        await self._store.save(updated)
+                        should_emit = True
+                        should_break = True
 
-                elif outcome.kind == "failed":
-                    sub_goals_val = (
-                        outcome.sub_goals if outcome.sub_goals is not None else base_job.sub_goals
-                    )
-                    updated = base_job.with_state(
-                        AutonomousJobState.FAILED,
-                        now=now,
-                        steps_used=job.steps_used + 1,
-                        sub_goals=sub_goals_val,
-                        checkpoint_data=clean_cp,
-                        error_message=outcome.error_message or "Execution failed",
-                        stop_reason=outcome.stop_reason or "failed",
-                    )
-                    await self._store.save(updated)
+                    elif outcome.kind == "progress":
+                        sub_goals_val = (
+                            outcome.sub_goals
+                            if outcome.sub_goals is not None
+                            else base_job.sub_goals
+                        )
+                        next_active_idx = (
+                            outcome.active_sub_goal_index
+                            if outcome.active_sub_goal_index is not None
+                            else base_job.active_sub_goal_index
+                        )
+                        updated = base_job.with_state(
+                            AutonomousJobState.RUNNING,
+                            now=now,
+                            steps_used=job.steps_used + 1,
+                            active_sub_goal_index=next_active_idx,
+                            sub_goals=sub_goals_val,
+                            checkpoint_data=clean_cp,
+                        )
+                        await self._store.save(updated)
+                        should_emit = True
+
+                    elif outcome.kind == "completed":
+                        sub_goals_val = (
+                            outcome.sub_goals
+                            if outcome.sub_goals is not None
+                            else base_job.sub_goals
+                        )
+                        updated = base_job.with_state(
+                            AutonomousJobState.COMPLETED,
+                            now=now,
+                            steps_used=job.steps_used + 1,
+                            sub_goals=sub_goals_val,
+                            checkpoint_data=clean_cp,
+                            stop_reason=outcome.stop_reason or "completed",
+                        )
+                        await self._store.save(updated)
+                        should_emit = True
+                        should_break = True
+
+                    elif outcome.kind == "failed":
+                        sub_goals_val = (
+                            outcome.sub_goals
+                            if outcome.sub_goals is not None
+                            else base_job.sub_goals
+                        )
+                        updated = base_job.with_state(
+                            AutonomousJobState.FAILED,
+                            now=now,
+                            steps_used=job.steps_used + 1,
+                            sub_goals=sub_goals_val,
+                            checkpoint_data=clean_cp,
+                            error_message=outcome.error_message or "Execution failed",
+                            stop_reason=outcome.stop_reason or "failed",
+                        )
+                        await self._store.save(updated)
+                        should_emit = True
+                        should_break = True
+
+                if should_emit:
+                    await self._emit_pending_wake_inbox(outcome)
+                if should_break:
                     break
 
                 await self._sleep(0.01)
@@ -628,16 +911,36 @@ class AutonomousJobRunner:
             _logger.info("Job loop cancelled for %s", job_id)
         except Exception as exc:
             _logger.exception("Unexpected error in autonomous job loop for %s: %s", job_id, exc)
-            now = self._clock()
-            latest = await self._store.get(job_id)
-            if latest and not latest.is_terminal:
-                err_job = latest.with_state(
-                    AutonomousJobState.FAILED,
-                    now=now,
-                    error_message=str(exc),
-                    stop_reason="runtime_error",
-                )
-                await self._store.save(err_job)
+            async with self._lock_for_job(job_id):
+                now = self._clock()
+                latest = await self._store.get(job_id)
+                if latest and not latest.is_terminal and not self._is_cancel_pending(latest):
+                    err_job = latest.with_state(
+                        AutonomousJobState.FAILED,
+                        now=now,
+                        error_message=str(exc),
+                        stop_reason="runtime_error",
+                    )
+                    await self._store.save(err_job)
+
+    async def _emit_pending_wake_inbox(self, outcome: JobStepOutcome) -> None:
+        pending = outcome.pending_wake_inbox
+        if pending is None:
+            return
+        inbox = self._wake_inbox or getattr(self._step_executor, "_wake_inbox", None)
+        if inbox is None:
+            return
+        await inbox.emit_item(
+            owner_id=pending.owner_id,
+            pet_id=pending.pet_id,
+            kind=pending.kind,
+            title=pending.title,
+            summary=pending.summary,
+            job_id=pending.job_id,
+            host_id=pending.host_id,
+            suggested_actions=pending.suggested_actions,
+            gesture_cue=pending.gesture_cue,
+        )
 
     async def _default_step(self, job: AutonomousJob) -> JobStepOutcome:
         """Fail-closed default step when no real step_executor is wired (Rule H1)."""
@@ -680,6 +983,8 @@ class OrchestratorJobStepExecutor:
         compactor: SubGoalCompactor,
         on_pending_approval: Callable[[uuid.UUID, uuid.UUID], Awaitable[None]] | None = None,
         wake_queue: InMemoryWakeQueueStore | None = None,
+        watch_coordinator: WatchCoordinator | None = None,
+        wake_inbox: WakeInboxService | None = None,
         clock_utc: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._orchestrator_factory = orchestrator_factory
@@ -691,8 +996,16 @@ class OrchestratorJobStepExecutor:
         self._compactor = compactor
         self._on_pending_approval = on_pending_approval
         self._wake_queue = wake_queue
+        self._watch_coordinator = watch_coordinator
+        self._wake_inbox = wake_inbox
         self._clock = clock_utc
         self._ephemeral_vision: dict[uuid.UUID, tuple[str, str]] = {}
+
+    def set_watch_coordinator(self, watch_coordinator: WatchCoordinator) -> None:
+        self._watch_coordinator = watch_coordinator
+
+    def set_wake_inbox(self, wake_inbox: WakeInboxService) -> None:
+        self._wake_inbox = wake_inbox
 
     async def __call__(self, job: AutonomousJob) -> JobStepOutcome:
         now = self._clock()
@@ -776,6 +1089,18 @@ class OrchestratorJobStepExecutor:
                 error_message="No active online host or granted tools available for job",
                 stop_reason="no_host",
             )
+
+        if self._watch_coordinator is not None:
+            wait_spec = ToolSpec(
+                name=JOB_WAIT_FUNCTION_NAME,
+                description=(
+                    "Pause execution while waiting for an ongoing task on the host to settle "
+                    "or complete, then wake up to inspect the real result. Zero tokens are "
+                    "spent while waiting."
+                ),
+                parameters=JOB_WAIT_SCHEMA,
+            )
+            tools = (*tools, wait_spec)
 
         sub_goals = (
             list(job.sub_goals)
@@ -920,14 +1245,192 @@ class OrchestratorJobStepExecutor:
                 updated_at=now,
                 started_at=job.started_at,
             )
-            return self._planner.complete_sub_goal_after_verified_tools(
+            completion_outcome = self._planner.complete_sub_goal_after_verified_tools(
                 job_with_sg,
                 outcome_summary=summary_text,
                 now=now,
             )
+            cont_mode = cp.get("active_watch_continuation_mode")
+            had_watch = bool(
+                cp.get("active_watch_id")
+                or cp.get("last_resumed_watch_id")
+                or cont_mode
+                or cp.get("had_watch_in_job")
+            )
+            if completion_outcome.kind == "failed":
+                pending_fail = (
+                    PendingWakeInboxItem(
+                        owner_id=job.owner_id,
+                        pet_id=job.pet_id,
+                        kind=WakeInboxKind.JOB_FAILED,
+                        title=f"Verification failed: {job.title[:50]}",
+                        summary=(
+                            completion_outcome.error_message
+                            or completion_outcome.stop_reason
+                            or "No verified tool execution"
+                        ),
+                        job_id=job.job_id,
+                        host_id=job.host_id,
+                        suggested_actions=(WakeSuggestedAction.DISMISS,),
+                        gesture_cue=WatchGestureCue.LOOK_AROUND,
+                    )
+                    if had_watch and self._wake_inbox is not None
+                    else None
+                )
+                return replace(completion_outcome, pending_wake_inbox=pending_fail)
+
+            cleaned_cp = dict(completion_outcome.checkpoint_data or {})
+            if cp.get("had_watch_in_job"):
+                cleaned_cp["had_watch_in_job"] = True
+            for wk_key in (
+                "active_watch_continuation_mode",
+                "active_watch_id",
+                "active_watch_done_criteria",
+                "last_resumed_watch_id",
+                "last_quiescence_seconds",
+                "wake_checks_used",
+            ):
+                cleaned_cp.pop(wk_key, None)
+
+            if completion_outcome.kind == "completed":
+                pending_done = (
+                    PendingWakeInboxItem(
+                        owner_id=job.owner_id,
+                        pet_id=job.pet_id,
+                        kind=WakeInboxKind.JOB_REPORT,
+                        title=f"Done: {job.title[:60]}",
+                        summary=summary_text or f"Completed '{current_sg.title}'",
+                        job_id=job.job_id,
+                        host_id=job.host_id,
+                        suggested_actions=(WakeSuggestedAction.DISMISS,),
+                        gesture_cue=WatchGestureCue.BOUNCE_PLAY,
+                    )
+                    if had_watch and self._wake_inbox is not None
+                    else None
+                )
+                return JobStepOutcome(
+                    kind="completed",
+                    sub_goals=completion_outcome.sub_goals,
+                    active_sub_goal_index=completion_outcome.active_sub_goal_index,
+                    checkpoint_data=cleaned_cp,
+                    stop_reason=completion_outcome.stop_reason,
+                    pending_wake_inbox=pending_done,
+                )
+
+            if completion_outcome.kind == "progress" and had_watch:
+                if cont_mode == ContinuationMode.REPORT_ONLY.value:
+                    pending_report = (
+                        PendingWakeInboxItem(
+                            owner_id=job.owner_id,
+                            pet_id=job.pet_id,
+                            kind=WakeInboxKind.JOB_REPORT,
+                            title=f"Update: {job.title[:60]}",
+                            summary=summary_text or f"Completed '{current_sg.title}'",
+                            job_id=job.job_id,
+                            host_id=job.host_id,
+                            suggested_actions=(WakeSuggestedAction.DISMISS,),
+                            gesture_cue=WatchGestureCue.BOUNCE_PLAY,
+                        )
+                        if self._wake_inbox is not None
+                        else None
+                    )
+                    return JobStepOutcome(
+                        kind="paused",
+                        sub_goals=completion_outcome.sub_goals,
+                        active_sub_goal_index=completion_outcome.active_sub_goal_index,
+                        checkpoint_data=cleaned_cp,
+                        stop_reason="report_only",
+                        pending_wake_inbox=pending_report,
+                    )
+                if cont_mode == ContinuationMode.REPORT_AND_ASK.value:
+                    pending_ask = (
+                        PendingWakeInboxItem(
+                            owner_id=job.owner_id,
+                            pet_id=job.pet_id,
+                            kind=WakeInboxKind.JOB_NEEDS_DECISION,
+                            title=f"Ready to continue: {job.title[:50]}",
+                            summary=summary_text or f"Completed '{current_sg.title}'",
+                            job_id=job.job_id,
+                            host_id=job.host_id,
+                            suggested_actions=(
+                                WakeSuggestedAction.CONTINUE_JOB,
+                                WakeSuggestedAction.DISMISS,
+                            ),
+                            gesture_cue=WatchGestureCue.LOOK_AROUND,
+                        )
+                        if self._wake_inbox is not None
+                        else None
+                    )
+                    return JobStepOutcome(
+                        kind="paused",
+                        sub_goals=completion_outcome.sub_goals,
+                        active_sub_goal_index=completion_outcome.active_sub_goal_index,
+                        checkpoint_data=cleaned_cp,
+                        stop_reason="awaiting_owner_decision",
+                        pending_wake_inbox=pending_ask,
+                    )
+            return JobStepOutcome(
+                kind=completion_outcome.kind,
+                sub_goals=completion_outcome.sub_goals,
+                active_sub_goal_index=completion_outcome.active_sub_goal_index,
+                checkpoint_data=cleaned_cp,
+                stop_reason=completion_outcome.stop_reason,
+            )
+
+        # Handle internal `job__wait` before touching Orchestrator
+        call = requested_calls[0]
+        if call.name == JOB_WAIT_FUNCTION_NAME:
+            if self._watch_coordinator is None:
+                return JobStepOutcome(
+                    kind="failed",
+                    sub_goals=tuple(sub_goals),
+                    active_sub_goal_index=idx,
+                    error_message="Watch coordinator is not configured",
+                    stop_reason="watch_unsupported",
+                )
+            try:
+                clean_wait_args, _ = SchemaValidator.validate_arguments(
+                    JOB_WAIT_SCHEMA, dict(call.arguments), allow_target=False
+                )
+            except ArgumentValidationError as err:
+                return JobStepOutcome(
+                    kind="failed",
+                    sub_goals=tuple(sub_goals),
+                    active_sub_goal_index=idx,
+                    error_message=str(err),
+                    stop_reason="invalid_args",
+                )
+            reg = await self._watch_coordinator.register_from_job_wait(
+                job=job,
+                clean_args=clean_wait_args,
+                sub_goals=tuple(sub_goals),
+                active_sub_goal_index=idx,
+                active_turns=active_turns,
+                compacted_history=compacted_history,
+                assistant_call=call,
+                assistant_text="".join(text_parts),
+                steering_notes=steering_notes,
+                now=now,
+            )
+            if not reg.accepted:
+                return JobStepOutcome(
+                    kind="failed",
+                    sub_goals=tuple(sub_goals),
+                    active_sub_goal_index=idx,
+                    checkpoint_data=reg.checkpoint_data or cp,
+                    error_message=reg.error_message or reg.error_code or "watch_failed",
+                    stop_reason=reg.error_code or "watch_unsupported",
+                    pending_wake_inbox=reg.pending_wake_inbox,
+                )
+            return JobStepOutcome(
+                kind="waiting_watch",
+                sub_goals=tuple(sub_goals),
+                active_sub_goal_index=idx,
+                checkpoint_data=reg.checkpoint_data,
+                stop_reason="waiting_watch",
+            )
 
         # Execute the tool call through the real Orchestrator pipeline
-        call = requested_calls[0]
         resolved_tool_name = from_function_name(call.name) or call.name
         captured_approval_id: uuid.UUID | None = None
 
@@ -989,7 +1492,33 @@ class OrchestratorJobStepExecutor:
             parsed_result = {"status": "failed", "errorCode": "invalid_tool_payload"}
 
         # If approval timed out while phone was locked, pause cleanly at R3 checkpoint
-        if parsed_result.get("status") == "approval_timeout" and captured_approval_id is not None:
+        if (
+            parsed_result.get("status") in ("approval_timeout", "expired")
+            and captured_approval_id is not None
+        ):
+            pending_r3 = (
+                PendingWakeInboxItem(
+                    owner_id=job.owner_id,
+                    pet_id=job.pet_id,
+                    kind=WakeInboxKind.JOB_NEEDS_DECISION,
+                    title=f"Approval needed: {job.title[:50]}",
+                    summary=f"Action {resolved_tool_name} requires owner approval.",
+                    job_id=job.job_id,
+                    host_id=job.host_id,
+                    suggested_actions=(
+                        WakeSuggestedAction.OPEN_APPROVAL,
+                        WakeSuggestedAction.DISMISS,
+                    ),
+                    gesture_cue=WatchGestureCue.LOOK_AROUND,
+                )
+                if self._wake_inbox is not None
+                and bool(
+                    cp.get("last_resumed_watch_id")
+                    or cp.get("active_watch_continuation_mode")
+                    or cp.get("had_watch_in_job")
+                )
+                else None
+            )
             checkpoint = {
                 **cp,
                 "current_sub_goal_idx": idx,
@@ -1006,6 +1535,7 @@ class OrchestratorJobStepExecutor:
                 active_sub_goal_index=idx,
                 pending_approval_id=captured_approval_id,
                 checkpoint_data=self._compactor.sanitize_checkpoint(checkpoint),
+                pending_wake_inbox=pending_r3,
             )
 
         assistant_turn_dict: dict[str, Any] = {
@@ -1068,6 +1598,18 @@ class OrchestratorJobStepExecutor:
             ]
             if steering_notes:
                 merged_cp["steering_notes"] = steering_notes
+            for wk_key in (
+                "wake_checks_used",
+                "max_wake_checks",
+                "last_quiescence_seconds",
+                "active_watch_continuation_mode",
+                "active_watch_done_criteria",
+                "last_resumed_watch_id",
+                "active_watch_id",
+                "had_watch_in_job",
+            ):
+                if wk_key in cp and wk_key not in merged_cp:
+                    merged_cp[wk_key] = cp[wk_key]
             return JobStepOutcome(
                 kind="progress",
                 sub_goals=outcome.sub_goals,

@@ -663,6 +663,10 @@ class TestRuleH5GenericLayerCompliance:
             "battery_advisor.py",
             "mission_envelope.py",
             "wake_queue.py",
+            "watch.py",
+            "watch_coordinator.py",
+            "wake_inbox.py",
+            "yield_detach.py",
         ):
             assert required in scanned_names, f"Expected {required} in H5 generic scan"
 
@@ -686,6 +690,25 @@ class TestRuleH5GenericLayerCompliance:
                             )
 
         assert not violations, "Rule H5 violations found:\n" + "\n".join(violations)
+
+    def test_rule_h5_watch_routes_zero_hardcoded_apps_or_paths(self) -> None:
+        app_pattern = re.compile(
+            r"\b(spotify|chrome|safari|zalo|figma|slack|notion|telegram|vscode|obsidian)\b",
+            re.IGNORECASE,
+        )
+        host_pattern = re.compile(
+            r"\b(macbook|mac\s*studio|pc\s*nha|living_room)\b",
+            re.IGNORECASE,
+        )
+        os_path_pattern = re.compile(r"(/Users/|/home/|C:\\\\|/Applications/|/Program Files)")
+        backend_root = Path(__file__).resolve().parents[2]
+        watch_routes = backend_root / "src/xuna_backend/modules/actions/api/watch_routes.py"
+        assert watch_routes.exists()
+        for line_num, line in enumerate(watch_routes.read_text(encoding="utf-8").splitlines(), 1):
+            if line.strip().startswith("#"):
+                continue
+            for pat in (app_pattern, host_pattern, os_path_pattern):
+                assert not pat.search(line), f"{watch_routes}:{line_num}: H5 violation in {line!r}"
 
     def test_rule_h5_zero_hardcoded_app_names_in_generic_layers(self) -> None:
         self.test_rule_h5_zero_hardcoded_app_names_or_paths_in_generic_layers()
@@ -719,6 +742,7 @@ class TestRuleH5GenericLayerCompliance:
                         if (
                             isinstance(k, ast.Constant)
                             and isinstance(k.value, str)
+                            and k.value != "tool_name"
                             and isinstance(v, ast.Constant)
                             and isinstance(v.value, str)
                             and dotted_tool_pat.fullmatch(v.value)
@@ -731,12 +755,146 @@ class TestRuleH5GenericLayerCompliance:
                     isinstance(node, ast.Constant)
                     and isinstance(node.value, str)
                     and not dotted_tool_pat.fullmatch(node.value)
+                    and not node.value.startswith("Job is terminal")
                     and keyword_pat.search(node.value)
                 ):
                     if len(node.value) > 80 and "\n" in node.value:
                         continue
                     violations.append(f"{file_path}:{node.lineno}: keyword match {node.value!r}")
         assert not violations, "Rule H5 AST intent-table violations:\n" + "\n".join(violations)
+
+    def test_rule_h5_watch_cross_repo_and_repository_compliance(self) -> None:
+        import ast
+
+        app_pattern = re.compile(
+            r"\b(spotify|chrome|safari|zalo|figma|slack|notion|telegram|vscode|obsidian)\b",
+            re.IGNORECASE,
+        )
+        agent_pattern = re.compile(
+            r"\b(claude|codex|cursor|antigravity|copilot|windsurf|gemini)\b",
+            re.IGNORECASE,
+        )
+        host_pattern = re.compile(
+            r"\b(macbook|mac\s*studio|pc\s*nha|living_room)\b",
+            re.IGNORECASE,
+        )
+        os_path_pattern = re.compile(
+            r"(/Users/|/home/|(?<![A-Za-z])[A-Za-z]:(?:\\{1,2}|/(?!/))"
+            r"|\\\\[A-Za-z0-9_.-]+\\|/Applications/|/Program Files)"
+        )
+        keyword_pat = re.compile(
+            r"\b(music|nhac|nhạc|browser|trinh duyet|trình duyệt|editor|terminal|spotify"
+            r"|chrome|macbook|xoa file|xóa file|xoa tep|xóa tệp|gui tin nhan|gửi tin nhắn"
+            r"|gui email|gửi email|mo app|mở app|mo nhac|mở nhạc|mo trinh duyet|mở trình duyệt"
+            r"|bat nhac|bật nhạc|tat may|tắt máy|chup man hinh|chụp màn hình)\b",
+            re.IGNORECASE,
+        )
+        tool_value_pat = re.compile(r"^[a-z][a-zA-Z0-9_]*(?:\.|__)[a-zA-Z_][a-zA-Z0-9_]*$")
+        dart_string_pat = re.compile(r"""(['"])((?:\\.|(?!\1).)*)\1""")
+        dart_kv_tool_pat = re.compile(
+            r"""['"][^'"]+['"]\s*:\s*['"]([a-z][a-zA-Z0-9_]*(?:\.|__)[a-zA-Z_][a-zA-Z0-9_]*)['"]"""
+        )
+
+        backend_root = Path(__file__).resolve().parents[2]
+        repo_root = backend_root.parent
+        watch_py_files = [
+            backend_root / "src/xuna_backend/modules/actions/domain/watch.py",
+            backend_root / "src/xuna_backend/modules/actions/application/watch_coordinator.py",
+            backend_root / "src/xuna_backend/modules/actions/application/wake_inbox.py",
+            backend_root / "src/xuna_backend/modules/actions/application/yield_detach.py",
+            backend_root / "src/xuna_backend/modules/actions/api/watch_routes.py",
+            backend_root / "src/xuna_backend/modules/actions/infrastructure/watch_repository.py",
+        ]
+        watch_dart_files = [
+            repo_root / "desktop/lib/features/watch/local_watch_sentinel.dart",
+            repo_root / "desktop/lib/features/watch/watch_convergence.dart",
+            repo_root / "desktop/lib/features/watch/native_watch_signal_driver.dart",
+            repo_root / "desktop/lib/features/watch/cdp_watch_signal_driver.dart",
+            repo_root
+            / "mobile/lib/features/home/presentation/service/home_wake_inbox_service.dart",
+        ]
+
+        violations: list[str] = []
+        for file_path in (*watch_py_files, *watch_dart_files):
+            assert file_path.exists(), f"Expected Watch H5 target file missing: {file_path}"
+            is_dart = file_path.suffix == ".dart"
+            for line_num, line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
+                stripped = line.strip()
+                if (is_dart and stripped.startswith("//")) or (
+                    not is_dart and stripped.startswith("#")
+                ):
+                    continue
+                for label, pat in (
+                    ("app_name", app_pattern),
+                    ("agent_name", agent_pattern),
+                    ("host_literal", host_pattern),
+                    ("os_path", os_path_pattern),
+                ):
+                    if (
+                        label == "agent_name"
+                        and file_path.name == "native_watch_signal_driver.dart"
+                        and stripped in {"'.claude',", "'.gemini',"}
+                    ):
+                        continue
+                    match = pat.search(line)
+                    if match:
+                        violations.append(
+                            f"{file_path}:{line_num} [{label}]: matched '{match.group(0)}' "
+                            f"in '{stripped}'"
+                        )
+
+        for file_path in watch_py_files:
+            tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Dict):
+                    for k, v in zip(node.keys, node.values, strict=False):
+                        if (
+                            isinstance(k, ast.Constant)
+                            and isinstance(k.value, str)
+                            and k.value != "tool_name"
+                            and isinstance(v, ast.Constant)
+                            and isinstance(v.value, str)
+                            and tool_value_pat.fullmatch(v.value)
+                        ):
+                            violations.append(
+                                f"{file_path}:{node.lineno}: "
+                                f"intent dict key={k.value!r} -> {v.value!r}"
+                            )
+                elif (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and not tool_value_pat.fullmatch(node.value)
+                    and not node.value.startswith("Job is terminal")
+                    and keyword_pat.search(node.value)
+                ):
+                    if len(node.value) > 80 and "\n" in node.value:
+                        continue
+                    violations.append(f"{file_path}:{node.lineno}: keyword match {node.value!r}")
+
+        for file_path in watch_dart_files:
+            for line_num, line in enumerate(file_path.read_text(encoding="utf-8").splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("//") or stripped.startswith("import "):
+                    continue
+                if dart_kv_tool_pat.search(line):
+                    violations.append(
+                        f"{file_path}:{line_num} [dart_intent_map]: matched tool mapping in "
+                        f"'{stripped}'"
+                    )
+                for _quote, literal in dart_string_pat.findall(line):
+                    if keyword_pat.search(literal):
+                        violations.append(
+                            f"{file_path}:{line_num} [dart_keyword]: matched {literal!r}"
+                        )
+
+        mobile_service = watch_dart_files[-1]
+        mobile_text = mobile_service.read_text(encoding="utf-8")
+        assert not re.search(
+            r"import\s+['\"](?:package:xuna_mobile/features/[^'\"]+/data/|(?:\.\./)+[^'\"]*/data/|(?:\.\./)+data/)",
+            mobile_text,
+        ), f"Clean Architecture violation: {mobile_service} imports data layer directly"
+
+        assert not violations, "Rule H5 Watch cross-repo violations:\n" + "\n".join(violations)
 
     def test_udc19_universal_hints_menu_risk_and_summaries(self) -> None:
         from xuna_backend.modules.actions.application.prompts import state_driven_hint

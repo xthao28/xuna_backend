@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator, Callable
 from enum import StrEnum
 from typing import Literal
 
+from xuna_backend.modules.actions.application.yield_detach import DEFAULT_YIELD_MS
 from xuna_backend.modules.cognition.application.ports import (
     SpeechRecognizer,
     SpeechSynthesizer,
@@ -26,6 +27,7 @@ from xuna_backend.modules.conversation.application.chat_turn import (
     ToolCallRunner,
     TurnContext,
     TurnEvent,
+    YieldDetachCallback,
     build_request,
     chat_turn,
 )
@@ -188,6 +190,8 @@ class VoiceSession:
         cu_cleanup: CuCleanupCallback | None = None,
         host_roster: str | None = None,
         source_events: AsyncIterator[TurnEvent] | None = None,
+        yield_detach: YieldDetachCallback | None = None,
+        yield_ms: int = DEFAULT_YIELD_MS,
     ) -> AsyncIterator[SpokenTurnEvent]:
         if not text.strip() and source_events is None:
             self.state = SessionState.IDLE
@@ -229,6 +233,8 @@ class VoiceSession:
                     code_generator=code_generator,
                     code_timeout_s=code_timeout_s,
                     cu_cleanup=cu_cleanup,
+                    yield_detach=yield_detach,
+                    yield_ms=yield_ms,
                 )
             chosen_voice = voice or self.voice
             if self.speak and self.synthesizer is not None:
