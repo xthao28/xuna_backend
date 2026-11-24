@@ -103,7 +103,10 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "input.key",
     "input.scroll",
     "cu.session_end",
-    # Slots 30..38: direct when reserved <= 1 or fewer tools, else 1-hop tool_search
+    # Slots 30..31: protocol_async verification/cancellation (direct when reserved <= 1)
+    "mcp.task_result",
+    "mcp.task_cancel",
+    # Slots 32..40: direct when reserved == 0 or fewer tools, else 1-hop tool_search
     "cu.session_extend",
     "media.previous",
     "media.play_search",

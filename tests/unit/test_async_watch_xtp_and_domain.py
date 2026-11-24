@@ -1,4 +1,4 @@
-"""Unit tests for AW-M2 XTP watch frames (24 valid + 12 invalid parity) and domain models."""
+"""Unit tests for AW2-M1 XTP watch frames (27 valid + 14 invalid parity) and domain models."""
 
 import json
 import uuid
@@ -60,13 +60,13 @@ from xuna_backend.modules.hosts.domain.session import HostSessionRejected
 FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "xtp" / "watch_frames.json"
 
 
-def test_watch_frames_golden_fixture_all_24_valid_and_12_invalid_parity() -> None:
+def test_watch_frames_golden_fixture_all_27_valid_and_14_invalid_parity() -> None:
     raw = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     frames: dict[str, dict[str, object]] = raw["frames"]
     invalid_frames: dict[str, dict[str, object]] = raw["invalidFrames"]
 
-    assert len(frames) == 24
-    assert len(invalid_frames) == 12
+    assert len(frames) == 27
+    assert len(invalid_frames) == 14
 
     for name, frame in frames.items():
         if "method" in frame and "id" in frame:

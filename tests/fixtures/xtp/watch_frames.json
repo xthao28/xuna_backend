@@ -139,6 +139,20 @@
         "fallbackUsed": false
       }
     },
+    "watchRegisterProtocolAsyncAcceptedResponse": {
+      "jsonrpc": "2.0",
+      "id": 706,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": true,
+        "watchId": "f1111111-1111-4111-8111-111111111116",
+        "activeSignals": [
+          "protocol_async"
+        ],
+        "eventDriven": true,
+        "fallbackUsed": false
+      }
+    },
     "watchRegisterRejectedTargetNotFoundResponse": {
       "jsonrpc": "2.0",
       "id": 701,
@@ -338,6 +352,38 @@
         "digestChanged": false,
         "occurredAt": "2026-11-22T12:45:05Z",
         "errorCode": "needs_permission"
+      }
+    },
+    "watchEventProtocolAsyncSettledNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/watchEvent",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111116",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "kind": "settled",
+        "observedSignals": [
+          "protocol_async"
+        ],
+        "elapsedSeconds": 19,
+        "changeCount": 3,
+        "digestChanged": true,
+        "occurredAt": "2026-11-23T12:00:00Z"
+      }
+    },
+    "watchEventProtocolAsyncTargetLostNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/watchEvent",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111116",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "kind": "target_lost",
+        "observedSignals": [],
+        "elapsedSeconds": 8,
+        "changeCount": 1,
+        "digestChanged": false,
+        "occurredAt": "2026-11-23T12:00:08Z"
       }
     }
   },
@@ -602,6 +648,54 @@
       },
       "expectedJsonRpcCode": -32602,
       "reason": "occurredAt_requires_utc_timezone"
+    },
+    "watchRegisterProtocolAsyncInvalidMcpServerId": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 729,
+        "method": "xuna/watchRegister",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111116",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "mode": "protocol_async",
+          "target": {
+            "mcpServerId": "Bad/Server",
+            "protocolTaskId": "task_01"
+          },
+          "quiescenceSeconds": 5,
+          "minWaitSeconds": 0,
+          "maxWaitSeconds": 900,
+          "requireInitialChange": false,
+          "releaseFocus": true
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "invalid_mcpServerId_format"
+    },
+    "watchRegisterProtocolAsyncControlCharTaskId": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 730,
+        "method": "xuna/watchRegister",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111116",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "mode": "protocol_async",
+          "target": {
+            "mcpServerId": "build_mcp",
+            "protocolTaskId": "task\u0000_01"
+          },
+          "quiescenceSeconds": 5,
+          "minWaitSeconds": 0,
+          "maxWaitSeconds": 900,
+          "requireInitialChange": false,
+          "releaseFocus": true
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "control_char_forbidden_in_protocolTaskId"
     }
   }
 }

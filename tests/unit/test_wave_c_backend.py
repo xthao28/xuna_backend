@@ -667,6 +667,7 @@ class TestRuleH5GenericLayerCompliance:
             "watch_coordinator.py",
             "wake_inbox.py",
             "yield_detach.py",
+            "planner_executor.py",
         ):
             assert required in scanned_names, f"Expected {required} in H5 generic scan"
 
@@ -802,6 +803,7 @@ class TestRuleH5GenericLayerCompliance:
             backend_root / "src/xuna_backend/modules/actions/application/watch_coordinator.py",
             backend_root / "src/xuna_backend/modules/actions/application/wake_inbox.py",
             backend_root / "src/xuna_backend/modules/actions/application/yield_detach.py",
+            backend_root / "src/xuna_backend/modules/actions/application/planner_executor.py",
             backend_root / "src/xuna_backend/modules/actions/api/watch_routes.py",
             backend_root / "src/xuna_backend/modules/actions/infrastructure/watch_repository.py",
         ]
@@ -810,6 +812,9 @@ class TestRuleH5GenericLayerCompliance:
             repo_root / "desktop/lib/features/watch/watch_convergence.dart",
             repo_root / "desktop/lib/features/watch/native_watch_signal_driver.dart",
             repo_root / "desktop/lib/features/watch/cdp_watch_signal_driver.dart",
+            repo_root / "desktop/lib/features/watch/protocol_task_registry.dart",
+            repo_root / "desktop/lib/features/watch/protocol_async_watch_driver.dart",
+            repo_root / "desktop/lib/features/watch/acp_harness_adapter.dart",
             repo_root
             / "mobile/lib/features/home/presentation/service/home_wake_inbox_service.dart",
         ]

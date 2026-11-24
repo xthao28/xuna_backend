@@ -60,6 +60,7 @@ def make_watch_tools(
     include_cu: bool = True,
     include_mail: bool = True,
     include_web: bool = True,
+    include_mcp_async: bool = False,
     extra_tools: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Builds a standard neutral tool manifest covering UI, App, CU, Web, and Mail."""
@@ -185,6 +186,136 @@ def make_watch_tools(
                     "additionalProperties": False,
                 },
             )
+        )
+    if include_mcp_async:
+        tools.extend(
+            [
+                make_tool_descriptor(
+                    "mcp.list_servers",
+                    family="app",
+                    risk="R1",
+                    observes=False,
+                    reversible=True,
+                    platform=platform,
+                    output_schema={
+                        "type": "object",
+                        "properties": {
+                            "servers": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "transport": {
+                                            "type": "string",
+                                            "enum": ["stdio", "http", "acp_stdio"],
+                                        },
+                                        "source": {"type": "string"},
+                                        "supportsAsync": {"type": "boolean"},
+                                    },
+                                    "required": ["id", "transport", "source"],
+                                    "additionalProperties": False,
+                                },
+                            }
+                        },
+                        "required": ["servers"],
+                        "additionalProperties": False,
+                    },
+                ),
+                make_tool_descriptor(
+                    "mcp.call",
+                    family="app",
+                    risk="R2",
+                    observes=False,
+                    reversible=False,
+                    platform=platform,
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "server": {"type": "string"},
+                            "tool": {"type": "string"},
+                            "payloadJson": {"type": "string"},
+                            "asyncMode": {"type": "boolean"},
+                            "yieldMs": {"type": "integer", "minimum": 500, "maximum": 15000},
+                        },
+                        "required": ["server", "tool"],
+                        "additionalProperties": False,
+                    },
+                    output_schema={
+                        "type": "object",
+                        "properties": {
+                            "server": {"type": "string"},
+                            "tool": {"type": "string"},
+                            "summary": {"type": "string"},
+                            "status": {"type": "string", "enum": ["completed", "running"]},
+                            "mcpServerId": {"type": "string"},
+                            "protocolTaskId": {"type": "string"},
+                        },
+                        "required": ["server", "tool", "summary"],
+                        "additionalProperties": False,
+                    },
+                ),
+                make_tool_descriptor(
+                    "mcp.task_result",
+                    family="app",
+                    risk="R1",
+                    observes=True,
+                    reversible=True,
+                    platform=platform,
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "server": {"type": "string"},
+                            "protocolTaskId": {"type": "string"},
+                        },
+                        "required": ["server", "protocolTaskId"],
+                        "additionalProperties": False,
+                    },
+                    output_schema={
+                        "type": "object",
+                        "properties": {
+                            "server": {"type": "string"},
+                            "protocolTaskId": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["running", "completed", "failed", "cancelled"],
+                            },
+                            "progressPercent": {"type": "integer", "minimum": 0, "maximum": 100},
+                            "summary": {"type": "string"},
+                            "errorCode": {"type": "string"},
+                        },
+                        "required": ["server", "protocolTaskId", "status", "summary"],
+                        "additionalProperties": False,
+                    },
+                ),
+                make_tool_descriptor(
+                    "mcp.task_cancel",
+                    family="app",
+                    risk="R1",
+                    observes=False,
+                    reversible=True,
+                    platform=platform,
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "server": {"type": "string"},
+                            "protocolTaskId": {"type": "string"},
+                        },
+                        "required": ["server", "protocolTaskId"],
+                        "additionalProperties": False,
+                    },
+                    output_schema={
+                        "type": "object",
+                        "properties": {
+                            "server": {"type": "string"},
+                            "protocolTaskId": {"type": "string"},
+                            "cancelled": {"type": "boolean"},
+                        },
+                        "required": ["server", "protocolTaskId", "cancelled"],
+                        "additionalProperties": False,
+                    },
+                ),
+            ]
         )
     if extra_tools:
         tools.extend(extra_tools)

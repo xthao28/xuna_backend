@@ -5,7 +5,7 @@ import contextlib
 import logging
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
@@ -325,6 +325,9 @@ class WatchCoordinator:
         signals: tuple[WatchCompositeSignal, ...],
         session_id: str | None = None,
         workspace_alias: str | None = None,
+        mcp_server_id: str | None = None,
+        protocol_task_id: str | None = None,
+        fallback_last_window: Mapping[str, Any] | None = None,
     ) -> tuple[WatchTarget | None, str | None]:
         """Binds an OS-generic watch target from observed CU/host state; never guesses (H3)."""
         clean_workspace: str | None = None
@@ -339,7 +342,8 @@ class WatchCoordinator:
 
         twin = self._hub.get_twin(str(host_id))
         if (
-            clean_workspace is not None
+            mode != WatchMode.PROTOCOL_ASYNC
+            and clean_workspace is not None
             and twin is not None
             and twin.resources is not None
             and twin.resources.workspaces
@@ -361,12 +365,66 @@ class WatchCoordinator:
             if active_cu is None:
                 active_cu = await self._cu_store.get_active_for_owner(owner_id, host_id=host_id)
 
+        if mode == WatchMode.PROTOCOL_ASYNC:
+            cu_lw = active_cu.last_window if active_cu is not None else None
+            if mcp_server_id is not None or protocol_task_id is not None:
+                raw_mcp: object = mcp_server_id
+                raw_task: object = protocol_task_id
+            elif isinstance(fallback_last_window, Mapping) and (
+                fallback_last_window.get("mcpServerId") is not None
+                or fallback_last_window.get("protocolTaskId") is not None
+            ):
+                raw_mcp = fallback_last_window.get("mcpServerId")
+                raw_task = fallback_last_window.get("protocolTaskId")
+            elif isinstance(cu_lw, Mapping) and (
+                cu_lw.get("mcpServerId") is not None or cu_lw.get("protocolTaskId") is not None
+            ):
+                raw_mcp = cu_lw.get("mcpServerId")
+                raw_task = cu_lw.get("protocolTaskId")
+            else:
+                raw_mcp = None
+                raw_task = None
+
+            clean_mcp: str | None = None
+            if raw_mcp is not None:
+                if (
+                    not isinstance(raw_mcp, str)
+                    or "\n" in raw_mcp
+                    or "\r" in raw_mcp
+                    or not _SHORT_CODE_RE.fullmatch(raw_mcp)
+                ):
+                    return None, "invalid_args"
+                clean_mcp = raw_mcp
+
+            clean_task: str | None = None
+            if raw_task is not None:
+                if not isinstance(raw_task, str) or any(
+                    ord(ch) < 32 or ord(ch) == 127 for ch in raw_task
+                ):
+                    return None, "invalid_args"
+                stripped_task = raw_task.strip()
+                if not 1 <= len(stripped_task) <= 128:
+                    return None, "invalid_args"
+                clean_task = stripped_task
+
+            if clean_mcp is None or clean_task is None:
+                return None, "watch_unsupported"
+
+            try:
+                target = WatchTarget(
+                    mcp_server_id=clean_mcp,
+                    protocol_task_id=clean_task,
+                )
+            except ValueError:
+                return None, "invalid_args"
+            return target, None
+
         pid: int | None = None
         window_id: int | None = None
         app_id: str | None = None
         tab_id: str | None = None
-        mcp_server_id: str | None = None
-        protocol_task_id: str | None = None
+        bound_mcp_server_id: str | None = None
+        bound_protocol_task_id: str | None = None
 
         if active_cu is not None:
             lw = active_cu.last_window
@@ -384,12 +442,12 @@ class WatchCoordinator:
             raw_tab = lw.get("tabId")
             if isinstance(raw_tab, str) and raw_tab.strip():
                 tab_id = raw_tab.strip()[:128]
-            raw_mcp = lw.get("mcpServerId")
-            if isinstance(raw_mcp, str):
-                mcp_server_id = _normalize_app_id(raw_mcp)
-            raw_task = lw.get("protocolTaskId")
-            if isinstance(raw_task, str) and raw_task.strip():
-                protocol_task_id = raw_task.strip()[:128]
+            raw_cu_mcp = lw.get("mcpServerId")
+            if isinstance(raw_cu_mcp, str):
+                bound_mcp_server_id = _normalize_app_id(raw_cu_mcp)
+            raw_cu_task = lw.get("protocolTaskId")
+            if isinstance(raw_cu_task, str) and raw_cu_task.strip():
+                bound_protocol_task_id = raw_cu_task.strip()[:128]
 
         if app_id is None and twin is not None and twin.presence is not None:
             fg_app = twin.presence.foreground_app_id
@@ -420,9 +478,6 @@ class WatchCoordinator:
         if needs_cdp and tab_id is None and app_id is None:
             return None, "target_not_found"
 
-        if mode == WatchMode.PROTOCOL_ASYNC and mcp_server_id is None and protocol_task_id is None:
-            return None, "watch_unsupported"
-
         try:
             target = WatchTarget(
                 pid=pid,
@@ -430,8 +485,8 @@ class WatchCoordinator:
                 app_id=app_id,
                 workspace_alias=clean_workspace,
                 tab_id=tab_id,
-                mcp_server_id=mcp_server_id,
-                protocol_task_id=protocol_task_id,
+                mcp_server_id=bound_mcp_server_id,
+                protocol_task_id=bound_protocol_task_id,
             )
         except ValueError:
             return None, "invalid_args"
@@ -445,6 +500,16 @@ class WatchCoordinator:
         session_id: str | None = None,
     ) -> tuple[WatchMode, tuple[WatchCompositeSignal, ...], WatchTarget | None, str | None]:
         """Infers an appropriate OS-generic watch for a `yieldMs` auto-detached turn."""
+        proto_target, proto_err = await self.bind_target(
+            owner_id=owner_id,
+            host_id=host_id,
+            mode=WatchMode.PROTOCOL_ASYNC,
+            signals=(),
+            session_id=session_id,
+        )
+        if proto_err is None and proto_target is not None:
+            return WatchMode.PROTOCOL_ASYNC, (), proto_target, None
+
         composite_signals = (WatchCompositeSignal.UI_QUIESCENCE, WatchCompositeSignal.PROCESS_IDLE)
         target, err = await self.bind_target(
             owner_id=owner_id,
@@ -560,8 +625,27 @@ class WatchCoordinator:
 
         raw_ws = clean_args.get("workspaceAlias")
         workspace_alias = str(raw_ws) if isinstance(raw_ws, str) else None
+        raw_mcp = clean_args.get("mcpServerId")
+        if raw_mcp is not None and not isinstance(raw_mcp, str):
+            return WatchRegistrationOutcome(
+                accepted=False,
+                error_code="invalid_args",
+                error_message="mcpServerId must be a string",
+            )
+        mcp_server_id: str | None = raw_mcp
+
+        raw_task = clean_args.get("protocolTaskId")
+        if raw_task is not None and not isinstance(raw_task, str):
+            return WatchRegistrationOutcome(
+                accepted=False,
+                error_code="invalid_args",
+                error_message="protocolTaskId must be a string",
+            )
+        protocol_task_id: str | None = raw_task
 
         cp_existing = dict(job.checkpoint_data or {})
+        raw_fallback_lw = cp_existing.get("last_window")
+        fallback_last_window = raw_fallback_lw if isinstance(raw_fallback_lw, Mapping) else None
         wake_checks_used = int(cp_existing.get("wake_checks_used") or 0)
         max_wake_checks = int(cp_existing.get("max_wake_checks") or DEFAULT_MAX_WAKE_CHECKS)
         max_wake_checks = max(1, min(max_wake_checks, HARD_MAX_WAKE_CHECKS))
@@ -617,6 +701,9 @@ class WatchCoordinator:
                 signals=signals,
                 session_id=job.session_id,
                 workspace_alias=workspace_alias,
+                mcp_server_id=mcp_server_id,
+                protocol_task_id=protocol_task_id,
+                fallback_last_window=fallback_last_window,
             )
             if bind_err is not None or target is None:
                 code = bind_err or "target_not_found"
@@ -767,7 +854,7 @@ class WatchCoordinator:
         ok, active_signals, err_code, err_msg = await self._send_watch_register(
             watch,
             min_wait_seconds=0,
-            require_initial_change=(mode != WatchMode.TIMER),
+            require_initial_change=(mode not in {WatchMode.TIMER, WatchMode.PROTOCOL_ASYNC}),
             release_focus=True,
         )
 
@@ -1191,6 +1278,25 @@ class WatchCoordinator:
 
                     turns = list(cp.get("active_turns", []))
                     signals_text = ", ".join(event.observedSignals) or latest_watch.mode.value
+                    if latest_watch.mode == WatchMode.PROTOCOL_ASYNC:
+                        srv = latest_watch.target.mcp_server_id or ""
+                        tid = latest_watch.target.protocol_task_id or ""
+                        handle_hint = (
+                            f" (server={srv}, protocolTaskId={tid})" if srv and tid else ""
+                        )
+                        verify_instruction = (
+                            f"Call read-only mcp__task_result{handle_hint} first to verify the "
+                            "real completion outcome (Rule H1) before reporting or continuing; "
+                            "if still running, call job__wait."
+                        )
+                    else:
+                        verify_instruction = (
+                            "Call a real observation tool first and inspect concrete deliverables "
+                            "(such as changedFiles or live UI state) against every requirement in "
+                            "doneCriteria (Rule H1). File counts alone do not prove specific "
+                            "deliverables exist; if any expected item is still missing or the task "
+                            "is still running, do not claim completion—call job__wait again."
+                        )
                     turns.append(
                         {
                             "sub_goal_index": latest_job.active_sub_goal_index,
@@ -1202,8 +1308,7 @@ class WatchCoordinator:
                                 f"Verify real host state against doneCriteria: "
                                 f"{latest_watch.done_criteria} "
                                 f"(check {new_checks}/{latest_watch.max_wake_checks}). "
-                                "Call a real observation tool first; if still running, "
-                                "call job__wait."
+                                f"{verify_instruction}"
                             ),
                         }
                     )

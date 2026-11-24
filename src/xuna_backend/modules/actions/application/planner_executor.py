@@ -25,6 +25,7 @@ from xuna_backend.modules.actions.domain.job import (
 from xuna_backend.modules.actions.domain.redaction import sanitize_wake_text
 
 _logger = logging.getLogger(__name__)
+_SHORT_CODE_RE = re.compile(r"^[a-z0-9_.-]{1,64}$")
 
 # Execution plan sub-goal bounds (3-7 sub-goals)
 MIN_SUB_GOALS = 3
@@ -56,18 +57,22 @@ class JobPlannerExecutor:
         goal: str,
         prompt: str | None = None,
         title: str | None = None,
+        *,
+        max_steps: int | None = None,
     ) -> tuple[SubGoal, ...]:
         """Generates a structured execution plan containing between 3 and 7 sub-goals.
 
         Parses explicit steps if present, or decomposes natural-language goals into
-        generic, app-agnostic operational phases (Rule H5).
+        generic, app-agnostic operational phases (Rule H5). When ``max_steps`` is
+        tight, caps natural decomposition so early discovery phases do not exhaust
+        the step budget before primary execution or ``job__wait`` runs.
         """
         now = self._clock()
         raw_text = (goal or prompt or "").strip()
         parsed_steps = self._extract_explicit_steps(raw_text)
 
         if not parsed_steps:
-            parsed_steps = self._decompose_natural_goal(raw_text)
+            parsed_steps = self._decompose_natural_goal(raw_text, max_steps=max_steps)
 
         # Enforce boundary: 3 <= len(sub_goals) <= 7
         bounded_steps = self._bound_steps(parsed_steps, raw_text)
@@ -111,12 +116,36 @@ class JobPlannerExecutor:
 
         return steps
 
-    def _decompose_natural_goal(self, goal: str) -> list[tuple[str, str]]:
+    def _decompose_natural_goal(
+        self,
+        goal: str,
+        *,
+        max_steps: int | None = None,
+    ) -> list[tuple[str, str]]:
         """Decomposes a goal into standard app-agnostic phases (Rule H5)."""
         goal_summary = goal[:80] if goal else "autonomous task"
         words_count = len(goal.split())
+        is_watch_goal = "job__wait" in goal.lower()
 
-        if words_count > 25:
+        # Tight step budgets (<= 15) or explicit watch/wait goals use 3 compact
+        # phases so primary action / job__wait runs before the budget drains.
+        if (max_steps is not None and max_steps <= 15) or is_watch_goal:
+            return [
+                (
+                    "Bind target context and start operation",
+                    f"Inspect active context and execute or register watch for: {goal_summary}",
+                ),
+                (
+                    "Verify concrete outcome",
+                    "Observe real host deliverables and confirm done criteria are genuinely met",
+                ),
+                (
+                    "Conclude and summarize job",
+                    "Record honest verified summary and finalize autonomous job",
+                ),
+            ]
+
+        if words_count > 25 and (max_steps is None or max_steps >= 25):
             # Complex multi-step task -> 5 phases
             return [
                 (
@@ -276,6 +305,7 @@ class JobPlannerExecutor:
 
         # Rule H1 Honest Validation Check
         is_tool_ok = tool_status == "ok"
+        resolved_lw = self._resolve_last_window(job, tool_result, is_tool_ok=is_tool_ok)
 
         if not is_tool_ok:
             # Rule H1 Violation Prevention: Tool failed!
@@ -312,7 +342,7 @@ class JobPlannerExecutor:
             )
             compacted_history.append(failed_summary.to_dict())
 
-            checkpoint = {
+            checkpoint: dict[str, Any] = {
                 "current_sub_goal_idx": idx,
                 "step_count": job.steps_used + 1,
                 "sub_goals": [sg.to_dict() for sg in sub_goals],
@@ -320,6 +350,8 @@ class JobPlannerExecutor:
                 "active_turns": [],
                 "pending_approval_id": None,
             }
+            if resolved_lw is not None:
+                checkpoint["last_window"] = resolved_lw
 
             return JobStepOutcome(
                 kind="failed",
@@ -395,6 +427,8 @@ class JobPlannerExecutor:
                 "active_turns": remaining_active,
                 "pending_approval_id": None,
             }
+            if resolved_lw is not None:
+                checkpoint["last_window"] = resolved_lw
 
             if all_completed:
                 return JobStepOutcome(
@@ -447,6 +481,8 @@ class JobPlannerExecutor:
             "active_turns": active_turns,
             "pending_approval_id": None,
         }
+        if resolved_lw is not None:
+            checkpoint["last_window"] = resolved_lw
 
         return JobStepOutcome(
             kind="progress",
@@ -454,6 +490,47 @@ class JobPlannerExecutor:
             active_sub_goal_index=idx,
             checkpoint_data=self._compactor.sanitize_checkpoint(checkpoint),
         )
+
+    @staticmethod
+    def _resolve_last_window(
+        job: AutonomousJob,
+        tool_result: dict[str, Any] | None = None,
+        *,
+        is_tool_ok: bool = False,
+    ) -> dict[str, Any] | None:
+        prev_raw = job.checkpoint_data.get("last_window") if job.checkpoint_data else None
+        prev_lw = dict(prev_raw) if isinstance(prev_raw, dict) else None
+        if not is_tool_ok or tool_result is None:
+            return prev_lw
+
+        raw_output = tool_result.get("output")
+        payload: dict[str, Any] = raw_output if isinstance(raw_output, dict) else tool_result
+        if str(payload.get("status", "")).lower() != "running":
+            return prev_lw
+
+        raw_mcp = payload.get("mcpServerId")
+        raw_task = payload.get("protocolTaskId")
+        if not isinstance(raw_mcp, str) or not isinstance(raw_task, str):
+            return prev_lw
+
+        clean_mcp = raw_mcp.strip()
+        clean_task = raw_task.strip()
+        if (
+            not clean_mcp
+            or not clean_task
+            or len(clean_mcp) > 64
+            or len(clean_task) > 128
+            or "\n" in clean_mcp
+            or "\r" in clean_mcp
+            or not _SHORT_CODE_RE.fullmatch(clean_mcp)
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in clean_task)
+        ):
+            return prev_lw
+
+        next_lw = dict(prev_lw) if prev_lw is not None else {}
+        next_lw["mcpServerId"] = clean_mcp
+        next_lw["protocolTaskId"] = clean_task
+        return next_lw
 
     def complete_sub_goal_after_verified_tools(
         self,
@@ -478,6 +555,7 @@ class JobPlannerExecutor:
                 stop_reason="invalid_sub_goal_index",
             )
 
+        prev_lw = self._resolve_last_window(job)
         current_sg = sub_goals[idx]
         if current_sg.tool_call_count < 1:
             failed_sg = SubGoal(
@@ -491,7 +569,7 @@ class JobPlannerExecutor:
                 completed_at=now_dt,
             )
             sub_goals[idx] = failed_sg
-            checkpoint = {
+            checkpoint: dict[str, Any] = {
                 "current_sub_goal_idx": idx,
                 "step_count": job.steps_used + 1,
                 "sub_goals": [sg.to_dict() for sg in sub_goals],
@@ -501,6 +579,8 @@ class JobPlannerExecutor:
                 "active_turns": [],
                 "pending_approval_id": None,
             }
+            if prev_lw is not None:
+                checkpoint["last_window"] = prev_lw
             return JobStepOutcome(
                 kind="failed",
                 sub_goals=tuple(sub_goals),
@@ -565,6 +645,8 @@ class JobPlannerExecutor:
             "active_turns": remaining_active,
             "pending_approval_id": None,
         }
+        if prev_lw is not None:
+            checkpoint["last_window"] = prev_lw
 
         if all_completed:
             return JobStepOutcome(

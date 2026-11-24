@@ -248,7 +248,9 @@ class AutonomousJobRunner:
                     SubGoal.from_dict(sg) if isinstance(sg, dict) else sg for sg in sub_goals
                 )
             else:
-                parsed_sub_goals = self._planner.generate_plan(actual_goal, title=actual_title)
+                parsed_sub_goals = self._planner.generate_plan(
+                    actual_goal, title=actual_title, max_steps=step_limit
+                )
 
             initial_checkpoint = {
                 "current_sub_goal_idx": 0,
@@ -1105,7 +1107,9 @@ class OrchestratorJobStepExecutor:
         sub_goals = (
             list(job.sub_goals)
             if job.sub_goals
-            else list(self._planner.generate_plan(job.goal, title=job.title))
+            else list(
+                self._planner.generate_plan(job.goal, title=job.title, max_steps=job.max_steps)
+            )
         )
         idx = job.active_sub_goal_index
         if idx >= len(sub_goals):

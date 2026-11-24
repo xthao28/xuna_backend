@@ -103,6 +103,26 @@ class TestPlanGeneration:
                 assert forbidden not in title_lower
                 assert forbidden not in desc_lower
 
+    def test_tight_step_budget_and_watch_goals_use_compact_3_phase_plan(self) -> None:
+        planner = JobPlannerExecutor()
+        long_watch_goal = (
+            "Bind the currently active workspace context on the host, immediately invoke "
+            "job__wait with a 15 second quiescence timeout so zero tokens are spent while "
+            "waiting, and after waking inspect changedFiles and report the honest outcome "
+            "to the owner."
+        )
+        # Tight max_steps caps decomposition to 3 compact phases
+        compact_by_budget = planner.generate_plan(long_watch_goal, max_steps=10)
+        assert len(compact_by_budget) == MIN_SUB_GOALS
+        assert "watch" in compact_by_budget[0].description.lower()
+
+        # Explicit job__wait goal also uses 3 compact phases even without tight max_steps
+        compact_by_watch = planner.generate_plan(long_watch_goal)
+        assert len(compact_by_watch) == MIN_SUB_GOALS
+        assert "changedfiles" in compact_by_watch[1].description.lower() or (
+            "deliverables" in compact_by_watch[1].description.lower()
+        )
+
 
 # ---------------------------------------------------------------------------
 # 2. Sub-goal State Machine & Progress Tracking
