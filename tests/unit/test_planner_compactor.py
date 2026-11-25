@@ -653,3 +653,100 @@ class TestJobRunnerPlannerIntegration:
             await runner.shutdown()
 
         asyncio.run(_test())
+
+
+class TestInlineStepExtractionAndTransientBackoff:
+    def test_extracts_inline_numbered_steps_without_splitting_versions_or_percentages(self) -> None:
+        planner = JobPlannerExecutor()
+        goal = (
+            "Upgrade project alpha v2.0 through 3 sequential steps: "
+            "1) Update web UI with 0%/25%/45% tariff filters. "
+            "2) Create docs/compliance_roadmap.md for EVT-DVT-PVT. "
+            "3) Write tests/smoke_check.mjs and summarize results."
+        )
+        plan = planner.generate_plan(goal, max_steps=40)
+        assert len(plan) == 3
+        assert "Update web UI" in plan[0].title
+        assert "0%/25%/45%" in plan[0].description
+        assert "compliance_roadmap.md" in plan[1].description
+        assert "smoke_check.mjs" in plan[2].description
+
+    def test_extracts_inline_vietnamese_steps(self) -> None:
+        planner = JobPlannerExecutor()
+        goal = (
+            "Chạy nền 3 bước: Bước 1: cập nhật giao diện web. "
+            "Bước 2: viết tài liệu kiểm định. "
+            "Bước 3: viết kiểm thử tự động."
+        )
+        plan = planner.generate_plan(goal, max_steps=30)
+        assert len(plan) == 3
+        assert "cập nhật giao diện web" in plan[0].description
+        assert "viết tài liệu kiểm định" in plan[1].description
+        assert "viết kiểm thử tự động" in plan[2].description
+
+    def test_transient_provider_retry_delay_parses_retry_hint_and_rejects_fatal_errors(
+        self,
+    ) -> None:
+        from xuna_backend.modules.actions.application.job_runner import (
+            transient_provider_retry_delay_s,
+        )
+
+        # Gemini 429 RPM error with explicit "Please retry in 13.855s" hint -> 13.855 + 1.5s cushion
+        rpm_err = (
+            "quota_exhausted: 429 RESOURCE_EXHAUSTED: Generate content requests per minute "
+            "limit exceeded on Free Tier. Please retry in 13.855414664s."
+        )
+        delay = transient_provider_retry_delay_s(rpm_err, attempt=0)
+        assert delay is not None
+        assert 15.0 <= delay <= 16.0
+
+        # 503 overload without explicit seconds uses bounded exponential backoff
+        overload_delay = transient_provider_retry_delay_s("HTTP 503 UNAVAILABLE high demand", 1)
+        assert overload_delay == 30.0
+
+        # Fatal auth / daily-quota errors return None (fail fast, never retry)
+        assert transient_provider_retry_delay_s("status 401 invalid_api_key", 0) is None
+        assert (
+            transient_provider_retry_delay_s(
+                "429 RESOURCE_EXHAUSTED generate_requests_per_model_per_day", 0
+            )
+            is None
+        )
+        assert (
+            transient_provider_retry_delay_s(
+                "429 RESOURCE_EXHAUSTED Generate content requests per day limit exceeded", 0
+            )
+            is None
+        )
+        assert (
+            transient_provider_retry_delay_s(
+                "quota_exhausted: cooldown active (1784s remaining)", 0
+            )
+            is None
+        )
+
+    def test_openai_compatible_rpm_with_billing_boilerplate_uses_minute_cooldown(self) -> None:
+        from xuna_backend.modules.cognition.infrastructure.openai_compatible import (
+            _parse_quota_cooldown_s,
+        )
+
+        # Gemini RPM 429 includes generic "check your plan and billing details" boilerplate
+        # alongside "requests per minute" and "Please retry in 13.855s"; must arm minute
+        # cooldown (15s), NOT daily billing cooldown (600s+).
+        gemini_rpm = (
+            "You exceeded your current quota, please check your plan and billing details. "
+            "Generate content requests per minute limit exceeded on Free Tier. "
+            "Please retry in 13.855414664s."
+        )
+        assert _parse_quota_cooldown_s(gemini_rpm) == 15.0
+
+        # True daily limit with 19h retry hint must still arm max daily cooldown (1800s).
+        gemini_rpd = (
+            "You exceeded your current quota, please check your plan and billing details. "
+            "Generate content requests per day limit exceeded on Free Tier. "
+            "Please retry in 19h9m48.74s."
+        )
+        assert _parse_quota_cooldown_s(gemini_rpd) == 1800.0
+
+        # True billing/insufficient_quota without minute marker arms daily min cooldown (600s).
+        assert _parse_quota_cooldown_s("insufficient_quota: please check billing") == 600.0

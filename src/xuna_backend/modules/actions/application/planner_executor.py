@@ -96,7 +96,11 @@ class JobPlannerExecutor:
         return tuple(sub_goals)
 
     def _extract_explicit_steps(self, text: str) -> list[tuple[str, str]]:
-        """Extracts numbered or bulleted steps if user/caller specified an explicit plan."""
+        """Extracts numbered or bulleted steps if user/caller specified an explicit plan.
+
+        Supports both multi-line lists and inline sequential markers on a single line
+        (e.g. `"1) Update web... 2) Write docs... 3) Run tests..."`).
+        """
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         steps: list[tuple[str, str]] = []
         step_pattern = re.compile(
@@ -113,6 +117,29 @@ class JobPlannerExecutor:
                     title = parts[0].strip()[:60]
                     desc = parts[1].strip() if len(parts) > 1 else content
                     steps.append((title or "Execute phase", desc))
+
+        if len(steps) >= 2:
+            return steps
+
+        # Inline numbered/labeled steps (e.g. single-paragraph goals: "1) ... 2) ... 3) ...").
+        inline_pattern = re.compile(
+            r"(?:^|(?<=[\s:;\u2013\u2014-]))(?:(?:step|phase|stage|bước|chặng)\s*\d+\s*[:.)-]?|\d+\s*[.)])\s+",
+            re.IGNORECASE,
+        )
+        matches = list(inline_pattern.finditer(text))
+        if len(matches) >= 2:
+            inline_steps: list[tuple[str, str]] = []
+            for idx, m in enumerate(matches):
+                start = m.end()
+                end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+                content = text[start:end].strip(" ;.-")
+                if content:
+                    parts = content.split(":", 1)
+                    title = parts[0].strip()[:60]
+                    desc = parts[1].strip() if len(parts) > 1 else content
+                    inline_steps.append((title or "Execute phase", desc))
+            if len(inline_steps) >= 2:
+                return inline_steps
 
         return steps
 

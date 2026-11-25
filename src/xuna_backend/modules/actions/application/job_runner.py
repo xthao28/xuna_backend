@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import replace
@@ -89,6 +90,56 @@ from xuna_backend.modules.hosts.application.ports import HostRepository, HostSes
 from xuna_backend.modules.hosts.domain.entities import HostId, HostStatus, RiskTier
 
 _logger = logging.getLogger(__name__)
+_RETRY_IN_SECONDS_RE = re.compile(r"retry\s+in\s+(\d+(?:\.\d+)?)\s*s", re.IGNORECASE)
+_MAX_TRANSIENT_PROVIDER_RETRIES = 3
+
+
+def transient_provider_retry_delay_s(error_text: str, attempt: int) -> float | None:
+    """Returns a bounded backoff delay for transient RPM / 503 provider errors, else None.
+
+    Never retries auth failures or daily quota exhaustion so detached jobs fail fast on
+    unrecoverable provider errors while surviving short per-minute bursts.
+    """
+    lower = error_text.lower()
+    if any(
+        fatal in lower
+        for fatal in (
+            "invalid_api_key",
+            "unauthorized",
+            "status 401",
+            "status 403",
+            "permission_denied",
+            "per day",
+            "perday",
+            "per_day",
+            "daily",
+            "cooldown active",
+        )
+    ):
+        return None
+    is_transient = any(
+        tok in lower
+        for tok in (
+            "429",
+            "resource_exhausted",
+            "rate limit",
+            "rate_limit",
+            "requests per minute",
+            "retry in",
+            "503",
+            "unavailable",
+            "overloaded",
+            "high demand",
+            "timeout",
+        )
+    )
+    if not is_transient:
+        return None
+    match = _RETRY_IN_SECONDS_RE.search(error_text)
+    if match is not None:
+        parsed = float(match.group(1)) + 1.5
+        return max(5.0, min(parsed, 65.0))
+    return min(15.0 * (attempt + 1), 60.0)
 
 
 def sanitize_checkpoint_data(data: dict[str, Any]) -> dict[str, Any]:
@@ -988,6 +1039,7 @@ class OrchestratorJobStepExecutor:
         watch_coordinator: WatchCoordinator | None = None,
         wake_inbox: WakeInboxService | None = None,
         clock_utc: Callable[[], datetime] = lambda: datetime.now(UTC),
+        sleep_func: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._orchestrator_factory = orchestrator_factory
         self._host_repo_factory = host_repo_factory
@@ -1001,6 +1053,7 @@ class OrchestratorJobStepExecutor:
         self._watch_coordinator = watch_coordinator
         self._wake_inbox = wake_inbox
         self._clock = clock_utc
+        self._sleep = sleep_func
         self._ephemeral_vision: dict[uuid.UUID, tuple[str, str]] = {}
 
     def set_watch_coordinator(self, watch_coordinator: WatchCoordinator) -> None:
@@ -1150,12 +1203,27 @@ class OrchestratorJobStepExecutor:
             if lines:
                 steering_block = "\n\n[Owner Live Steering]:\n" + "\n".join(lines)
 
+        has_job_wait = any(t.name == JOB_WAIT_FUNCTION_NAME for t in tools)
+        wait_guidance = (
+            " Focus ONLY on the active sub-goal right now — do NOT bundle future sub-goals "
+            "into this step. If a tool dispatches an asynchronous or external operation "
+            "(such as a coding-agent prompt, build, or long-running protocol task), do NOT "
+            "poll in a tight loop and do NOT advance immediately: call `job__wait` "
+            "(for workspace file edits use `mode='fs_quiescence'` with `workspaceAlias`, "
+            "for UI activity use `mode='window_idle'`, for async protocol tasks use "
+            "`mode='protocol_async'`) with `continuationMode='auto_continue'` so the job "
+            "sleeps at zero token cost until completion, then inspect concrete deliverables "
+            "(such as `changedFiles` or task results) before completing this sub-goal."
+            if has_job_wait
+            else ""
+        )
         system_instruction = (
             f"{tool_system_prompt(locale, tools=tools)}\n\n"
             f"[Autonomous Job Goal]: {job.goal}\n"
             f"[Active Sub-Goal {idx + 1}/{len(sub_goals)}]: {current_sg.title} — "
             f"{current_sg.description}\n"
-            "Call the required host tool(s) to execute and verify this sub-goal. "
+            "Call the required host tool(s) to execute and verify this sub-goal."
+            f"{wait_guidance} "
             "Once at least one real tool has returned status='ok' and this sub-goal is "
             "genuinely satisfied, respond with a concise completion summary and no tool calls."
             f"{steering_block}"
@@ -1209,18 +1277,41 @@ class OrchestratorJobStepExecutor:
 
         text_parts: list[str] = []
         requested_calls: list[ToolCall] = []
-        try:
-            async for event in generator.stream(request):
-                if isinstance(event, TextDelta):
-                    text_parts.append(event.text)
-                elif isinstance(event, ToolCallRequested):
-                    requested_calls.append(event.call)
-        except ProviderUnavailableError as err:
+        last_provider_err: ProviderUnavailableError | None = None
+        for attempt in range(_MAX_TRANSIENT_PROVIDER_RETRIES + 1):
+            text_parts.clear()
+            requested_calls.clear()
+            try:
+                async for event in generator.stream(request):
+                    if isinstance(event, TextDelta):
+                        text_parts.append(event.text)
+                    elif isinstance(event, ToolCallRequested):
+                        requested_calls.append(event.call)
+                last_provider_err = None
+                break
+            except ProviderUnavailableError as err:
+                last_provider_err = err
+                if text_parts or requested_calls or attempt >= _MAX_TRANSIENT_PROVIDER_RETRIES:
+                    break
+                retry_delay = transient_provider_retry_delay_s(str(err), attempt)
+                if retry_delay is None:
+                    break
+                _logger.info(
+                    "Autonomous job %s hit transient provider error (attempt %d/%d); "
+                    "sleeping %.1fs before retry",
+                    job.job_id,
+                    attempt + 1,
+                    _MAX_TRANSIENT_PROVIDER_RETRIES,
+                    retry_delay,
+                )
+                await self._sleep(retry_delay)
+
+        if last_provider_err is not None:
             return JobStepOutcome(
                 kind="failed",
                 sub_goals=tuple(sub_goals),
                 active_sub_goal_index=idx,
-                error_message=str(err),
+                error_message=str(last_provider_err),
                 stop_reason="provider_unavailable",
             )
 

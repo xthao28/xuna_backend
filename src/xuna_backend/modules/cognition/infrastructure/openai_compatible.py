@@ -140,14 +140,19 @@ def _parse_quota_cooldown_s(text: str, retry_after_header: str = "") -> float:
             parsed_s = hours * 3600.0 + minutes * 60.0 + seconds
 
     lower = text.lower()
-    if any(marker in lower for marker in _DAILY_QUOTA_MARKERS) or (
-        parsed_s is not None and parsed_s >= 120.0
-    ):
+    has_explicit_daily = any(
+        marker in lower for marker in ("per day", "per_day", "perday", "daily", "requests_per_day")
+    )
+    has_explicit_minute = any(marker in lower for marker in _MINUTE_QUOTA_MARKERS)
+    if has_explicit_daily or (parsed_s is not None and parsed_s >= 120.0):
         base = parsed_s if parsed_s is not None else _DAILY_COOLDOWN_MIN_S
         return min(max(base, _DAILY_COOLDOWN_MIN_S), _DAILY_COOLDOWN_MAX_S)
-    if any(marker in lower for marker in _MINUTE_QUOTA_MARKERS):
+    if has_explicit_minute:
         base = parsed_s if parsed_s is not None else _MINUTE_COOLDOWN_MIN_S
         return min(max(base, _MINUTE_COOLDOWN_MIN_S), _MINUTE_COOLDOWN_MAX_S)
+    if any(marker in lower for marker in _DAILY_QUOTA_MARKERS):
+        base = parsed_s if parsed_s is not None else _DAILY_COOLDOWN_MIN_S
+        return min(max(base, _DAILY_COOLDOWN_MIN_S), _DAILY_COOLDOWN_MAX_S)
     if parsed_s is not None and parsed_s > 0:
         return min(max(parsed_s, _MINUTE_COOLDOWN_MIN_S), _DAILY_COOLDOWN_MAX_S)
     return _DEFAULT_QUOTA_COOLDOWN_S
