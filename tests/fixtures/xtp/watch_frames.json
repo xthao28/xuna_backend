@@ -385,6 +385,56 @@
         "digestChanged": false,
         "occurredAt": "2026-11-23T12:00:08Z"
       }
+    },
+    "watchRegisterExecAsyncRequest": {
+      "jsonrpc": "2.0",
+      "id": 707,
+      "method": "xuna/watchRegister",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111117",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "mode": "exec_async",
+        "target": {
+          "execTaskId": "exec_7f3a9c"
+        },
+        "quiescenceSeconds": 5,
+        "minWaitSeconds": 0,
+        "maxWaitSeconds": 900,
+        "requireInitialChange": false,
+        "releaseFocus": false
+      }
+    },
+    "watchRegisterExecAsyncAcceptedResponse": {
+      "jsonrpc": "2.0",
+      "id": 707,
+      "result": {
+        "schemaVersion": 1,
+        "accepted": true,
+        "watchId": "f1111111-1111-4111-8111-111111111117",
+        "activeSignals": [
+          "exec_async"
+        ],
+        "eventDriven": true,
+        "fallbackUsed": false
+      }
+    },
+    "watchEventExecAsyncSettledNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/watchEvent",
+      "params": {
+        "schemaVersion": 1,
+        "watchId": "f1111111-1111-4111-8111-111111111117",
+        "jobId": "a2222222-2222-4222-8222-222222222222",
+        "kind": "settled",
+        "observedSignals": [
+          "exec_async"
+        ],
+        "elapsedSeconds": 48,
+        "changeCount": 1,
+        "digestChanged": true,
+        "occurredAt": "2026-11-25T12:00:00Z"
+      }
     }
   },
   "invalidFrames": {
@@ -696,6 +746,29 @@
       },
       "expectedJsonRpcCode": -32602,
       "reason": "control_char_forbidden_in_protocolTaskId"
+    },
+    "watchRegisterExecAsyncInvalidTaskId": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 730,
+        "method": "xuna/watchRegister",
+        "params": {
+          "schemaVersion": 1,
+          "watchId": "f1111111-1111-4111-8111-111111111117",
+          "jobId": "a2222222-2222-4222-8222-222222222222",
+          "mode": "exec_async",
+          "target": {
+            "execTaskId": "rm -rf /"
+          },
+          "quiescenceSeconds": 5,
+          "minWaitSeconds": 0,
+          "maxWaitSeconds": 900,
+          "requireInitialChange": false,
+          "releaseFocus": false
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "invalid_execTaskId_format"
     }
   }
 }

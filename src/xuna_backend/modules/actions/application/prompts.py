@@ -11,6 +11,7 @@ Follows the OpenClaw / AgentSkills progressive-disclosure architecture:
 import json
 from collections.abc import Collection, Sequence
 
+from xuna_backend.modules.actions.application.prompt_dev_modules import dev_capability_modules
 from xuna_backend.modules.actions.domain.entities import MAX_TOOL_OUTPUT_BYTES
 from xuna_backend.modules.cognition.domain.types import Locale, ToolSpec
 
@@ -372,6 +373,8 @@ def tool_system_prompt(
         name.startswith("forge__custom_") for name in active_names
     ):
         parts.append(_FORGE_SKILL_MODULE_EN if is_en else _FORGE_SKILL_MODULE_VI)
+
+    parts.extend(dev_capability_modules(active_names, english=is_en))
 
     if host_roster and host_roster.strip():
         parts.append(f"\n\n{host_roster.strip()}")

@@ -60,13 +60,14 @@ from xuna_backend.modules.hosts.domain.session import HostSessionRejected
 FIXTURE_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "xtp" / "watch_frames.json"
 
 
-def test_watch_frames_golden_fixture_all_27_valid_and_14_invalid_parity() -> None:
+def test_watch_frames_golden_fixture_all_30_valid_and_15_invalid_parity() -> None:
     raw = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     frames: dict[str, dict[str, object]] = raw["frames"]
     invalid_frames: dict[str, dict[str, object]] = raw["invalidFrames"]
 
-    assert len(frames) == 27
-    assert len(invalid_frames) == 14
+    # 27 + 3 Wave 3 `exec_async` frames; 14 + 1 invalid `execTaskId` (ADR-0018).
+    assert len(frames) == 30
+    assert len(invalid_frames) == 15
 
     for name, frame in frames.items():
         if "method" in frame and "id" in frame:

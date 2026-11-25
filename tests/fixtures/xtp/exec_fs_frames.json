@@ -1,0 +1,964 @@
+{
+  "schemaVersion": 1,
+  "frames": {
+    "toolsListExecFsResponse": {
+      "jsonrpc": "2.0",
+      "id": 800,
+      "result": {
+        "tools": [
+          {
+            "name": "fs.list_files",
+            "description": "List files under a local absolute path (bounded depth/entries; secret stores are never listed).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "glob": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "maxDepth": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 6
+                },
+                "maxEntries": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 200
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "entries": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1024
+                      },
+                      "kind": {
+                        "type": "string",
+                        "enum": [
+                          "file",
+                          "dir"
+                        ]
+                      },
+                      "sizeBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "kind"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "totalReturned": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "entries",
+                "truncated",
+                "totalReturned"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "files",
+                "risk": "R1",
+                "observes": true,
+                "reversible": true,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "fs.read_file",
+            "description": "Read up to 400 lines of a local text file (secret files refused, output redacted, <= 16 KiB).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "startLine": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1073741824
+                },
+                "endLine": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1073741824
+                }
+              },
+              "required": [
+                "path"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "content": {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                "startLine": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "endLine": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "totalLines": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "content",
+                "startLine",
+                "endLine",
+                "totalLines",
+                "truncated"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "files",
+                "risk": "R1",
+                "observes": true,
+                "reversible": true,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "fs.grep",
+            "description": "Search local text files for a literal or regex pattern (bounded matches, redacted lines).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "pattern": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "isRegex": {
+                  "type": "boolean"
+                },
+                "glob": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "maxMatches": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100
+                }
+              },
+              "required": [
+                "path",
+                "pattern"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "matches": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 1024
+                      },
+                      "line": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "text": {
+                        "type": "string",
+                        "minLength": 0,
+                        "maxLength": 400
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "line",
+                      "text"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "totalReturned": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "matches",
+                "truncated",
+                "totalReturned"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "files",
+                "risk": "R1",
+                "observes": true,
+                "reversible": true,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "fs.write_file",
+            "description": "Atomically write a local text file (R2 inside workspace roots, R3 outside or for dotfiles).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "content": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 262144
+                },
+                "createParents": {
+                  "type": "boolean"
+                },
+                "overwrite": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "bytesWritten": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "created": {
+                  "type": "boolean"
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "bytesWritten",
+                "created",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "files",
+                "risk": "R2",
+                "observes": false,
+                "reversible": false,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "fs.patch_file",
+            "description": "Replace an exact text occurrence in a local file (fails when missing or ambiguous; atomic).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "target": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 65536
+                },
+                "replacement": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 65536
+                },
+                "replaceAll": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "path",
+                "target",
+                "replacement"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "replacements": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "bytesWritten": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "replacements",
+                "bytesWritten",
+                "sha256"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "files",
+                "risk": "R2",
+                "observes": false,
+                "reversible": false,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "exec.run",
+            "description": "Run a local command in its own process group (host preflight: R2 local dev, R3 destructive/network, sudo/secrets refused).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "cwd": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "timeoutMs": {
+                  "type": "integer",
+                  "minimum": 1000,
+                  "maximum": 300000
+                },
+                "yieldMs": {
+                  "type": "integer",
+                  "minimum": 500,
+                  "maximum": 60000
+                },
+                "pty": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "completed",
+                    "running",
+                    "failed",
+                    "timed_out",
+                    "cancelled"
+                  ]
+                },
+                "execTaskId": {
+                  "type": "string",
+                  "pattern": "^exec_[a-zA-Z0-9_-]{1,64}$"
+                },
+                "exitCode": {
+                  "type": "integer"
+                },
+                "output": {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "durationMs": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "status",
+                "output",
+                "truncated",
+                "durationMs"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "exec",
+                "risk": "R2",
+                "observes": true,
+                "reversible": false,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "exec.status",
+            "description": "Read the status, exit code and redacted output tail of an exec task.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "taskId": {
+                  "type": "string",
+                  "pattern": "^exec_[a-zA-Z0-9_-]{1,64}$"
+                },
+                "tailBytes": {
+                  "type": "integer",
+                  "minimum": 256,
+                  "maximum": 16384
+                }
+              },
+              "required": [
+                "taskId"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "taskId": {
+                  "type": "string",
+                  "pattern": "^exec_[a-zA-Z0-9_-]{1,64}$"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "completed",
+                    "running",
+                    "failed",
+                    "timed_out",
+                    "cancelled"
+                  ]
+                },
+                "exitCode": {
+                  "type": "integer"
+                },
+                "output": {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "elapsedMs": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "taskId",
+                "status",
+                "output",
+                "truncated",
+                "elapsedMs"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "exec",
+                "risk": "R1",
+                "observes": true,
+                "reversible": false,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "exec.write_stdin",
+            "description": "Write text to the stdin of a running exec task (R3 when the task itself was R3).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "taskId": {
+                  "type": "string",
+                  "pattern": "^exec_[a-zA-Z0-9_-]{1,64}$"
+                },
+                "input": {
+                  "type": "string",
+                  "minLength": 0,
+                  "maxLength": 2048
+                },
+                "appendNewline": {
+                  "type": "boolean"
+                },
+                "eof": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "taskId",
+                "input"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "taskId": {
+                  "type": "string",
+                  "pattern": "^exec_[a-zA-Z0-9_-]{1,64}$"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "completed",
+                    "running",
+                    "failed",
+                    "timed_out",
+                    "cancelled"
+                  ]
+                },
+                "bytesWritten": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "taskId",
+                "status",
+                "bytesWritten"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "exec",
+                "risk": "R2",
+                "observes": false,
+                "reversible": false,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "exec.cancel",
+            "description": "Terminate an exec task and its whole process group.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "taskId": {
+                  "type": "string",
+                  "pattern": "^exec_[a-zA-Z0-9_-]{1,64}$"
+                }
+              },
+              "required": [
+                "taskId"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "taskId": {
+                  "type": "string",
+                  "pattern": "^exec_[a-zA-Z0-9_-]{1,64}$"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "cancelled",
+                    "already_finished"
+                  ]
+                },
+                "signalSent": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "taskId",
+                "status",
+                "signalSent"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "exec",
+                "risk": "R1",
+                "observes": false,
+                "reversible": false,
+                "permission": "granted"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "preflightExecRunRequest": {
+      "jsonrpc": "2.0",
+      "id": 801,
+      "method": "xuna/preflight",
+      "params": {
+        "name": "exec.run",
+        "arguments": {
+          "command": "node tests/smoke_check.mjs",
+          "cwd": "~/Projects/app",
+          "yieldMs": 10000
+        }
+      }
+    },
+    "preflightExecRunR2Response": {
+      "jsonrpc": "2.0",
+      "id": 801,
+      "result": {
+        "preflight": {
+          "status": "ok",
+          "effectiveRisk": "R2",
+          "reasonCode": "local_command"
+        }
+      }
+    },
+    "preflightExecRunR3Response": {
+      "jsonrpc": "2.0",
+      "id": 802,
+      "result": {
+        "preflight": {
+          "status": "ok",
+          "effectiveRisk": "R3",
+          "reasonCode": "network_command"
+        }
+      }
+    },
+    "preflightExecRunHardDeniedResponse": {
+      "jsonrpc": "2.0",
+      "id": 803,
+      "result": {
+        "preflight": {
+          "status": "denied",
+          "errorCode": "exec_hard_denied"
+        }
+      }
+    },
+    "preflightExecRunEnvDumpResponse": {
+      "jsonrpc": "2.0",
+      "id": 804,
+      "result": {
+        "preflight": {
+          "status": "denied",
+          "errorCode": "exec_env_dump_forbidden"
+        }
+      }
+    },
+    "preflightShellNotEnabledResponse": {
+      "jsonrpc": "2.0",
+      "id": 805,
+      "result": {
+        "preflight": {
+          "status": "denied",
+          "errorCode": "shell_not_enabled"
+        }
+      }
+    },
+    "preflightFsWriteOutsideWorkspaceResponse": {
+      "jsonrpc": "2.0",
+      "id": 806,
+      "result": {
+        "preflight": {
+          "status": "ok",
+          "effectiveRisk": "R3",
+          "reasonCode": "outside_workspace"
+        }
+      }
+    },
+    "toolsCallExecRunRequest": {
+      "jsonrpc": "2.0",
+      "id": 810,
+      "method": "tools/call",
+      "params": {
+        "name": "exec.run",
+        "arguments": {
+          "command": "npm test",
+          "cwd": "~/Projects/app",
+          "yieldMs": 10000
+        },
+        "_meta": {
+          "xuna/invocationId": "6a4d3e21-9b5f-4c82-8d23-1f5a7b9c0d12",
+          "xuna/deadlineMs": 15000
+        }
+      }
+    },
+    "toolsCallExecRunCompletedResponse": {
+      "jsonrpc": "2.0",
+      "id": 810,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "completed exit=0"
+          }
+        ],
+        "structuredContent": {
+          "status": "completed",
+          "exitCode": 0,
+          "output": "PASS 12 tests\ntoken=[REDACTED]\n",
+          "truncated": false,
+          "durationMs": 4210
+        },
+        "isError": false,
+        "_meta": {
+          "xuna/status": "ok",
+          "xuna/durationMs": 4215
+        }
+      }
+    },
+    "toolsCallExecRunRunningResponse": {
+      "jsonrpc": "2.0",
+      "id": 811,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "running exec_7f3a9c"
+          }
+        ],
+        "structuredContent": {
+          "status": "running",
+          "execTaskId": "exec_7f3a9c",
+          "output": "building...\n",
+          "truncated": false,
+          "durationMs": 10002
+        },
+        "isError": false,
+        "_meta": {
+          "xuna/status": "ok",
+          "xuna/durationMs": 10004
+        }
+      }
+    },
+    "toolsCallExecStatusResponse": {
+      "jsonrpc": "2.0",
+      "id": 812,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "failed exit=1"
+          }
+        ],
+        "structuredContent": {
+          "taskId": "exec_7f3a9c",
+          "status": "failed",
+          "exitCode": 1,
+          "output": "1 failing\n",
+          "truncated": false,
+          "elapsedMs": 48211
+        },
+        "isError": false,
+        "_meta": {
+          "xuna/status": "ok",
+          "xuna/durationMs": 31
+        }
+      }
+    },
+    "toolsCallExecRunTaskLimitResponse": {
+      "jsonrpc": "2.0",
+      "id": 813,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "exec_task_limit_reached"
+          }
+        ],
+        "structuredContent": {},
+        "isError": true,
+        "_meta": {
+          "xuna/status": "denied",
+          "xuna/errorCode": "exec_task_limit_reached",
+          "xuna/durationMs": 2
+        }
+      }
+    },
+    "toolsCallExecRunHardDeniedResponse": {
+      "jsonrpc": "2.0",
+      "id": 814,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "exec_hard_denied"
+          }
+        ],
+        "structuredContent": {},
+        "isError": true,
+        "_meta": {
+          "xuna/status": "denied",
+          "xuna/errorCode": "exec_hard_denied",
+          "xuna/durationMs": 1
+        }
+      }
+    },
+    "toolsCallExecCancelResponse": {
+      "jsonrpc": "2.0",
+      "id": 815,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "cancelled"
+          }
+        ],
+        "structuredContent": {
+          "taskId": "exec_7f3a9c",
+          "status": "cancelled",
+          "signalSent": true
+        },
+        "isError": false,
+        "_meta": {
+          "xuna/status": "ok",
+          "xuna/durationMs": 31
+        }
+      }
+    },
+    "toolsCallFsReadFileResponse": {
+      "jsonrpc": "2.0",
+      "id": 820,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "1 line"
+          }
+        ],
+        "structuredContent": {
+          "content": "export const a = 1;\n",
+          "startLine": 1,
+          "endLine": 1,
+          "totalLines": 1,
+          "truncated": false
+        },
+        "isError": false,
+        "_meta": {
+          "xuna/status": "ok",
+          "xuna/durationMs": 31
+        }
+      }
+    },
+    "toolsCallFsPatchFileResponse": {
+      "jsonrpc": "2.0",
+      "id": 821,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "patched"
+          }
+        ],
+        "structuredContent": {
+          "replacements": 1,
+          "bytesWritten": 21,
+          "sha256": "b1946ac92492d2347c6235b4d2611184b1946ac92492d2347c6235b4d2611184"
+        },
+        "isError": false,
+        "_meta": {
+          "xuna/status": "ok",
+          "xuna/durationMs": 31
+        }
+      }
+    },
+    "toolsCallFsPatchAmbiguousResponse": {
+      "jsonrpc": "2.0",
+      "id": 822,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "patch_target_ambiguous"
+          }
+        ],
+        "structuredContent": {},
+        "isError": true,
+        "_meta": {
+          "xuna/status": "failed",
+          "xuna/errorCode": "patch_target_ambiguous",
+          "xuna/durationMs": 3
+        }
+      }
+    }
+  }
+}

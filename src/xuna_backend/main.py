@@ -40,6 +40,9 @@ from xuna_backend.modules.cognition.infrastructure import (
     openai_transcription,
     piper_adapter,
 )
+from xuna_backend.modules.cognition.infrastructure.fallback_text_generator import (
+    FallbackTextGenerator,
+)
 from xuna_backend.modules.consent.api.routes import router as consent_router
 from xuna_backend.modules.consent.infrastructure.repository import SqlConsentRepository
 from xuna_backend.modules.conversation.api.routes import router as conversation_router
@@ -91,7 +94,25 @@ def text_generator(settings: Settings) -> TextGenerator:
         "api_key_header": settings.text_api_key_header,
         "reasoning_effort": settings.text_reasoning_effort,
     }
-    return cast(TextGenerator, registry.create(Capability.TEXT, settings.text_provider, options))
+    primary = cast(TextGenerator, registry.create(Capability.TEXT, settings.text_provider, options))
+    if settings.text_provider == "echo" or not (
+        settings.text_fallback_models or settings.text_fallback_providers
+    ):
+        return primary
+    candidates: list[tuple[str, TextGenerator]] = [(settings.text_model, primary)]
+    for model in settings.text_fallback_models:
+        backup = cast(
+            TextGenerator,
+            registry.create(Capability.TEXT, settings.text_provider, {**options, "model": model}),
+        )
+        candidates.append((model, backup))
+    for entry in settings.text_fallback_providers:
+        extra = cast(
+            TextGenerator,
+            registry.create(Capability.TEXT, entry["provider"], entry),
+        )
+        candidates.append((f"{entry['provider']}:{entry['model']}", extra))
+    return FallbackTextGenerator(candidates)
 
 
 def expert_text_generator(settings: Settings) -> TextGenerator | None:

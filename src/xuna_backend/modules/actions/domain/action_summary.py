@@ -5,6 +5,7 @@ Extracted from `entities.py` to keep domain entities focused and modular.
 
 from urllib.parse import urlparse
 
+from xuna_backend.modules.actions.domain.exec_fs_summary import exec_fs_pending_text
 from xuna_backend.modules.cognition.domain.types import Locale
 
 _BOARD_KEY_LABELS_VI: dict[str, str] = {
@@ -198,6 +199,11 @@ class ActionSummary:
         target_alias: str,
         locale: Locale = Locale.VI,
     ) -> str:
+        exec_fs_text = exec_fs_pending_text(
+            tool, arguments, target_alias, english=locale == Locale.EN
+        )
+        if exec_fs_text is not None:
+            return exec_fs_text
         if locale == Locale.EN:
             return ActionSummary._format_pending_en(tool, arguments, target_alias)
         return ActionSummary._format_pending_vi(tool, arguments, target_alias)

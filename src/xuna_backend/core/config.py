@@ -3,9 +3,49 @@
 No secret has a default value; secrets never appear in source or logs.
 """
 
+import json
 import os
 from dataclasses import dataclass
 from enum import StrEnum
+
+_FALLBACK_PROVIDER_REQUIRED = ("provider", "base_url", "api_key", "model")
+_FALLBACK_PROVIDER_KEYS = (*_FALLBACK_PROVIDER_REQUIRED, "api_key_header")
+
+
+def parse_fallback_models(raw: str) -> tuple[str, ...]:
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def parse_fallback_providers(raw: str) -> tuple[dict[str, str], ...]:
+    """Strict parse of `XUNA_TEXT_FALLBACK_PROVIDERS`. Errors name the field, never a secret."""
+    if not raw.strip():
+        return ()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError("XUNA_TEXT_FALLBACK_PROVIDERS is not valid JSON") from error
+    if not isinstance(data, list):
+        raise ValueError("XUNA_TEXT_FALLBACK_PROVIDERS must be a JSON array")
+    entries: list[dict[str, str]] = []
+    for position, item in enumerate(data):
+        where = f"XUNA_TEXT_FALLBACK_PROVIDERS[{position}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{where} must be an object")
+        for key in item:
+            if key not in _FALLBACK_PROVIDER_KEYS:
+                raise ValueError(f"{where} has unknown key {str(key)[:40]!r}")
+        entry: dict[str, str] = {}
+        for key in _FALLBACK_PROVIDER_KEYS:
+            if key not in item:
+                if key in _FALLBACK_PROVIDER_REQUIRED:
+                    raise ValueError(f"{where}.{key} is required")
+                continue
+            value = item[key]
+            if not isinstance(value, str) or (not value and key != "api_key_header"):
+                raise ValueError(f"{where}.{key} must be a non-empty string")
+            entry[key] = value
+        entries.append(entry)
+    return tuple(entries)
 
 
 class Environment(StrEnum):
@@ -39,6 +79,10 @@ class Settings:
     # Optional OpenAI `reasoning_effort` (e.g. "none"/"low") for thinking models,
     # whose hidden reasoning otherwise eats short output budgets. Empty = not sent.
     text_reasoning_effort: str = ""
+    # Ordered failover (W3-M1): extra models on the primary endpoint, then whole providers.
+    text_fallback_models: tuple[str, ...] = ()
+    # Entries hold api_key values: never print or log this field.
+    text_fallback_providers: tuple[dict[str, str], ...] = ()
     # Expert-mode text provider (KX-1, plan §6.1). Empty provider = reuse `text_generator`.
     text_expert_provider: str = ""
     text_expert_base_url: str = ""
@@ -118,6 +162,10 @@ class Settings:
             text_api_key_header=source.get("XUNA_TEXT_API_KEY_HEADER", "authorization"),
             text_timeout_s=float(source.get("XUNA_TEXT_TIMEOUT_S", "30")),
             text_reasoning_effort=source.get("XUNA_TEXT_REASONING_EFFORT", ""),
+            text_fallback_models=parse_fallback_models(source.get("XUNA_TEXT_FALLBACK_MODELS", "")),
+            text_fallback_providers=parse_fallback_providers(
+                source.get("XUNA_TEXT_FALLBACK_PROVIDERS", "")
+            ),
             text_expert_provider=source.get("XUNA_TEXT_EXPERT_PROVIDER", ""),
             text_expert_base_url=source.get("XUNA_TEXT_EXPERT_BASE_URL", ""),
             text_expert_model=source.get("XUNA_TEXT_EXPERT_MODEL", ""),

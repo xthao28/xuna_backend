@@ -76,22 +76,24 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "app.list_allowed",
     "url.open",
     "finder.reveal",
-    # Tier 0 headless OS native, media, workspace, web CDP, MCP, clipboard (5..19)
+    # Direct dev loop (ADR-0018) + media, web CDP, MCP (5..19). `fs.*` needs a `files`
+    # grant and `exec.*` a local shellControl switch plus an `exec` grant, so hosts without
+    # them lose no direct slot.
+    "fs.read_file",
+    "fs.grep",
+    "fs.list_files",
+    "fs.patch_file",
+    "fs.write_file",
+    "exec.run",
+    "exec.status",
+    "exec.cancel",
+    "workspace.coding_agent",
     "media.play_pause",
-    "media.next",
     "media.volume_set",
-    "media.now_playing",
-    "notes.create",
-    "notes.search",
-    "reminders.create",
-    "calendar.list_events",
-    "workspace.open",
-    "workspace.git_summary",
     "web.navigate",
     "web.snapshot",
     "mcp.list_servers",
     "mcp.call",
-    "clipboard.write",
     # Tier 2/3 core CU, UI, Input (20..29) — adjacency invariants preserved!
     "cu.session_start",
     "ui.inspect",
@@ -108,6 +110,15 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "mcp.task_cancel",
     # Slots 32..40: direct when reserved == 0 or fewer tools, else 1-hop tool_search
     "cu.session_extend",
+    "media.next",
+    "media.now_playing",
+    "notes.create",
+    "notes.search",
+    "reminders.create",
+    "calendar.list_events",
+    "workspace.open",
+    "workspace.git_summary",
+    "clipboard.write",
     "media.previous",
     "media.play_search",
     "clipboard.read",
@@ -137,8 +148,7 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "ui.long_press",
     "ui.swipe_drag",
     "app.open_scheme",
-    # Workspace dev & Forge
-    "workspace.coding_agent",
+    # Forge
     "forge.synthesize_skill",
     "forge.run_skill",
     "forge.list_and_manage",
@@ -201,6 +211,13 @@ def is_tool_granted(
     an active (enabled, non-expired, non-suspended) grant for `descriptor.family` whose
     `max_risk` covers `descriptor.risk`."""
     if descriptor.permission == ToolPermissionState.UNSUPPORTED:
+        return False
+    # ADR-0018: the host declares `exec.*` granted only while its local-only
+    # `shellControl` switch is on; otherwise the tools never reach the catalog.
+    if (
+        descriptor.family == ToolFamily.EXEC
+        and descriptor.permission != ToolPermissionState.GRANTED
+    ):
         return False
     if (
         descriptor.observes or descriptor.family in _U5_REQUIRED_FAMILIES

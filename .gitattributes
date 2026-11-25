@@ -1,0 +1,2 @@
+# XTP golden fixtures must stay byte-identical with desktop/packages/xuna_xtp/test/fixtures/xtp/.
+tests/fixtures/xtp/*.json text eol=lf

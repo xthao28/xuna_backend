@@ -158,6 +158,20 @@ def _parse_quota_cooldown_s(text: str, retry_after_header: str = "") -> float:
     return _DEFAULT_QUOTA_COOLDOWN_S
 
 
+_COOLDOWN_ACTIVE_RE = re.compile(r"cooldown active \((\d+)s remaining\)")
+
+
+def cooldown_hint_s(error_message: str) -> float | None:
+    """Public: seconds to avoid this provider, from a `ProviderUnavailableError`
+    message raised by this adapter; None when the message is not quota-related."""
+    active = _COOLDOWN_ACTIVE_RE.search(error_message)
+    if active is not None:
+        return float(active.group(1))
+    if _is_quota_exhausted(error_message):
+        return _parse_quota_cooldown_s(error_message)
+    return None
+
+
 def _serialize_message(
     m: Message,
     extra_by_call_id: Mapping[str, dict[str, Any]] | None = None,

@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "frames": {
+    "getPolicyRequest": {
+      "jsonrpc": "2.0",
+      "id": 830,
+      "method": "xuna/get_policy",
+      "params": {}
+    },
+    "getPolicyShellDisabledResponse": {
+      "jsonrpc": "2.0",
+      "id": 830,
+      "result": {
+        "schemaVersion": 1,
+        "trustPreset": "standard",
+        "allowApps": [
+          "vscode"
+        ],
+        "denyApps": [],
+        "allowDomains": [
+          "github.com"
+        ],
+        "denyDomains": [],
+        "discoveredApps": [
+          "vscode"
+        ],
+        "shellEnabled": false
+      }
+    },
+    "getPolicyShellEnabledResponse": {
+      "jsonrpc": "2.0",
+      "id": 831,
+      "result": {
+        "schemaVersion": 1,
+        "trustPreset": "autopilot",
+        "allowApps": [],
+        "denyApps": [],
+        "allowDomains": [],
+        "denyDomains": [],
+        "discoveredApps": [],
+        "shellEnabled": true
+      }
+    },
+    "setPolicyRequest": {
+      "jsonrpc": "2.0",
+      "id": 832,
+      "method": "xuna/set_policy",
+      "params": {
+        "schemaVersion": 1,
+        "trustPreset": "autopilot",
+        "allowApps": [
+          "vscode"
+        ],
+        "denyApps": [],
+        "allowDomains": [],
+        "denyDomains": []
+      }
+    },
+    "setPolicyOkResponse": {
+      "jsonrpc": "2.0",
+      "id": 832,
+      "result": {
+        "schemaVersion": 1,
+        "status": "ok"
+      }
+    }
+  },
+  "invalidFrames": {
+    "setPolicyWithShellControl": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 833,
+        "method": "xuna/set_policy",
+        "params": {
+          "schemaVersion": 1,
+          "trustPreset": "autopilot",
+          "shellControl": {
+            "enabled": true
+          }
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "shell_control_is_local_only"
+    },
+    "setPolicyWithShellControlSnakeCase": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 834,
+        "method": "xuna/set_policy",
+        "params": {
+          "schemaVersion": 1,
+          "trustPreset": "standard",
+          "shell_control": {
+            "enabled": true
+          }
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "shell_control_is_local_only"
+    },
+    "setPolicyWithShellEnabled": {
+      "frame": {
+        "jsonrpc": "2.0",
+        "id": 835,
+        "method": "xuna/set_policy",
+        "params": {
+          "schemaVersion": 1,
+          "trustPreset": "standard",
+          "shellEnabled": true
+        }
+      },
+      "expectedJsonRpcCode": -32602,
+      "reason": "shell_enabled_is_read_only"
+    }
+  }
+}

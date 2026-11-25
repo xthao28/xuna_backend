@@ -14,6 +14,10 @@ from xuna_backend.modules.actions.application.computer_use import (
     ComputerUseSessionState,
     is_hard_denied_target,
 )
+from xuna_backend.modules.actions.application.exec_fs_support import (
+    bind_exec_async_target,
+    exec_async_verify_instruction,
+)
 from xuna_backend.modules.actions.application.ports import ComputerUseSessionStore
 from xuna_backend.modules.actions.application.wake_inbox import WakeInboxService
 from xuna_backend.modules.actions.domain.job import (
@@ -328,6 +332,7 @@ class WatchCoordinator:
         mcp_server_id: str | None = None,
         protocol_task_id: str | None = None,
         fallback_last_window: Mapping[str, Any] | None = None,
+        exec_task_id: object = None,
     ) -> tuple[WatchTarget | None, str | None]:
         """Binds an OS-generic watch target from observed CU/host state; never guesses (H3)."""
         clean_workspace: str | None = None
@@ -339,6 +344,8 @@ class WatchCoordinator:
 
         if mode == WatchMode.TIMER:
             return WatchTarget(), None
+        if mode == WatchMode.EXEC_ASYNC:
+            return bind_exec_async_target(exec_task_id)
 
         twin = self._hub.get_twin(str(host_id))
         if (
@@ -642,6 +649,7 @@ class WatchCoordinator:
                 error_message="protocolTaskId must be a string",
             )
         protocol_task_id: str | None = raw_task
+        exec_task_id: object = clean_args.get("execTaskId")
 
         cp_existing = dict(job.checkpoint_data or {})
         raw_fallback_lw = cp_existing.get("last_window")
@@ -704,6 +712,7 @@ class WatchCoordinator:
                 mcp_server_id=mcp_server_id,
                 protocol_task_id=protocol_task_id,
                 fallback_last_window=fallback_last_window,
+                exec_task_id=exec_task_id,
             )
             if bind_err is not None or target is None:
                 code = bind_err or "target_not_found"
@@ -854,7 +863,9 @@ class WatchCoordinator:
         ok, active_signals, err_code, err_msg = await self._send_watch_register(
             watch,
             min_wait_seconds=0,
-            require_initial_change=(mode not in {WatchMode.TIMER, WatchMode.PROTOCOL_ASYNC}),
+            require_initial_change=(
+                mode not in {WatchMode.TIMER, WatchMode.PROTOCOL_ASYNC, WatchMode.EXEC_ASYNC}
+            ),
             release_focus=True,
         )
 
@@ -1278,7 +1289,11 @@ class WatchCoordinator:
 
                     turns = list(cp.get("active_turns", []))
                     signals_text = ", ".join(event.observedSignals) or latest_watch.mode.value
-                    if latest_watch.mode == WatchMode.PROTOCOL_ASYNC:
+                    if latest_watch.mode == WatchMode.EXEC_ASYNC:
+                        verify_instruction = exec_async_verify_instruction(
+                            latest_watch.target.exec_task_id
+                        )
+                    elif latest_watch.mode == WatchMode.PROTOCOL_ASYNC:
                         srv = latest_watch.target.mcp_server_id or ""
                         tid = latest_watch.target.protocol_task_id or ""
                         handle_hint = (
@@ -2088,6 +2103,7 @@ class WatchCoordinator:
             tabId=watch.target.tab_id,
             mcpServerId=watch.target.mcp_server_id,
             protocolTaskId=watch.target.protocol_task_id,
+            execTaskId=watch.target.exec_task_id,
         )
         signals_wire: list[WatchCompositeSignalWire] | None = (
             [s.value for s in watch.signals] if watch.mode == WatchMode.COMPOSITE else None

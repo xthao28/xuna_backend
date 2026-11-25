@@ -60,6 +60,10 @@ from xuna_backend.modules.actions.application.computer_use import (
     session_expiry_reason,
 )
 from xuna_backend.modules.actions.application.cu_template import CuTemplatePin
+from xuna_backend.modules.actions.application.exec_fs_support import (
+    missing_preflight_refusal,
+    requires_mandatory_preflight,
+)
 from xuna_backend.modules.actions.application.mesh_call_helper import (
     build_cu_mission_envelope,
     build_pipeline_runner,
@@ -2084,12 +2088,16 @@ class Orchestrator:
                 == "autopilot"
             )
         preflight: HostPreflight | None = None
+        mandatory_preflight = requires_mandatory_preflight(descriptor.name)
         if (
-            descriptor.name in _PREFLIGHT_TOOLS
+            (descriptor.name in _PREFLIGHT_TOOLS or mandatory_preflight)
             and not is_self_host
             and host.platform in _PREFLIGHT_PLATFORMS
         ):
             preflight = await self._host_preflight(host.host_id, descriptor.name, clean_args)
+        if mandatory_preflight and preflight is None:
+            # ADR-0018: exec/fs writes never run on a backend estimate.
+            preflight = missing_preflight_refusal()
         live_label: str | None = None
         if preflight is None:
             effective_risk = self._effective_tool_risk(

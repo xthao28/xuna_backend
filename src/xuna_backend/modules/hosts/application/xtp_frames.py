@@ -207,6 +207,7 @@ WatchModeWire = Literal[
     "composite",
     "timer",
     "protocol_async",
+    "exec_async",
 ]
 WatchCompositeSignalWire = Literal[
     "ui_quiescence",
@@ -222,6 +223,7 @@ WatchObservedSignalWire = Literal[
     "cdp_idle",
     "timer",
     "protocol_async",
+    "exec_async",
 ]
 WatchRegisterErrorWire = Literal[
     "watch_unsupported",
@@ -277,6 +279,7 @@ class WatchTargetModel(_StrictModel):
     tabId: str | None = Field(default=None, min_length=1, max_length=128)
     mcpServerId: str | None = Field(default=None, pattern=_WATCH_SHORT_CODE_RE)
     protocolTaskId: str | None = Field(default=None, min_length=1, max_length=128)
+    execTaskId: str | None = Field(default=None, pattern=r"^exec_[a-zA-Z0-9_-]{1,64}$")
 
     @field_validator("appId", "mcpServerId")
     @classmethod

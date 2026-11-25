@@ -27,6 +27,7 @@ MAX_WAKE_INBOX_SUMMARY_CHARS = 2000
 
 _SHORT_CODE_RE = re.compile(r"^[a-z0-9_.-]{1,64}$")
 _WORKSPACE_ALIAS_RE = re.compile(r"^[a-zA-Z0-9_.-]{1,64}$")
+_EXEC_TASK_ID_RE = re.compile(r"^exec_[a-zA-Z0-9_-]{1,64}$")
 
 
 class WatchMode(StrEnum):
@@ -40,6 +41,7 @@ class WatchMode(StrEnum):
     COMPOSITE = "composite"
     TIMER = "timer"
     PROTOCOL_ASYNC = "protocol_async"
+    EXEC_ASYNC = "exec_async"
 
 
 class WatchCompositeSignal(StrEnum):
@@ -61,6 +63,7 @@ class WatchObservedSignal(StrEnum):
     CDP_IDLE = "cdp_idle"
     TIMER = "timer"
     PROTOCOL_ASYNC = "protocol_async"
+    EXEC_ASYNC = "exec_async"
 
 
 class ContinuationMode(StrEnum):
@@ -187,6 +190,11 @@ JOB_WAIT_SCHEMA: dict[str, object] = {
             "maxLength": 128,
             "description": "Tracked protocolTaskId handle returned by an async tool call.",
         },
+        "execTaskId": {
+            "type": "string",
+            "pattern": r"^exec_[a-zA-Z0-9_-]{1,64}$",
+            "description": "execTaskId returned by a detached exec__run (mode exec_async).",
+        },
     },
     "required": ["mode", "doneCriteria"],
     "additionalProperties": False,
@@ -234,6 +242,7 @@ class WatchTarget:
     tab_id: str | None = None
     mcp_server_id: str | None = None
     protocol_task_id: str | None = None
+    exec_task_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.pid is not None and (
@@ -260,6 +269,8 @@ class WatchTarget:
             raise ValueError("invalid mcpServerId")
         if self.protocol_task_id is not None:
             _validate_control_free(self.protocol_task_id, max_len=128)
+        if self.exec_task_id is not None and not _EXEC_TASK_ID_RE.fullmatch(self.exec_task_id):
+            raise ValueError("invalid execTaskId")
 
     def to_wire_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {}
@@ -277,6 +288,8 @@ class WatchTarget:
             payload["mcpServerId"] = self.mcp_server_id
         if self.protocol_task_id is not None:
             payload["protocolTaskId"] = self.protocol_task_id
+        if self.exec_task_id is not None:
+            payload["execTaskId"] = self.exec_task_id
         return payload
 
     @classmethod
@@ -298,6 +311,9 @@ class WatchTarget:
                 data.get("protocolTaskId")
                 if "protocolTaskId" in data
                 else data.get("protocol_task_id")
+            ),
+            exec_task_id=(
+                data.get("execTaskId") if "execTaskId" in data else data.get("exec_task_id")
             ),
         )
 

@@ -150,6 +150,7 @@ class GrantItemInput(BaseModel):
         "screen",
         "files",
         "browser",
+        "exec",
     ]
     maxRisk: Literal["R0", "R1", "R2", "R3"]
     enabled: bool
@@ -179,6 +180,9 @@ class SetHostGrantsRequest(BaseModel):
     suspendAll: bool | None = None
 
 
+_LOCAL_ONLY_POLICY_KEYS = ("shellControl", "shell_control", "shellEnabled")
+
+
 class SetHostPolicyRequest(_StrictSchema):
     schemaVersion: Literal[1] = 1
     trustPreset: Literal["strict", "standard", "autopilot"]
@@ -188,6 +192,15 @@ class SetHostPolicyRequest(_StrictSchema):
     denyDomains: list[str] = Field(default_factory=list)
     # Read-only field echoed by mobile `HostPolicyModel.toJson()`; ignored on write.
     discoveredApps: list[str] | None = Field(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_local_only_keys(cls, data: Any) -> Any:
+        # ADR-0018: `shellControl` exists only in the host's local file; a remote
+        # write can never enable or change it (422 before the host is contacted).
+        if isinstance(data, dict) and any(key in data for key in _LOCAL_ONLY_POLICY_KEYS):
+            raise ValueError("shellControl is local-only and cannot be set remotely")
+        return data
 
     def to_xtp_payload(self) -> dict[str, Any]:
         return {
