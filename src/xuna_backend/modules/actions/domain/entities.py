@@ -78,7 +78,7 @@ class ApprovalScope(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ApprovalRequest:
-    """Owner approval request bound to `args_sha256` (no raw arguments stored)."""
+    """Owner approval request bound to `args_sha256` (v1) or `effect_sha256` (v2, ADR-0019)."""
 
     approval_id: uuid.UUID
     owner_id: uuid.UUID
@@ -95,10 +95,21 @@ class ApprovalRequest:
     scope: ApprovalScope = ApprovalScope.ONCE
     signature: bytes | None = None
     signer_public_key: bytes | None = None
+    approval_version: int = 1
+    effect_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not _SHA256_HEX_RE.match(self.args_sha256):
             raise ValueError("args_sha256 must be 64 lowercase hex characters")
+        if self.approval_version not in (1, 2):
+            raise ValueError("approval_version must be 1 or 2")
+        if self.approval_version == 2:
+            if self.effect_sha256 is None or not _SHA256_HEX_RE.match(self.effect_sha256):
+                raise ValueError("approval_version 2 requires 64 lowercase hex effect_sha256")
+            if self.scope != ApprovalScope.ONCE:
+                raise ValueError("approval_version 2 requires once scope")
+        elif self.effect_sha256 is not None:
+            raise ValueError("approval_version 1 must not set effect_sha256")
         if not 1 <= len(self.target_alias) <= 32:
             raise ValueError("target_alias must be 1..32 characters")
         if not 1 <= len(self.summary) <= 240:
@@ -153,6 +164,9 @@ class ActionPendingEvent:
     battery_advisories: tuple[str, ...] = ()
     # Ephemeral bounded host preflight preview (ADR-0019 §2 / W4-M2); never persisted or audited.
     preview: dict[str, object] | None = None
+    # Effect-bound signing metadata (ADR-0019 §4 / W4-M4); omitted on v1 approvals.
+    approval_version: int = 1
+    effect_sha256: str | None = None
 
     def standing_payload(self) -> dict[str, object] | None:
         """The `standing` object of `action_pending` on SSE and the voice WebSocket, or
@@ -198,6 +212,10 @@ class ActionPendingEvent:
             payload["batteryAdvisories"] = list(self.battery_advisories)
         if self.preview is not None:
             payload["preview"] = self.preview
+        if self.approval_version != 1:
+            payload["approvalVersion"] = self.approval_version
+        if self.effect_sha256 is not None:
+            payload["effectSha256"] = self.effect_sha256
         return payload
 
 

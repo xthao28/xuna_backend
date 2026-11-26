@@ -58,6 +58,10 @@ class ActionApprovalModel(Base):
     scope: Mapped[str] = mapped_column(String(24), nullable=False, default="once")
     signature: Mapped[bytes | None] = mapped_column(LargeBinary(64), nullable=True)
     signer_public_key: Mapped[bytes | None] = mapped_column(LargeBinary(65), nullable=True)
+    approval_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    effect_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class HostStandingApprovalModel(Base):

@@ -275,7 +275,15 @@ async def test_r3_above_the_exec_grant_is_refused() -> None:
 
 def test_mandatory_preflight_set_matches_the_contract() -> None:
     assert (
-        frozenset({"exec.run", "exec.write_stdin", "fs.write_file", "fs.patch_file"})
+        frozenset(
+            {
+                "draft.apply",
+                "exec.run",
+                "exec.write_stdin",
+                "fs.write_file",
+                "fs.patch_file",
+            }
+        )
         == EXEC_FS_PREFLIGHT_TOOLS
     )
 

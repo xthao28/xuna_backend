@@ -80,5 +80,48 @@
       "canonical": "{\"fromXNorm\":0,\"micro\":1e-7,\"tiny\":0.00001,\"toXNorm\":1,\"xNorm\":0.5,\"yNorm\":0.15625}",
       "argsSha256": "1d0559cb45f6c6337b5264efd510cc527689ac8d598e1261ecfe7797eaa97323"
     }
-  ]
+  ],
+  "approvalV2": {
+    "manifest": {
+      "schemaVersion": 1,
+      "draftId": "draft_golden_001",
+      "workspaceAlias": "demo_app",
+      "scope": "workspace_files_only",
+      "networkIsolated": false,
+      "changes": [
+        {
+          "relPath": "lib/main.dart",
+          "op": "modify",
+          "preSha256": "1111111111111111111111111111111111111111111111111111111111111111",
+          "postSha256": "2222222222222222222222222222222222222222222222222222222222222222",
+          "sizeBytes": 128
+        },
+        {
+          "relPath": "notes/added.txt",
+          "op": "create",
+          "postSha256": "3333333333333333333333333333333333333333333333333333333333333333",
+          "sizeBytes": 42
+        }
+      ],
+      "checks": {
+        "commandCount": 1,
+        "allCompleted": true,
+        "failedCount": 0
+      },
+      "createdAt": "2026-11-26T10:00:00Z",
+      "expiresAt": "2026-11-26T10:30:00Z"
+    },
+    "canonicalManifest": "{\"changes\":[{\"op\":\"modify\",\"postSha256\":\"2222222222222222222222222222222222222222222222222222222222222222\",\"preSha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"relPath\":\"lib/main.dart\",\"sizeBytes\":128},{\"op\":\"create\",\"postSha256\":\"3333333333333333333333333333333333333333333333333333333333333333\",\"relPath\":\"notes/added.txt\",\"sizeBytes\":42}],\"checks\":{\"allCompleted\":true,\"commandCount\":1,\"failedCount\":0},\"createdAt\":\"2026-11-26T10:00:00Z\",\"draftId\":\"draft_golden_001\",\"expiresAt\":\"2026-11-26T10:30:00Z\",\"networkIsolated\":false,\"schemaVersion\":1,\"scope\":\"workspace_files_only\",\"workspaceAlias\":\"demo_app\"}",
+    "effectSha256": "c571ba3b0f4b188aff3910b3efd5f51cdfb91c78700ebe936b9b87a53ce82752",
+    "approvalId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "hostId": "9b2f7e4a-5c11-4d8e-9a30-1f6d8c2e4b10",
+    "expiresAt": "2026-11-26T10:01:00Z",
+    "argsSha256": "6f4e87b63d1d5cd151b1660be85f7eed84cb4aa97ca50f0ff9c73ca9cc24ba14",
+    "messageHex": "78756e612e617070726f76616c2e76320061316232633364342d653566362d346137622d386339642d3065316632613362346335647c633537316261336230663462313838616666333931306233656664356635316364666239316337383730306562653933366239623837613533636538323735327c39623266376534612d356331312d346438652d396133302d3166366438633265346231307c323032362d31312d32365431303a30313a30305a",
+    "messageSha256Hex": "036a39a94ac1ba5f9f528d0af8000e8857805ba4829064207167fbf9356833fd",
+    "publicKeyHex": "04aafe1e1b0dc482007c1b7f836175fc09038c89efc8fac311d017960b8a28f037256a6b25b8a11038561cc887a42b2adc16015d8dfa8804ea79114500dc2c0f3e",
+    "publicKeyB64": "BKr+HhsNxIIAfBt/g2F1/AkDjInvyPrDEdAXlguKKPA3JWprJbihEDhWHMiHpCsq3BYBXY36iATqeRFFANwsDz4=",
+    "signatureHex": "47c2043f6cfeab6fd3c9114bb00ecd22b2a36f98c1fbfc9bee3fd3f954a8e2af9d8d3d47f78e41ccf7ad6895ce5556a81e80d2a5361193642020b39e27dedfeb",
+    "signatureB64": "R8IEP2z+q2/TyRFLsA7NIrKjb5jB+/yb7j/T+VSo4q+djT1H945BzPetaJXOVVaoHoDSpTYRk2QgILOeJ97f6w=="
+  }
 }

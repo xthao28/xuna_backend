@@ -15,7 +15,7 @@ from xuna_backend.modules.actions.domain.watch import WatchTarget
 from xuna_backend.modules.hosts.application.xtp_frames import HostPreflight
 
 EXEC_FS_PREFLIGHT_TOOLS: frozenset[str] = frozenset(
-    {"exec.run", "exec.write_stdin", "fs.write_file", "fs.patch_file"}
+    {"exec.run", "exec.write_stdin", "fs.write_file", "fs.patch_file", "draft.apply"}
 )
 EXEC_TASK_ID_RE = re.compile(r"^exec_[a-zA-Z0-9_-]{1,64}$")
 

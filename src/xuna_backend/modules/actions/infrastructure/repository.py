@@ -34,6 +34,8 @@ def _to_domain(row: ActionApprovalModel) -> ApprovalRequest:
         signer_public_key=(
             bytes(row.signer_public_key) if row.signer_public_key is not None else None
         ),
+        approval_version=row.approval_version if row.approval_version else 1,
+        effect_sha256=row.effect_sha256,
     )
 
 
@@ -61,6 +63,8 @@ class SqlApprovalRepository:
                     scope=req.scope.value,
                     signature=req.signature,
                     signer_public_key=req.signer_public_key,
+                    approval_version=req.approval_version,
+                    effect_sha256=req.effect_sha256,
                 )
             )
         else:
@@ -147,6 +151,8 @@ class InMemoryApprovalRepository:
                     state=ApprovalState.REJECTED,
                     decided_at=now,
                     scope=req.scope,
+                    approval_version=req.approval_version,
+                    effect_sha256=req.effect_sha256,
                 )
                 count += 1
         return count

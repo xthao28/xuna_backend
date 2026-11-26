@@ -53,6 +53,7 @@ from xuna_backend.modules.cognition.domain.types import Locale, Message, Role, T
 from xuna_backend.modules.hosts.application.ports import HostRepository, HostSessionHub
 from xuna_backend.modules.hosts.domain.crypto import (
     approval_proof_message,
+    approval_v2_proof_message,
     args_sha256,
     validate_public_key,
 )
@@ -230,7 +231,8 @@ class ApprovalAndBoardService:
             ]
             if signature is None:
                 if (
-                    existing.risk.level >= RiskTier.R4.level
+                    existing.approval_version == 2
+                    or existing.risk.level >= RiskTier.R4.level
                     or phone_keys
                     or resolved_pub_key is not None
                 ):
@@ -239,17 +241,29 @@ class ApprovalAndBoardService:
                 if len(signature) != 64:
                     raise ValueError("approval_signature_invalid")
                 expires_iso = existing.expires_at.astimezone(UTC).isoformat()
-                msg = approval_proof_message(
-                    str(existing.approval_id),
-                    existing.args_sha256,
-                    str(existing.host_id),
-                    expires_iso,
-                )
+                if existing.approval_version == 2:
+                    if existing.effect_sha256 is None:
+                        raise ValueError("approval_signature_invalid")
+                    msg = approval_v2_proof_message(
+                        str(existing.approval_id),
+                        existing.effect_sha256,
+                        str(existing.host_id),
+                        expires_iso,
+                    )
+                else:
+                    msg = approval_proof_message(
+                        str(existing.approval_id),
+                        existing.args_sha256,
+                        str(existing.host_id),
+                        expires_iso,
+                    )
                 if resolved_pub_key is not None:
                     validate_public_key(resolved_pub_key)
                     if phone_keys and resolved_pub_key not in phone_keys:
                         raise ValueError("approval_signature_invalid")
-                    if existing.risk.level >= RiskTier.R4.level and not phone_keys:
+                    if (
+                        existing.risk.level >= RiskTier.R4.level or existing.approval_version == 2
+                    ) and not phone_keys:
                         raise ValueError("approval_signature_invalid")
                     candidate_keys = [resolved_pub_key]
                 else:
@@ -294,6 +308,8 @@ class ApprovalAndBoardService:
                     state=ApprovalState.EXPIRED,
                     decided_at=now,
                     scope=existing.scope,
+                    approval_version=existing.approval_version,
+                    effect_sha256=existing.effect_sha256,
                 )
                 await self._approval_repo.save(expired_req)
                 return expired_req
@@ -318,6 +334,8 @@ class ApprovalAndBoardService:
                 scope=scope,
                 signature=signature,
                 signer_public_key=resolved_pub_key,
+                approval_version=existing.approval_version,
+                effect_sha256=existing.effect_sha256,
             )
 
         await self._approval_repo.save(updated)
@@ -530,6 +548,8 @@ class ApprovalAndBoardService:
             signer_public_key=(
                 slot_req.signer_public_key if slot_req is not None else req.signer_public_key
             ),
+            approval_version=req.approval_version,
+            effect_sha256=req.effect_sha256,
         )
         await self._approval_repo.save(updated)
         if state in (ApprovalState.APPROVED, ApprovalState.REJECTED):

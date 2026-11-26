@@ -31,6 +31,10 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 200
+                },
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
                 }
               },
               "required": [
@@ -116,6 +120,10 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 1073741824
+                },
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
                 }
               },
               "required": [
@@ -194,6 +202,10 @@
                   "type": "integer",
                   "minimum": 1,
                   "maximum": 100
+                },
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
                 }
               },
               "required": [
@@ -280,6 +292,10 @@
                 },
                 "overwrite": {
                   "type": "boolean"
+                },
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
                 }
               },
               "required": [
@@ -344,6 +360,10 @@
                 },
                 "replaceAll": {
                   "type": "boolean"
+                },
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
                 }
               },
               "required": [
@@ -446,6 +466,10 @@
                     ],
                     "additionalProperties": false
                   }
+                },
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
                 }
               },
               "required": [
@@ -1258,6 +1282,400 @@
             ],
             "totalCount": 3,
             "truncated": false
+          }
+        }
+      }
+    },
+    "toolsListDraftResponse": {
+      "jsonrpc": "2.0",
+      "id": 825,
+      "result": {
+        "tools": [
+          {
+            "name": "draft.create",
+            "description": "Create an isolated filtered copy of one configured workspace root for trial fs.*/R2 exec.run edits without modifying the original workspace.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "workspacePath": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 512
+                },
+                "workspaceAlias": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_.-]{1,64}$"
+                }
+              },
+              "required": [
+                "workspacePath"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
+                },
+                "workspaceAlias": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_.-]{1,64}$"
+                },
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "workspace_files_only"
+                  ]
+                },
+                "networkIsolated": {
+                  "type": "boolean"
+                },
+                "fileCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "totalBytes": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "expiresAt": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "draftId",
+                "workspaceAlias",
+                "scope",
+                "networkIsolated",
+                "fileCount",
+                "totalBytes",
+                "expiresAt"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "files",
+                "risk": "R2",
+                "observes": false,
+                "reversible": true,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "draft.manifest",
+            "description": "Compute the canonical EffectManifest and effectSha256 of workspace file changes inside an active draft session.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
+                }
+              },
+              "required": [
+                "draftId"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "schemaVersion": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1
+                },
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
+                },
+                "workspaceAlias": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9_.-]{1,64}$"
+                },
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "workspace_files_only"
+                  ]
+                },
+                "networkIsolated": {
+                  "type": "boolean"
+                },
+                "effectSha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "changeCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "changes": {
+                  "type": "array",
+                  "maxItems": 200,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "relPath": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 260
+                      },
+                      "op": {
+                        "type": "string",
+                        "enum": [
+                          "create",
+                          "modify",
+                          "delete"
+                        ]
+                      },
+                      "preSha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "postSha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "sizeBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    },
+                    "required": [
+                      "relPath",
+                      "op"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "commandCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "allCompleted": {
+                  "type": "boolean"
+                },
+                "failedCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "createdAt": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "expiresAt": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                }
+              },
+              "required": [
+                "schemaVersion",
+                "draftId",
+                "workspaceAlias",
+                "scope",
+                "networkIsolated",
+                "effectSha256",
+                "changeCount",
+                "changes",
+                "truncated",
+                "createdAt",
+                "expiresAt"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "files",
+                "risk": "R1",
+                "observes": true,
+                "reversible": true,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "draft.discard",
+            "description": "Delete an active draft workspace copy without touching the original workspace.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
+                }
+              },
+              "required": [
+                "draftId"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
+                },
+                "discarded": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "draftId",
+                "discarded"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "files",
+                "risk": "R1",
+                "observes": false,
+                "reversible": false,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "draft.apply",
+            "description": "Apply a verified draft EffectManifest to the real workspace via crash-safe WAL journal (requires xuna.approval.v2 effect-bound signature and live TOCTOU check).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
+                },
+                "effectSha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                }
+              },
+              "required": [
+                "draftId",
+                "effectSha256"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
+                },
+                "effectSha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "appliedCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "createdCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "modifiedCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "deletedCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "undoTxId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "undoAvailable": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "draftId",
+                "effectSha256",
+                "appliedCount",
+                "createdCount",
+                "modifiedCount",
+                "deletedCount",
+                "undoAvailable"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "files",
+                "risk": "R3",
+                "observes": false,
+                "reversible": true,
+                "permission": "granted"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "preflightDraftApplyResponse": {
+      "jsonrpc": "2.0",
+      "id": 826,
+      "result": {
+        "preflight": {
+          "status": "ok",
+          "effectiveRisk": "R3",
+          "reasonCode": "draft_apply",
+          "effectSha256": "c571ba3b0f4b188aff3910b3efd5f51cdfb91c78700ebe936b9b87a53ce82752",
+          "preview": {
+            "kind": "paths",
+            "summary": "Apply 2 file change(s) from draft",
+            "paths": [
+              "README.md",
+              "src/app.py"
+            ],
+            "totalCount": 2,
+            "truncated": false
+          }
+        }
+      }
+    },
+    "toolsCallDraftApplyV2Request": {
+      "jsonrpc": "2.0",
+      "id": 827,
+      "method": "tools/call",
+      "params": {
+        "name": "draft.apply",
+        "arguments": {
+          "draftId": "draft_golden_001",
+          "effectSha256": "c571ba3b0f4b188aff3910b3efd5f51cdfb91c78700ebe936b9b87a53ce82752"
+        },
+        "_meta": {
+          "xuna/invocationId": "6a4d3e21-9b5f-4c82-8d23-1f5a7b9c0d27",
+          "xuna/deadlineMs": 15000,
+          "xuna/approval": {
+            "approvalId": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+            "argsSha256": "6f4e87b63d1d5cd151b1660be85f7eed84cb4aa97ca50f0ff9c73ca9cc24ba14",
+            "expiresAt": "2026-11-26T10:01:00Z",
+            "version": 2,
+            "effectSha256": "c571ba3b0f4b188aff3910b3efd5f51cdfb91c78700ebe936b9b87a53ce82752",
+            "signature": "R8IEP2z+q2/TyRFLsA7NIrKjb5jB+/yb7j/T+VSo4q+djT1H945BzPetaJXOVVaoHoDSpTYRk2QgILOeJ97f6w==",
+            "publicKey": "BKr+HhsNxIIAfBt/g2F1/AkDjInvyPrDEdAXlguKKPA3JWprJbihEDhWHMiHpCsq3BYBXY36iATqeRFFANwsDz4="
           }
         }
       }

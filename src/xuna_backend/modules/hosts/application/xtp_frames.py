@@ -867,15 +867,17 @@ class PreflightResultModel(_StrictModel):
     errorCode: str | None = Field(default=None, pattern=_SHORT_CODE)
     element: PreflightElementModel | None = None
     preview: PreflightPreviewModel | None = None
+    effectSha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
 class HostPreflight:
-    """What the host would enforce for a call (UDC-17 S17.1, ADR-0019 §2).
+    """What the host would enforce for a call (UDC-17 S17.1, ADR-0019 §2-§4).
 
     `status == "ok"` carries `effective_risk`; any other status is a refusal with
     `error_code`. `element_name` and `preview` are ephemeral host content, so they
     may be shown to the owner on the approval card but never logged, audited, or persisted.
+    `effect_sha256` binds `draft.apply` to its canonical `EffectManifest` hash.
     """
 
     status: str
@@ -885,6 +887,7 @@ class HostPreflight:
     element_role: str | None
     element_name: str | None
     preview: dict[str, object] | None = None
+    effect_sha256: str | None = None
 
 
 def parse_preflight_result(result: dict[str, object]) -> HostPreflight:
@@ -903,6 +906,7 @@ def parse_preflight_result(result: dict[str, object]) -> HostPreflight:
         or body.effectiveRisk is not None
         or body.element is not None
         or body.preview is not None
+        or body.effectSha256 is not None
     ):
         raise ValueError("a refused preflight carries an error code and nothing else")
     return HostPreflight(
@@ -913,6 +917,7 @@ def parse_preflight_result(result: dict[str, object]) -> HostPreflight:
         element_role=body.element.role if body.element else None,
         element_name=body.element.name if body.element else None,
         preview=body.preview.to_wire_dict() if body.preview is not None else None,
+        effect_sha256=body.effectSha256,
     )
 
 

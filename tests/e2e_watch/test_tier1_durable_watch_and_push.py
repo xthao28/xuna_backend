@@ -33,7 +33,9 @@ async def test_t1_01_migration_0023_schema_indexes_and_roundtrip(clean_watch_db:
     try:
         with psycopg.connect(dsn) as conn:
             rev = fetch_scalar(conn, "SELECT version_num FROM alembic_version")
-            assert rev == "0023", f"Expected Alembic head '0023', got {rev!r}"
+            assert (
+                rev is not None and int(rev) >= 23
+            ), f"Expected Alembic head >= '0023', got {rev!r}"
 
             tables = {
                 r[0]
@@ -125,7 +127,8 @@ async def test_t1_01_migration_0023_schema_indexes_and_roundtrip(clean_watch_db:
         run_alembic(clean_watch_db, "downgrade", "0022")
         run_alembic(clean_watch_db, "upgrade", "head")
         with psycopg.connect(dsn) as conn:
-            assert fetch_scalar(conn, "SELECT version_num FROM alembic_version") == "0023"
+            rev_after = fetch_scalar(conn, "SELECT version_num FROM alembic_version")
+            assert rev_after is not None and int(rev_after) >= 23
     finally:
         run_alembic(clean_watch_db, "upgrade", "head")
 

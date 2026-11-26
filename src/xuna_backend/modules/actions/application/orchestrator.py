@@ -2160,6 +2160,29 @@ class Orchestrator:
                 key=lambda tier: tier.level,
             )
             live_label = preflight.element_name
+        if descriptor.name == "draft.apply":
+            req_effect = clean_args.get("effectSha256")
+            if (
+                preflight is None
+                or preflight.effect_sha256 is None
+                or not isinstance(req_effect, str)
+                or preflight.effect_sha256 != req_effect
+            ):
+                await emit_host_action_result(
+                    ctx,
+                    invocation_id,
+                    host,
+                    descriptor.name,
+                    clean_args,
+                    "denied",
+                    eff_target_reason,
+                    "effect_sha256_mismatch",
+                )
+                return Message(
+                    role=Role.TOOL,
+                    content=_encode_tool_payload("denied", {"errorCode": "effect_sha256_mismatch"}),
+                    tool_call_id=call.id,
+                )
         # The approval card names the element the host found on screen, not the model's label.
         summary_args: dict[str, object] = (
             clean_args if live_label is None else {**clean_args, "elementName": live_label}
@@ -2602,6 +2625,12 @@ class Orchestrator:
                         ctx.locale,
                         typed_count=active_cu.typed_count,
                     )
+                effect_hash_v2 = (
+                    preflight.effect_sha256
+                    if descriptor.name == "draft.apply" and preflight is not None
+                    else None
+                )
+                is_effect_v2 = effect_hash_v2 is not None
                 approval_req = ApprovalRequest(
                     approval_id=uuid.uuid4(),
                     owner_id=ctx.owner_id,
@@ -2613,6 +2642,8 @@ class Orchestrator:
                     summary=pending_summary,
                     created_at=now,
                     expires_at=expires_at,
+                    approval_version=2 if is_effect_v2 else 1,
+                    effect_sha256=effect_hash_v2,
                 )
                 await self._approval_repo.save(approval_req)
                 await self._approval_broker.create(approval_req)
@@ -2789,6 +2820,10 @@ class Orchestrator:
                     "expiresAt": approval_req.expires_at.astimezone(UTC).isoformat(),
                     "scope": approval_req.scope.value,
                 }
+                if approval_req.approval_version != 1:
+                    approval_meta["version"] = approval_req.approval_version
+                if approval_req.effect_sha256 is not None:
+                    approval_meta["effectSha256"] = approval_req.effect_sha256
                 if approval_req.signature is not None:
                     approval_meta["signature"] = base64.b64encode(approval_req.signature).decode(
                         "ascii"

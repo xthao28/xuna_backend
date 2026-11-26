@@ -562,6 +562,8 @@ async def emit_pending_with_battery(
             target_platform=host.platform.value,
             battery_advisories=batt_adv,
             preview=preview,
+            approval_version=approval_req.approval_version,
+            effect_sha256=approval_req.effect_sha256,
         )
     )
 

@@ -61,6 +61,8 @@ class InMemoryApprovalBroker:
                     state=ApprovalState.EXPIRED,
                     decided_at=current.request.expires_at,
                     scope=current.request.scope,
+                    approval_version=current.request.approval_version,
+                    effect_sha256=current.request.effect_sha256,
                 )
             return ApprovalState.EXPIRED
         current = self._slots.get(approval_id)
@@ -101,6 +103,8 @@ class InMemoryApprovalBroker:
                 state=ApprovalState.EXPIRED,
                 decided_at=now,
                 scope=slot.request.scope,
+                approval_version=slot.request.approval_version,
+                effect_sha256=slot.request.effect_sha256,
             )
             slot.event.set()
             return slot.request
@@ -126,6 +130,8 @@ class InMemoryApprovalBroker:
             scope=scope,
             signature=signature,
             signer_public_key=signer_public_key,
+            approval_version=slot.request.approval_version,
+            effect_sha256=slot.request.effect_sha256,
         )
         slot.event.set()
         return slot.request
@@ -154,6 +160,8 @@ class InMemoryApprovalBroker:
                     state=ApprovalState.REJECTED,
                     decided_at=now,
                     scope=slot.request.scope,
+                    approval_version=slot.request.approval_version,
+                    effect_sha256=slot.request.effect_sha256,
                 )
                 slot.event.set()
                 rejected.append(slot.request)

@@ -58,4 +58,25 @@ def exec_fs_pending_text(
             if english:
                 return f"Read {path} on {target}"[:240]
             return f"Đọc {path} trên {target}"[:240]
+        case "draft.create":
+            ws = _cut(arguments.get("workspaceAlias") or arguments.get("workspacePath"), 80)
+            if english:
+                return f"Create draft workspace copy for {ws} on {target}"[:240]
+            return f"Tạo bản nháp workspace {ws} trên {target}"[:240]
+        case "draft.manifest":
+            did = _cut(arguments.get("draftId"), 40)
+            if english:
+                return f"Inspect draft manifest {did} on {target}"[:240]
+            return f"Xem danh sách thay đổi bản nháp {did} trên {target}"[:240]
+        case "draft.discard":
+            did = _cut(arguments.get("draftId"), 40)
+            if english:
+                return f"Discard draft workspace {did} on {target}"[:240]
+            return f"Hủy bản nháp {did} trên {target}"[:240]
+        case "draft.apply":
+            did = _cut(arguments.get("draftId"), 40)
+            short_hash = str(arguments.get("effectSha256") or "")[:12]
+            if english:
+                return f"Apply draft {did} (effect {short_hash}) on {target}"[:240]
+            return f"Áp dụng bản nháp {did} (mã hiệu ứng {short_hash}) trên {target}"[:240]
     return None

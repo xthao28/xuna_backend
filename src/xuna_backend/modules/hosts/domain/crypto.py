@@ -15,6 +15,7 @@ from xuna_backend.modules.hosts.domain.entities import HostId
 DOMAIN = b"xuna.host.proof.v1\x00"
 SAS_DOMAIN = b"xuna.host.sas.v1"
 APPROVAL_DOMAIN = b"xuna.approval.v1\x00"
+APPROVAL_V2_DOMAIN = b"xuna.approval.v2\x00"
 PREAPPROVAL_DOMAIN = b"xuna.preapproval.v1\x00"
 NONCE_SIZE = 32
 ENROLLMENT_CODE_SIZE = 16
@@ -131,6 +132,23 @@ def approval_proof_message(
     return APPROVAL_DOMAIN + body
 
 
+def approval_v2_proof_message(
+    approval_id: str,
+    effect_sha256_hex: str,
+    host_id: str,
+    expires_at_iso: str,
+) -> bytes:
+    """Builds the phone-signed effect-bound approval message (`ADR-0019` §4 / `W4-M4`):
+    `b"xuna.approval.v2\\x00" || approvalId || "|" || effectSha256 || "|" || hostId || "|"
+    || expiresAt`."""
+    if not approval_id or not effect_sha256_hex or not host_id or not expires_at_iso:
+        raise ValueError("approval v2 proof fields must be non-empty")
+    if len(effect_sha256_hex) != 64 or any(c not in "0123456789abcdef" for c in effect_sha256_hex):
+        raise ValueError("effect_sha256 must be 64 lowercase hex characters")
+    body = f"{approval_id}|{effect_sha256_hex}|{host_id}|{expires_at_iso}".encode()
+    return APPROVAL_V2_DOMAIN + body
+
+
 def preapproval_proof_message(
     approval_id: str,
     tool: str,
@@ -156,9 +174,7 @@ def preapproval_proof_message(
 
 def _format_jcs_float(value: float) -> str:
     if not math.isfinite(value):
-        raise ValueError(
-            "infinite or NaN floating-point numbers are not allowed in canonical JSON"
-        )
+        raise ValueError("infinite or NaN floating-point numbers are not allowed in canonical JSON")
     if value == 0.0:
         return "0"
     sign = "-" if value < 0.0 else ""
