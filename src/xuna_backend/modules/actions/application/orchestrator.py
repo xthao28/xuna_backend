@@ -123,6 +123,13 @@ from xuna_backend.modules.actions.application.workflows import (
     WorkflowSlotAssignment,
     validate_https_public_url,
 )
+from xuna_backend.modules.actions.domain.cosigning import (
+    InMemoryCosignChallengeStore,
+    InMemoryCosignPolicyStore,
+    InMemoryProofNonceStore,
+    PetApproveProofInput,
+    PetStopProofInput,
+)
 from xuna_backend.modules.actions.domain.entities import (
     APPROVAL_TTL_SECONDS,
     ActionPendingEvent,
@@ -185,7 +192,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     ToolFamily,
     ToolPermissionState,
 )
-from xuna_backend.modules.identity.application.ports import SignatureVerifier
+from xuna_backend.modules.identity.application.ports import IdentityRepository, SignatureVerifier
 
 if TYPE_CHECKING:
     from xuna_backend.modules.actions.application.job_runner import AutonomousJobRunner
@@ -379,12 +386,18 @@ class Orchestrator:
         pending_intent_store: PendingIntentStore | None = None,
         mesh_prober: MeshProber | None = None,
         wake_queue: InMemoryWakeQueueStore | None = None,
+        cosign_policy_store: InMemoryCosignPolicyStore | None = None,
+        cosign_challenge_store: InMemoryCosignChallengeStore | None = None,
+        nonce_store: InMemoryProofNonceStore | None = None,
+        identity_repo: IdentityRepository | None = None,
     ) -> None:
         self._standing_repo = standing_repo
         self._job_runner = job_runner
         self._habit_repo = habit_repo
         self._pending_intent_store = pending_intent_store
         self._wake_queue = wake_queue
+        self._cosign_policy_store = cosign_policy_store
+        self._cosign_challenge_store = cosign_challenge_store
         self._cu_session_store: ComputerUseSessionStore = (
             cu_session_store if cu_session_store is not None else InMemoryComputerUseSessionStore()
         )
@@ -415,6 +428,10 @@ class Orchestrator:
             scope_store=scope_store,
             verifier=verifier,
             clock=self._clock,
+            cosign_policy_store=cosign_policy_store,
+            cosign_challenge_store=cosign_challenge_store,
+            nonce_store=nonce_store,
+            identity_repo=identity_repo,
         )
         self._workflow_runner = CompositeWorkflowRunner(
             host_repo=host_repo,
@@ -441,6 +458,7 @@ class Orchestrator:
         reason: str = "owner_app",
         request_id: str = "",
         host_id: HostId | None = None,
+        pet_proof: PetStopProofInput | None = None,
     ) -> EmergencyStopSummary:
         """Cancels active invocations, rejects approvals, sends `xuna/stop` (`UDC-7` S7.3)."""
         now = self._clock()
@@ -449,7 +467,11 @@ class Orchestrator:
                 await self._end_cu_state(running, reason, now, request_id)
         await self._cu_session_store.stop_all_for_owner(owner_id, reason, now, host_id=host_id)
         summary = await self._approval_and_board.emergency_stop(
-            owner_id=owner_id, reason=reason, request_id=request_id, host_id=host_id
+            owner_id=owner_id,
+            reason=reason,
+            request_id=request_id,
+            host_id=host_id,
+            pet_proof=pet_proof,
         )
         if self._job_runner is not None:
             await self._job_runner.cancel_all_for_owner(owner_id, reason=reason, host_id=host_id)
@@ -1213,6 +1235,7 @@ class Orchestrator:
         signature: bytes | None = None,
         signer_public_key: bytes | None = None,
         request_id: str = "",
+        pet_proof: PetApproveProofInput | None = None,
     ) -> ApprovalRequest | None:
         """Owner-scoped, idempotent approval decision entry point
         (`POST /v1/actions/approvals/{id}`)."""
@@ -1224,6 +1247,7 @@ class Orchestrator:
             signature=signature,
             signer_public_key=signer_public_key,
             request_id=request_id,
+            pet_proof=pet_proof,
         )
 
     def report_board_result(
@@ -2675,6 +2699,14 @@ class Orchestrator:
                         if preflight is not None and preflight.preview is not None
                         else None
                     ),
+                    clean_args=clean_args,
+                    preflight_reason=(
+                        (preflight.reason_code or preflight.error_code)
+                        if preflight is not None
+                        else None
+                    ),
+                    cosign_policy_store=self._cosign_policy_store,
+                    cosign_challenge_store=self._cosign_challenge_store,
                 )
 
                 decision_state = await self._approval_broker.wait(

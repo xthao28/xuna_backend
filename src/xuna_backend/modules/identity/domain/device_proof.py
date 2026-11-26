@@ -25,6 +25,37 @@ class ProofPurpose(IntEnum):
     BIND = 1
     PROJECTION = 2
     SESSION = 3  # device-direct connection (DC-3); payload = the device's own public key
+    APPROVE = 4  # R3 pet co-signing with matching 6-digit code (ADR-0020 F3-M1/M2)
+    STOP = 5  # cryptographically signed emergency stop (ADR-0020 F3-M3)
+
+
+COSIGN_CODE_DOMAIN = b"xuna.cosign.code.v1\x00"
+STOP_PROOF_PAYLOAD = b"xuna.estop.v1"
+
+
+def cosign_short_code(nonce: bytes, target_sha256: bytes) -> str:
+    """Deterministic 6-digit matching code shown on both phone and XUNA pet screen."""
+    if len(nonce) != NONCE_SIZE:
+        raise ValueError("nonce must be 32 bytes")
+    if len(target_sha256) != 32:
+        raise ValueError("target_sha256 must be 32 bytes")
+    digest = hashlib.sha256(COSIGN_CODE_DOMAIN + nonce + target_sha256).digest()
+    num = int.from_bytes(digest[:4], "big") % 1_000_000
+    return f"{num:06d}"
+
+
+def approve_proof_payload(target_sha256: bytes, short_code: str) -> bytes:
+    """Canonical 38-byte payload signed for `ProofPurpose.APPROVE` (ADR-0020)."""
+    if len(target_sha256) != 32:
+        raise ValueError("target_sha256 must be 32 bytes")
+    if len(short_code) != 6 or not short_code.isascii() or not short_code.isdigit():
+        raise ValueError("short_code must be 6 ASCII digits")
+    return target_sha256 + short_code.encode("ascii")
+
+
+def stop_proof_payload() -> bytes:
+    """Canonical payload signed for `ProofPurpose.STOP` (ADR-0020 F3-M3)."""
+    return STOP_PROOF_PAYLOAD
 
 
 def proof_message(

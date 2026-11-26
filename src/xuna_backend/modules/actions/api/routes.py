@@ -39,6 +39,15 @@ from xuna_backend.modules.actions.application.workflows import (
     InMemoryBoardWorkflowSlotStore,
     WorkflowSlotAssignment,
 )
+from xuna_backend.modules.actions.domain.cosigning import (
+    CosignCategory,
+    InMemoryCosignChallengeStore,
+    InMemoryCosignPolicyStore,
+    InMemoryProofNonceStore,
+    OwnerCosignPolicy,
+    PetApproveProofInput,
+    PetStopProofInput,
+)
 from xuna_backend.modules.actions.domain.entities import (
     ApprovalDecision,
     ApprovalRequest,
@@ -65,13 +74,42 @@ from xuna_backend.modules.hosts.domain.entities import (
     RiskTier,
     validate_non_zero_uuid,
 )
-from xuna_backend.modules.identity.application.ports import SignatureVerifier
+from xuna_backend.modules.identity.application.ports import IdentityRepository, SignatureVerifier
 
 NonZeroHostUuid = Annotated[uuid.UUID, AfterValidator(validate_non_zero_uuid)]
 
 _logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/actions", tags=["actions"])
+
+
+class PetApproveProofBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    petId: str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
+    nonceHex: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    generation: int = Field(ge=0, le=0xFFFFFFFF)
+    shortCode: str = Field(min_length=6, max_length=6, pattern=r"^[0-9]{6}$")
+    signature: str = Field(min_length=80, max_length=120)
+    publicKey: str = Field(min_length=80, max_length=120)
+
+
+class PetStopProofBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    petId: str = Field(min_length=32, max_length=32, pattern=r"^[0-9a-f]{32}$")
+    nonceHex: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    generation: int = Field(ge=0, le=0xFFFFFFFF)
+    signature: str = Field(min_length=80, max_length=120)
+    publicKey: str = Field(min_length=80, max_length=120)
+
+
+class CosignPolicyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schemaVersion: Literal[1] = 1
+    enabledCategories: list[CosignCategory] = Field(default_factory=list, max_length=8)
+    requireSignedBoardStop: bool = False
 
 
 class DecideApprovalBody(BaseModel):
@@ -82,6 +120,7 @@ class DecideApprovalBody(BaseModel):
     scope: ApprovalScope = ApprovalScope.ONCE
     signature: str | None = Field(default=None, min_length=80, max_length=120)
     publicKey: str | None = Field(default=None, min_length=80, max_length=120)
+    petProof: PetApproveProofBody | None = None
 
 
 class CreateStandingApprovalBody(BaseModel):
@@ -104,6 +143,7 @@ class EmergencyStopBody(BaseModel):
     schemaVersion: Literal[1] = 1
     reason: Literal["owner_app", "owner_host", "owner_board", "revoked"] = "owner_app"
     hostId: NonZeroHostUuid | None = None
+    petProof: PetStopProofBody | None = None
 
 
 class ReportActionResultBody(BaseModel):
@@ -499,6 +539,43 @@ def build_short_session_audit_log(app_state: Any) -> AuditLog:
     return _SessionPerCallAuditLog(app_state)
 
 
+def _get_cosign_policy_store(app_state: Any) -> InMemoryCosignPolicyStore:
+    store = getattr(app_state, "cosign_policy_store", None)
+    if isinstance(store, InMemoryCosignPolicyStore):
+        return store
+    new_store = InMemoryCosignPolicyStore()
+    app_state.cosign_policy_store = new_store
+    return new_store
+
+
+def _get_cosign_challenge_store(app_state: Any) -> InMemoryCosignChallengeStore:
+    store = getattr(app_state, "cosign_challenge_store", None)
+    if isinstance(store, InMemoryCosignChallengeStore):
+        return store
+    new_store = InMemoryCosignChallengeStore()
+    app_state.cosign_challenge_store = new_store
+    return new_store
+
+
+def _get_proof_nonce_store(app_state: Any) -> InMemoryProofNonceStore:
+    store = getattr(app_state, "proof_nonce_store", None)
+    if isinstance(store, InMemoryProofNonceStore):
+        return store
+    new_store = InMemoryProofNonceStore()
+    app_state.proof_nonce_store = new_store
+    return new_store
+
+
+def _resolve_identity_repo(app_state: Any, session: Any) -> IdentityRepository | None:
+    factory = getattr(app_state, "identity_repository", None)
+    if factory is None:
+        return None
+    if callable(factory):
+        repo: IdentityRepository = factory(session)
+        return repo
+    return factory  # type: ignore[no-any-return]
+
+
 def build_stream_orchestrator(app_state: Any) -> Orchestrator:
     """Builds an `Orchestrator` safe for use inside long-lived SSE / WebSocket streams."""
     hub: HostSessionHub = app_state.host_session_hub
@@ -535,6 +612,9 @@ def build_stream_orchestrator(app_state: Any) -> Orchestrator:
         pending_intent_store=pending_store,
         mesh_prober=mesh_prober,
         wake_queue=getattr(app_state, "wake_queue", None),
+        cosign_policy_store=_get_cosign_policy_store(app_state),
+        cosign_challenge_store=_get_cosign_challenge_store(app_state),
+        nonce_store=_get_proof_nonce_store(app_state),
     )
 
 
@@ -584,6 +664,20 @@ async def decide_action_approval(
         _logger.warning("Approval %s rejected on decode/validation: %s", approval_id, error)
         raise AppError("approval_signature_invalid", HTTPStatus.BAD_REQUEST, str(error)) from error
 
+    pet_proof: PetApproveProofInput | None = None
+    if body.petProof is not None:
+        try:
+            pet_proof = PetApproveProofInput(
+                pet_id=body.petProof.petId,
+                nonce_hex=body.petProof.nonceHex,
+                generation=body.petProof.generation,
+                short_code=body.petProof.shortCode,
+                signature=_decode_b64_flex(body.petProof.signature, 64),
+                public_key=_decode_b64_flex(body.petProof.publicKey, 65),
+            )
+        except ValueError as error:
+            raise AppError("pet_cosign_invalid", HTTPStatus.BAD_REQUEST, str(error)) from error
+
     orch = Orchestrator(
         host_repo=host_factory(session),
         hub=hub,
@@ -594,6 +688,10 @@ async def decide_action_approval(
         audit=audit_factory(session),
         scope_store=scope_store,
         verifier=verifier,
+        cosign_policy_store=_get_cosign_policy_store(request.app.state),
+        cosign_challenge_store=_get_cosign_challenge_store(request.app.state),
+        nonce_store=_get_proof_nonce_store(request.app.state),
+        identity_repo=_resolve_identity_repo(request.app.state, session),
     )
     try:
         updated = await orch.decide_approval(
@@ -604,11 +702,18 @@ async def decide_action_approval(
             signature=sig_bytes,
             signer_public_key=pub_bytes,
             request_id=_request_id(request),
+            pet_proof=pet_proof,
         )
     except ValueError as error:
         code = str(error)
         _logger.warning("Approval %s failed with %s", approval_id, code)
-        if code in ("r3_requires_once_scope", "approval_signature_invalid"):
+        if code in (
+            "r3_requires_once_scope",
+            "approval_signature_invalid",
+            "pet_cosign_required",
+            "pet_cosign_invalid",
+            "pet_cosign_replayed",
+        ):
             raise AppError(code, HTTPStatus.BAD_REQUEST, code) from error
         raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, code) from error
 
@@ -787,6 +892,19 @@ async def emergency_stop_actions(
             or target_host.status != HostStatus.ACTIVE
         ):
             raise AppError("not_found", HTTPStatus.NOT_FOUND)
+    pet_stop_proof: PetStopProofInput | None = None
+    if body is not None and body.petProof is not None:
+        try:
+            pet_stop_proof = PetStopProofInput(
+                pet_id=body.petProof.petId,
+                nonce_hex=body.petProof.nonceHex,
+                generation=body.petProof.generation,
+                signature=_decode_b64_flex(body.petProof.signature, 64),
+                public_key=_decode_b64_flex(body.petProof.publicKey, 65),
+            )
+        except ValueError as error:
+            raise AppError("pet_stop_proof_invalid", HTTPStatus.BAD_REQUEST, str(error)) from error
+
     orch = Orchestrator(
         host_repo=host_repo,
         hub=hub,
@@ -796,16 +914,31 @@ async def emergency_stop_actions(
         last_target_store=last_target_store,
         audit=audit_factory(session),
         scope_store=scope_store,
+        verifier=getattr(request.app.state, "signature_verifier", None),
         cu_session_store=cu_store,
         wake_queue=getattr(request.app.state, "wake_queue", None),
+        cosign_policy_store=_get_cosign_policy_store(request.app.state),
+        nonce_store=_get_proof_nonce_store(request.app.state),
+        identity_repo=_resolve_identity_repo(request.app.state, session),
     )
     reason = body.reason if body is not None else "owner_app"
-    summary = await orch.emergency_stop(
-        owner_id=owner.owner_id,
-        reason=reason,
-        request_id=_request_id(request),
-        host_id=target_host_id,
-    )
+    try:
+        summary = await orch.emergency_stop(
+            owner_id=owner.owner_id,
+            reason=reason,
+            request_id=_request_id(request),
+            host_id=target_host_id,
+            pet_proof=pet_stop_proof,
+        )
+    except ValueError as error:
+        code = str(error)
+        if code in (
+            "pet_stop_proof_required",
+            "pet_stop_proof_invalid",
+            "pet_stop_proof_replayed",
+        ):
+            raise AppError(code, HTTPStatus.BAD_REQUEST, code) from error
+        raise AppError("validation_failed", HTTPStatus.UNPROCESSABLE_ENTITY, code) from error
     await session.commit()
     runner = getattr(request.app.state, "job_runner", None)
     if runner is not None:
@@ -816,6 +949,37 @@ async def emergency_stop_actions(
         "approvalsCancelled": summary.approvals_cancelled,
         "grantsSuspended": summary.grants_suspended,
         "hostId": summary.host_id,
+        "petSigned": summary.pet_signed,
+    }
+
+
+@router.get("/cosign-policy")
+async def get_cosign_policy(request: Request, owner: CurrentOwner) -> dict[str, Any]:
+    """Returns owner's per-category pet co-signing policy (ADR-0020 D6, default OFF)."""
+    policy = _get_cosign_policy_store(request.app.state).get_policy(owner.owner_id)
+    return {
+        "schemaVersion": 1,
+        "enabledCategories": sorted(c.value for c in policy.enabled_categories),
+        "requireSignedBoardStop": policy.require_signed_board_stop,
+    }
+
+
+@router.put("/cosign-policy")
+async def update_cosign_policy(
+    body: CosignPolicyBody,
+    request: Request,
+    owner: CurrentOwner,
+) -> dict[str, Any]:
+    """Updates owner's opt-in pet co-signing policy (ADR-0020 D6)."""
+    policy = OwnerCosignPolicy(
+        enabled_categories=frozenset(body.enabledCategories),
+        require_signed_board_stop=body.requireSignedBoardStop,
+    )
+    saved = _get_cosign_policy_store(request.app.state).set_policy(owner.owner_id, policy)
+    return {
+        "schemaVersion": 1,
+        "enabledCategories": sorted(c.value for c in saved.enabled_categories),
+        "requireSignedBoardStop": saved.require_signed_board_stop,
     }
 
 

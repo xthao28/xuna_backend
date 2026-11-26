@@ -23,6 +23,15 @@ from xuna_backend.modules.actions.application.prompts import (
     DEADLINE_SECONDS,
     encode_tool_payload,
 )
+from xuna_backend.modules.actions.domain.cosigning import (
+    InMemoryCosignChallengeStore,
+    InMemoryCosignPolicyStore,
+    InMemoryProofNonceStore,
+    PetApproveProofInput,
+    PetStopProofInput,
+    build_verified_approve_message,
+    build_verified_stop_message,
+)
 from xuna_backend.modules.actions.domain.entities import (
     APPROVAL_TTL_SECONDS,
     ActionPendingEvent,
@@ -64,7 +73,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     HostStatus,
     RiskTier,
 )
-from xuna_backend.modules.identity.application.ports import SignatureVerifier
+from xuna_backend.modules.identity.application.ports import IdentityRepository, SignatureVerifier
 
 EventSink = Callable[[ActionStreamEvent], Awaitable[None]]
 
@@ -85,6 +94,10 @@ class ApprovalAndBoardService:
         scope_store: ApprovalScopeStore | None,
         verifier: SignatureVerifier | None,
         clock: Callable[[], datetime],
+        cosign_policy_store: InMemoryCosignPolicyStore | None = None,
+        cosign_challenge_store: InMemoryCosignChallengeStore | None = None,
+        nonce_store: InMemoryProofNonceStore | None = None,
+        identity_repo: IdentityRepository | None = None,
     ) -> None:
         self._host_repo = host_repo
         self._hub = hub
@@ -96,6 +109,10 @@ class ApprovalAndBoardService:
         self._scope_store = scope_store
         self._verifier = verifier
         self._clock = clock
+        self._cosign_policy_store = cosign_policy_store
+        self._cosign_challenge_store = cosign_challenge_store
+        self._nonce_store = nonce_store
+        self._identity_repo = identity_repo
 
     async def emergency_stop(
         self,
@@ -104,8 +121,38 @@ class ApprovalAndBoardService:
         reason: str = "owner_app",
         request_id: str = "",
         host_id: HostId | None = None,
+        pet_proof: PetStopProofInput | None = None,
     ) -> EmergencyStopSummary:
         now = self._clock()
+        policy = (
+            self._cosign_policy_store.get_policy(owner_id)
+            if self._cosign_policy_store is not None
+            else None
+        )
+        require_signed_stop = (
+            reason == "owner_board" and policy is not None and policy.require_signed_board_stop
+        )
+        pet_signed = False
+        verified_pet_id: str | None = None
+        if pet_proof is None:
+            if require_signed_stop:
+                raise ValueError("pet_stop_proof_required")
+        else:
+            if self._identity_repo is None or self._verifier is None:
+                raise ValueError("pet_stop_proof_invalid")
+            pets = await self._identity_repo.list_pets(owner_id)
+            checked = build_verified_stop_message(proof=pet_proof, owner_id=owner_id, pets=pets)
+            if checked is None:
+                raise ValueError("pet_stop_proof_invalid")
+            matched_pet, msg = checked
+            if not self._verifier.verify(pet_proof.public_key, msg, pet_proof.signature):
+                raise ValueError("pet_stop_proof_invalid")
+            if self._nonce_store is not None and not self._nonce_store.try_consume(
+                owner_id, pet_proof.nonce_hex
+            ):
+                raise ValueError("pet_stop_proof_replayed")
+            pet_signed = True
+            verified_pet_id = matched_pet.pet_id.value
         if host_id is not None:
             host = await self._host_repo.get_host(host_id)
             if host is None or host.owner_id != owner_id or host.status != HostStatus.ACTIVE:
@@ -172,6 +219,15 @@ class ApprovalAndBoardService:
             if reason in ("owner_app", "owner_host", "owner_board", "revoked")
             else "owner_app"
         )
+        stop_metadata: dict[str, str | int | bool] = {
+            "reason": safe_reason,
+            "hostsNotified": hosts_notified,
+            "approvalsCancelled": approvals_cancelled,
+            "grantsSuspended": grants_suspended,
+            "petSigned": pet_signed,
+        }
+        if verified_pet_id is not None:
+            stop_metadata["petId"] = verified_pet_id
         await self._audit.record(
             AuditEvent(
                 owner_id=owner_id,
@@ -179,12 +235,7 @@ class ApprovalAndBoardService:
                 occurred_at=now,
                 subject=subject,
                 request_id=request_id,
-                metadata={
-                    "reason": safe_reason,
-                    "hostsNotified": hosts_notified,
-                    "approvalsCancelled": approvals_cancelled,
-                    "grantsSuspended": grants_suspended,
-                },
+                metadata=stop_metadata,
             )
         )
         return EmergencyStopSummary(
@@ -193,6 +244,7 @@ class ApprovalAndBoardService:
             approvals_cancelled=approvals_cancelled,
             grants_suspended=grants_suspended,
             host_id=str(host_id) if host_id is not None else None,
+            pet_signed=pet_signed,
         )
 
     async def decide_approval(
@@ -205,6 +257,7 @@ class ApprovalAndBoardService:
         signature: bytes | None = None,
         signer_public_key: bytes | None = None,
         request_id: str = "",
+        pet_proof: PetApproveProofInput | None = None,
     ) -> ApprovalRequest | None:
         now = self._clock()
         existing = await self._approval_repo.get(approval_id)
@@ -279,6 +332,44 @@ class ApprovalAndBoardService:
                 if matched_key is None:
                     raise ValueError("approval_signature_invalid")
                 resolved_pub_key = matched_key
+
+        challenge = (
+            self._cosign_challenge_store.get(approval_id)
+            if self._cosign_challenge_store is not None
+            else None
+        )
+        if decision == ApprovalDecision.APPROVE and (
+            challenge is not None or pet_proof is not None
+        ):
+            if pet_proof is None:
+                raise ValueError("pet_cosign_required")
+            if self._identity_repo is None or self._verifier is None:
+                raise ValueError("pet_cosign_invalid")
+            target_hex = existing.effect_sha256 or existing.args_sha256
+            pets = await self._identity_repo.list_pets(owner_id)
+            checked = build_verified_approve_message(
+                proof=pet_proof,
+                owner_id=owner_id,
+                pets=pets,
+                target_sha256_hex=challenge.target_sha256_hex
+                if challenge is not None
+                else target_hex,
+                expected_nonce_hex=challenge.nonce_hex if challenge is not None else None,
+                expected_short_code=challenge.short_code if challenge is not None else None,
+            )
+            if checked is None:
+                raise ValueError("pet_cosign_invalid")
+            _, msg = checked
+            if not self._verifier.verify(pet_proof.public_key, msg, pet_proof.signature):
+                raise ValueError("pet_cosign_invalid")
+            if self._nonce_store is not None and not self._nonce_store.try_consume(
+                owner_id, pet_proof.nonce_hex
+            ):
+                raise ValueError("pet_cosign_replayed")
+            if self._cosign_challenge_store is not None:
+                self._cosign_challenge_store.remove(approval_id)
+        elif decision == ApprovalDecision.REJECT and self._cosign_challenge_store is not None:
+            self._cosign_challenge_store.remove(approval_id)
 
         was_pending = existing.state == ApprovalState.PENDING
         updated = await self._approval_broker.decide(

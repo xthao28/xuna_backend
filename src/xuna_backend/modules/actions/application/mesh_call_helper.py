@@ -41,6 +41,11 @@ from xuna_backend.modules.actions.domain.action_summary import (
     gesture_for_action_status,
 )
 from xuna_backend.modules.actions.domain.battery_advisor import evaluate_battery_advisory
+from xuna_backend.modules.actions.domain.cosigning import (
+    InMemoryCosignChallengeStore,
+    InMemoryCosignPolicyStore,
+    classify_cosign_category,
+)
 from xuna_backend.modules.actions.domain.entities import (
     APPROVAL_TTL_SECONDS,
     ActionPendingEvent,
@@ -506,8 +511,12 @@ async def emit_pending_with_battery(
     capable_host_ids: Collection[HostId] | None = None,
     now: datetime | None = None,
     preview: dict[str, object] | None = None,
+    clean_args: Mapping[str, object] | None = None,
+    preflight_reason: str | None = None,
+    cosign_policy_store: InMemoryCosignPolicyStore | None = None,
+    cosign_challenge_store: InMemoryCosignChallengeStore | None = None,
 ) -> None:
-    """Emits `ActionPendingEvent` enriched with Battery Advisor warnings when applicable."""
+    """Emits `ActionPendingEvent` enriched with Battery Advisor & optional pet co-signing."""
     eff_capable = capable_host_ids
     if (
         eff_capable is None
@@ -544,6 +553,28 @@ async def emit_pending_with_battery(
         ctx.self_host_id,
         capable_host_ids=eff_capable,
     )
+    requires_pet_cosign = False
+    cosign_short_code_val: str | None = None
+    cosign_nonce_hex_val: str | None = None
+    if cosign_policy_store is not None and cosign_challenge_store is not None:
+        category = classify_cosign_category(
+            approval_req.tool,
+            clean_args or {},
+            risk=approval_req.risk,
+            preflight_reason=preflight_reason,
+        )
+        policy = cosign_policy_store.get_policy(ctx.owner_id)
+        if category is not None and policy.requires_for(category):
+            target_hex = approval_req.effect_sha256 or approval_req.args_sha256
+            challenge = cosign_challenge_store.create(
+                approval_id=approval_req.approval_id,
+                owner_id=ctx.owner_id,
+                target_sha256_hex=target_hex,
+                category=category,
+            )
+            requires_pet_cosign = True
+            cosign_short_code_val = challenge.short_code
+            cosign_nonce_hex_val = challenge.nonce_hex
     await ctx.emit_event(
         ActionPendingEvent(
             approval_id=str(approval_req.approval_id),
@@ -564,6 +595,9 @@ async def emit_pending_with_battery(
             preview=preview,
             approval_version=approval_req.approval_version,
             effect_sha256=approval_req.effect_sha256,
+            requires_pet_cosign=requires_pet_cosign,
+            cosign_short_code=cosign_short_code_val,
+            cosign_nonce_hex=cosign_nonce_hex_val,
         )
     )
 

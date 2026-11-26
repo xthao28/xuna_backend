@@ -25,6 +25,11 @@ from xuna_backend.modules.actions.application.planner_executor import JobPlanner
 from xuna_backend.modules.actions.application.wake_inbox import WakeInboxService
 from xuna_backend.modules.actions.application.watch_coordinator import WatchCoordinator
 from xuna_backend.modules.actions.application.yield_detach import YieldDetachService
+from xuna_backend.modules.actions.domain.cosigning import (
+    InMemoryCosignChallengeStore,
+    InMemoryCosignPolicyStore,
+    InMemoryProofNonceStore,
+)
 from xuna_backend.modules.actions.domain.wake_queue import InMemoryWakeQueueStore
 from xuna_backend.modules.actions.infrastructure.approval_scope_store import (
     SqlApprovalScopeStore,
@@ -60,6 +65,12 @@ def wire_actions(app: FastAPI) -> None:
         app.state.pending_intent_store = InMemoryPendingIntentStore()
     if not hasattr(app.state, "wake_queue"):
         app.state.wake_queue = InMemoryWakeQueueStore()
+    if not hasattr(app.state, "cosign_policy_store"):
+        app.state.cosign_policy_store = InMemoryCosignPolicyStore()
+    if not hasattr(app.state, "cosign_challenge_store"):
+        app.state.cosign_challenge_store = InMemoryCosignChallengeStore()
+    if not hasattr(app.state, "proof_nonce_store"):
+        app.state.proof_nonce_store = InMemoryProofNonceStore()
     if not hasattr(app.state, "mesh_prober") and hasattr(app.state, "host_session_hub"):
         app.state.mesh_prober = MeshProber(hub=app.state.host_session_hub)
     app.state.approval_scope_store = SqlApprovalScopeStore(lambda: app.state.database.sessions())

@@ -7,7 +7,13 @@ import hashlib
 import pytest
 
 from tests.helpers import SimulatedDevice
-from xuna_backend.modules.identity.domain.device_proof import ProofPurpose, proof_message
+from xuna_backend.modules.identity.domain.device_proof import (
+    ProofPurpose,
+    approve_proof_payload,
+    cosign_short_code,
+    proof_message,
+    stop_proof_payload,
+)
 from xuna_backend.modules.identity.domain.pet_id import PetId
 from xuna_backend.modules.identity.infrastructure.p256 import P256SignatureVerifier
 
@@ -62,3 +68,26 @@ def test_p256_verifier_accepts_only_matching_signatures() -> None:
     assert not verifier.verify(SimulatedDevice().public_key, message, signature)
     assert not verifier.verify(b"\x04" + bytes(64), message, signature)
     assert not verifier.verify(device.public_key, message, bytes(64))
+
+
+def test_cosign_approve_and_stop_golden_vectors() -> None:
+    """Matches firmware `test_device_proof` and mobile `pet_cosign_p3_test.dart` (ADR-0020)."""
+    target = bytes(range(0x80, 0xA0))
+    code = cosign_short_code(NONCE, target)
+    assert code == "334494"
+
+    approve_msg = proof_message(
+        NONCE, PET, ProofPurpose.APPROVE, 38, approve_proof_payload(target, code)
+    )
+    assert approve_msg[62] == 4
+    assert (
+        hashlib.sha256(approve_msg).hexdigest()
+        == "367e8f3fb08f754f0895e36ec00dcbc42fd2b23c02306b6ad9cadaeffb0061e4"
+    )
+
+    stop_msg = proof_message(NONCE, PET, ProofPurpose.STOP, 38, stop_proof_payload())
+    assert stop_msg[62] == 5
+    assert (
+        hashlib.sha256(stop_msg).hexdigest()
+        == "d830a3e9a593634051a0a3420dfdebf1a048058a392b49849c3d1ea39a59a021"
+    )

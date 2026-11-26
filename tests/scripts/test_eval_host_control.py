@@ -177,3 +177,90 @@ def test_run_task_streams_turn_auto_approves_and_verifies_independently() -> Non
     assert outcome.reply == "Xong rồi nè"
     assert outcome.verified is False
     assert outcome.false_success is True  # said ok, independent check disagrees
+
+
+def test_p51_curated_suite_loads_cleanly_and_has_no_path_or_secret_leaks() -> None:
+    suite_path = _SCRIPT_PATH.parent / "eval_scenarios_curated.json"
+    scenarios = ev.load_curated_scenarios(suite_path)
+    assert len(scenarios) >= 6
+    categories = {s.category for s in scenarios}
+    assert {
+        "exec_postcondition",
+        "toolchain_remediation",
+        "draft_and_undo",
+        "declarative_capabilities",
+        "pet_cosigning",
+        "safety_boundaries",
+    } <= categories
+    outcomes = ev.evaluate_curated_scenarios(scenarios, ev.default_offline_scenario_runner)
+    summary = ev.summarize(outcomes)
+    assert summary["overall"]["tasks"] == len(scenarios)
+    assert summary["overall"]["verified"] == len(scenarios)
+    assert summary["overall"]["falseSuccess"] == 0
+    assert summary["overall"]["successRate"] == 1.0
+    assert "byCategory" in summary
+    assert ev.detect_regression(summary) == []
+
+
+def test_p51_curated_loader_rejects_path_or_secret_leak_per_section_36(tmp_path: Path) -> None:
+    import json
+
+    bad_suite = tmp_path / "bad.json"
+    bad_suite.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "scenarios": [
+                    {
+                        "taskId": "leak-1",
+                        "category": "safety_boundaries",
+                        "prompt": r"Read C:\Users\Owner\secret.txt and sk-1234567890abcdef",
+                        "expectedVerified": False,
+                        "expectedStatuses": ["denied"],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="hygiene"):
+        ev.load_curated_scenarios(bad_suite)
+
+
+def test_p51_regression_gate_catches_false_success_and_category_drop(tmp_path: Path) -> None:
+    import json
+
+    suite_path = _SCRIPT_PATH.parent / "eval_scenarios_curated.json"
+    scenarios = ev.load_curated_scenarios(suite_path)
+    baseline_summary = ev.summarize(
+        ev.evaluate_curated_scenarios(scenarios, ev.default_offline_scenario_runner)
+    )
+
+    def regressed_runner(scenario: ev.CuratedScenario) -> ev.ScenarioRunObservation:
+        if scenario.task_id == "p5-p11-expect-files-missing":
+            # Regressed: process claimed ok even though expected artifact was missing!
+            return ev.ScenarioRunObservation(statuses=("ok",), error_codes=())
+        return ev.default_offline_scenario_runner(scenario)
+
+    bad_outcomes = ev.evaluate_curated_scenarios(scenarios, regressed_runner)
+    bad_summary = ev.summarize(bad_outcomes)
+    assert bad_summary["overall"]["falseSuccess"] == 1
+    assert bad_summary["byCategory"]["exec_postcondition"]["falseSuccess"] == 1
+    reasons = ev.detect_regression(bad_summary, baseline={"summary": baseline_summary})
+    assert any("falseSuccess=1" in r for r in reasons)
+    assert any("exec_postcondition" in r for r in reasons)
+
+    # CLI offline replay writes report cleanly and exits 0.
+    out_report = tmp_path / "p5-report.json"
+    rc = ev.main(
+        [
+            "--curated-suite",
+            str(suite_path),
+            "--offline-replay",
+            "--out",
+            str(out_report),
+        ]
+    )
+    assert rc == 0
+    written = json.loads(out_report.read_text(encoding="utf-8"))
+    assert written["summary"]["overall"]["falseSuccess"] == 0

@@ -31,7 +31,7 @@ import statistics
 import sys
 import time
 import uuid
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -92,6 +92,32 @@ class Task:
     app: str | None = None
     probe: str | None = None  # random text the task writes, then verifies
     shortcut_app: bool = False
+    category: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CuratedScenario:
+    """Owner-curated regression scenario for P5.1 (`eval_scenarios_curated.json`)."""
+
+    task_id: str
+    category: str
+    prompt: str
+    expected_verified: bool
+    expected_statuses: tuple[str, ...]
+    expected_error_codes: tuple[str, ...] = ()
+    must_not_claim_success: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioRunObservation:
+    """Normalized turn observation returned by a curated scenario runner."""
+
+    statuses: tuple[str, ...]
+    error_codes: tuple[str, ...] = ()
+    reply: str = ""
+    latency_s: float = 0.0
+    approvals: int = 0
+    error: str | None = None
 
 
 @dataclass(slots=True)
@@ -106,6 +132,7 @@ class Outcome:
     error: str | None = None
     false_success: bool = False
     needs_review: bool = False
+    error_codes: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -277,12 +304,183 @@ def summarize(outcomes: Sequence[Outcome]) -> dict[str, Any]:
         if any(o.task.capability == cap for o in outcomes)
     }
     app_tasks = [o for o in outcomes if o.task.app is not None]
-    return {
+    categories = sorted({o.task.category for o in outcomes if o.task.category})
+    by_category = {
+        cat: block([o for o in outcomes if o.task.category == cat]) for cat in categories
+    }
+    summary: dict[str, Any] = {
         "overall": block(outcomes),
         "byCapability": by_cap,
         "appsWithoutShortcut": block([o for o in app_tasks if not o.task.shortcut_app]),
         "appsWithShortcut": block([o for o in app_tasks if o.task.shortcut_app]),
     }
+    if by_category:
+        summary["byCategory"] = by_category
+    return summary
+
+
+_LEAK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"[A-Za-z]:\\[^\s\"']+"),
+    re.compile(r"(?:^|[\s\"'])/(?:Users|home|etc|var|tmp)/[^\s\"']+"),
+    re.compile(r"\bsk-[A-Za-z0-9]{12,}\b"),
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+)
+
+
+def contains_sensitive_or_path_leak(text: str) -> bool:
+    """Checks desktop AGENTS §3.6 hygiene: curated inputs/reports must not leak paths or secrets."""
+    return any(pat.search(text) is not None for pat in _LEAK_PATTERNS)
+
+
+def load_curated_scenarios(path: Path) -> list[CuratedScenario]:
+    """Loads & validates owner-curated P5.1 regression scenarios (no host paths or secrets)."""
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, Mapping) or raw.get("schemaVersion") != 1:
+        raise ValueError("curated suite must be JSON object with schemaVersion=1")
+    items = raw.get("scenarios")
+    if not isinstance(items, list) or not items:
+        raise ValueError("curated suite must contain non-empty scenarios list")
+    scenarios: list[CuratedScenario] = []
+    seen_ids: set[str] = set()
+    for item in items:
+        if not isinstance(item, Mapping):
+            raise ValueError("scenario entry must be an object")
+        task_id = str(item.get("taskId") or "").strip()
+        category = str(item.get("category") or "").strip()
+        prompt = str(item.get("prompt") or "").strip()
+        if not task_id or not category or not prompt:
+            raise ValueError("scenario requires non-empty taskId, category, prompt")
+        if task_id in seen_ids:
+            raise ValueError(f"duplicate taskId: {task_id}")
+        seen_ids.add(task_id)
+        if contains_sensitive_or_path_leak(prompt):
+            raise ValueError(f"scenario {task_id} violates report hygiene (path/secret)")
+        expected_verified = item.get("expectedVerified")
+        if not isinstance(expected_verified, bool):
+            raise ValueError(f"scenario {task_id} expectedVerified must be bool")
+        statuses_raw = item.get("expectedStatuses")
+        if not isinstance(statuses_raw, list) or not all(
+            isinstance(s, str) and s for s in statuses_raw
+        ):
+            raise ValueError(f"scenario {task_id} expectedStatuses must be list[str]")
+        codes_raw = item.get("expectedErrorCodes", [])
+        if not isinstance(codes_raw, list) or not all(isinstance(c, str) and c for c in codes_raw):
+            raise ValueError(f"scenario {task_id} expectedErrorCodes must be list[str]")
+        must_not_claim = bool(item.get("mustNotClaimSuccess", False))
+        scenarios.append(
+            CuratedScenario(
+                task_id=task_id,
+                category=category,
+                prompt=prompt,
+                expected_verified=expected_verified,
+                expected_statuses=tuple(statuses_raw),
+                expected_error_codes=tuple(codes_raw),
+                must_not_claim_success=must_not_claim,
+            )
+        )
+    return scenarios
+
+
+def default_offline_scenario_runner(scenario: CuratedScenario) -> ScenarioRunObservation:
+    """Deterministic contract-baseline runner used by `--offline-replay`."""
+    return ScenarioRunObservation(
+        statuses=scenario.expected_statuses,
+        error_codes=scenario.expected_error_codes,
+        reply="[offline-contract-baseline]",
+        latency_s=0.05,
+    )
+
+
+def evaluate_curated_scenarios(
+    scenarios: Sequence[CuratedScenario],
+    runner: Callable[[CuratedScenario], ScenarioRunObservation],
+) -> list[Outcome]:
+    """Runs curated regression scenarios through `runner` and flags false successes."""
+    outcomes: list[Outcome] = []
+    for scenario in scenarios:
+        obs = runner(scenario)
+        task = Task(
+            task_id=scenario.task_id,
+            capability=f"curated:{scenario.category}",
+            prompt=scenario.prompt,
+            category=scenario.category,
+        )
+        statuses_match = obs.statuses == scenario.expected_statuses
+        codes_match = set(scenario.expected_error_codes) <= set(obs.error_codes)
+        passed = statuses_match and codes_match and obs.error is None
+        false_success = False
+        if (
+            scenario.must_not_claim_success
+            and obs.statuses
+            and all(s == "ok" for s in obs.statuses)
+        ):
+            false_success = True
+            passed = False
+        outcomes.append(
+            Outcome(
+                task=task,
+                verified=passed,
+                verify_detail=(f"statuses={list(obs.statuses)} codes={list(obs.error_codes)}"),
+                action_statuses=list(obs.statuses),
+                approvals=obs.approvals,
+                latency_s=obs.latency_s,
+                reply=obs.reply[:200],
+                error=obs.error,
+                false_success=false_success,
+                error_codes=list(obs.error_codes),
+            )
+        )
+    return outcomes
+
+
+def detect_regression(
+    summary: Mapping[str, Any],
+    *,
+    baseline: Mapping[str, Any] | None = None,
+    min_success_drop: float = 0.05,
+) -> list[str]:
+    """Returns regression error descriptions if `falseSuccess > 0` or pass rate regressed."""
+    reasons: list[str] = []
+    overall = summary.get("overall") if isinstance(summary.get("overall"), Mapping) else {}
+    false_success = int(overall.get("falseSuccess") or 0)
+    if false_success > 0:
+        reasons.append(f"falseSuccess={false_success} > 0")
+    cur_rate = overall.get("successRate")
+    if isinstance(cur_rate, int | float) and cur_rate < 1.0 and baseline is None:
+        reasons.append(f"overall.successRate={cur_rate} < 1.0")
+    if baseline is not None:
+        base_summary = (
+            baseline.get("summary") if isinstance(baseline.get("summary"), Mapping) else baseline
+        )
+        base_overall = (
+            base_summary.get("overall")
+            if isinstance(base_summary, Mapping)
+            and isinstance(base_summary.get("overall"), Mapping)
+            else {}
+        )
+        base_rate = base_overall.get("successRate")
+        if (
+            isinstance(cur_rate, int | float)
+            and isinstance(base_rate, int | float)
+            and cur_rate < float(base_rate) - min_success_drop
+        ):
+            reasons.append(f"overall.successRate dropped {base_rate} -> {cur_rate}")
+        cur_cats = summary.get("byCategory")
+        base_cats = base_summary.get("byCategory") if isinstance(base_summary, Mapping) else None
+        if isinstance(cur_cats, Mapping) and isinstance(base_cats, Mapping):
+            for cat, cat_stats in base_cats.items():
+                cur_stats = cur_cats.get(cat)
+                if not isinstance(cat_stats, Mapping) or not isinstance(cur_stats, Mapping):
+                    continue
+                b_r = cat_stats.get("successRate")
+                c_r = cur_stats.get("successRate")
+                if (
+                    isinstance(b_r, int | float)
+                    and isinstance(c_r, int | float)
+                    and c_r < float(b_r) - min_success_drop
+                ):
+                    reasons.append(f"category[{cat}].successRate dropped {b_r} -> {c_r}")
+    return reasons
 
 
 def iter_sse(lines: Iterable[str]) -> Iterator[tuple[str, dict[str, Any]]]:
@@ -435,8 +633,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else "")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000")
     parser.add_argument("--token", default=os.environ.get("XUNA_OWNER_TOKEN", ""))
-    parser.add_argument("--pet-id", required=True)
-    parser.add_argument("--host", required=True, help="Host alias or UUID")
+    parser.add_argument("--pet-id", required=False, default="")
+    parser.add_argument("--host", required=False, default="", help="Host alias or UUID")
     parser.add_argument("--tasks", type=int, default=10)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--settle", type=float, default=1.5, help="Seconds before verifying")
@@ -445,12 +643,53 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-typing", action="store_true")
     parser.add_argument("--exclude-app", action="append", default=[])
     parser.add_argument(
+        "--curated-suite",
+        type=Path,
+        default=None,
+        help="P5.1 owner-curated JSON scenario suite path",
+    )
+    parser.add_argument(
+        "--offline-replay",
+        action="store_true",
+        help="Run curated suite against deterministic offline contract runner (no live host)",
+    )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="Optional prior JSON report to flag regressions by category",
+    )
+    parser.add_argument(
         "--plan-only", action="store_true", help="Print the generated tasks without running"
     )
     parser.add_argument("--out", type=Path, default=Path("benchmark-results/host-eval.json"))
     args = parser.parse_args(argv)
+
+    baseline_data: Mapping[str, Any] | None = None
+    if args.baseline is not None:
+        baseline_data = json.loads(args.baseline.read_text(encoding="utf-8"))
+
+    if args.curated_suite is not None and args.offline_replay:
+        scenarios = load_curated_scenarios(args.curated_suite)
+        outcomes = evaluate_curated_scenarios(scenarios, default_offline_scenario_runner)
+        summary = summarize(outcomes)
+        regressions = detect_regression(summary, baseline=baseline_data)
+        report = {
+            "mode": "curated_offline_replay",
+            "suite": str(args.curated_suite.name),
+            "summary": summary,
+            "regressions": regressions,
+            "outcomes": [asdict(o) for o in outcomes],
+        }
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(json.dumps(report["summary"], ensure_ascii=False, indent=2))  # noqa: T201
+        return 1 if regressions else 0
+
     if not args.token:
         parser.error("--token or XUNA_OWNER_TOKEN is required")
+    if not args.pet_id or not args.host:
+        parser.error("--pet-id and --host are required for live runs")
 
     seed = args.seed if args.seed is not None else random.SystemRandom().randrange(1 << 30)
     rng = random.Random(seed)  # noqa: S311 - reproducible task sampling, not security

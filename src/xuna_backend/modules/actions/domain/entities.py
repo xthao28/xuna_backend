@@ -136,6 +136,7 @@ class EmergencyStopSummary:
     approvals_cancelled: int
     grants_suspended: int
     host_id: str | None = None
+    pet_signed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +168,10 @@ class ActionPendingEvent:
     # Effect-bound signing metadata (ADR-0019 §4 / W4-M4); omitted on v1 approvals.
     approval_version: int = 1
     effect_sha256: str | None = None
+    # Opt-in pet co-signing challenge (ADR-0020 / F3-M2); omitted when D6 policy is OFF.
+    requires_pet_cosign: bool = False
+    cosign_short_code: str | None = None
+    cosign_nonce_hex: str | None = None
 
     def standing_payload(self) -> dict[str, object] | None:
         """The `standing` object of `action_pending` on SSE and the voice WebSocket, or
@@ -216,6 +221,12 @@ class ActionPendingEvent:
             payload["approvalVersion"] = self.approval_version
         if self.effect_sha256 is not None:
             payload["effectSha256"] = self.effect_sha256
+        if self.requires_pet_cosign:
+            payload["requiresPetCosign"] = True
+            if self.cosign_short_code is not None:
+                payload["cosignShortCode"] = self.cosign_short_code
+            if self.cosign_nonce_hex is not None:
+                payload["cosignNonceHex"] = self.cosign_nonce_hex
         return payload
 
 
