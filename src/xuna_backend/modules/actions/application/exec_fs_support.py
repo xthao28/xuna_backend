@@ -50,7 +50,9 @@ def exec_async_verify_instruction(task_id: str | None) -> str:
     """Wake-up guidance: the exit code must be read before anything is reported."""
     handle = f" (taskId={task_id})" if task_id else ""
     return (
-        f"Call read-only exec__status{handle} first and report the real exit code and "
-        "output (Rule H1); a settled watch only means the process ended, not that it "
-        "succeeded. If it is still running, call job__wait again."
+        f"Call read-only exec__status{handle} first and report the real status, exit code "
+        "and output (Rule H1); a settled watch only means the process ended, not that it "
+        "succeeded. Only status completed is success: failed with exit code 0 and "
+        "expected_output_missing/expected_output_mismatch means expected files are wrong. "
+        "If it is still running, call job__wait again."
     )

@@ -21,9 +21,13 @@ def exec_fs_pending_text(
         case "exec.run":
             command = _cut(arguments.get("command"), 150)
             cwd = _cut(arguments.get("cwd") or "~", 50)
+            expect = arguments.get("expectFiles")
+            count = len(expect) if isinstance(expect, list) else 0
             if english:
-                return f"Run `{command}` in {cwd} on {target}"[:240]
-            return f"Chạy lệnh `{command}` trong {cwd} trên {target}"[:240]
+                checks = f", check {count} output file(s)" if count else ""
+                return f"Run `{command}` in {cwd}{checks} on {target}"[:240]
+            checks = f", kiểm tra {count} tệp đầu ra" if count else ""
+            return f"Chạy lệnh `{command}` trong {cwd}{checks} trên {target}"[:240]
         case "exec.write_stdin":
             text = _cut(arguments.get("input"), 120)
             task = _cut(arguments.get("taskId"), 40)

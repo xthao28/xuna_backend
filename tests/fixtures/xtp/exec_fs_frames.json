@@ -389,7 +389,7 @@
           },
           {
             "name": "exec.run",
-            "description": "Run a local command in its own process group (host preflight: R2 local dev, R3 destructive/network, sudo/secrets refused).",
+            "description": "Run a local command in its own process group (host preflight: R2 local dev, R3 destructive/network, sudo/secrets refused). expectFiles: completed only if each file exists and matches.",
             "inputSchema": {
               "type": "object",
               "properties": {
@@ -415,6 +415,37 @@
                 },
                 "pty": {
                   "type": "boolean"
+                },
+                "expectFiles": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 16,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "minBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "magic": {
+                        "type": "string",
+                        "pattern": "^([0-9a-fA-F]{2}){1,16}$"
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-fA-F]{64}$"
+                      }
+                    },
+                    "required": [
+                      "path"
+                    ],
+                    "additionalProperties": false
+                  }
                 }
               },
               "required": [
@@ -452,6 +483,59 @@
                 "durationMs": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "errorCode": {
+                  "type": "string",
+                  "enum": [
+                    "expected_output_missing",
+                    "expected_output_mismatch"
+                  ]
+                },
+                "artifacts": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "exists": {
+                        "type": "boolean"
+                      },
+                      "sizeBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "magicOk": {
+                        "type": "boolean"
+                      },
+                      "problem": {
+                        "type": "string",
+                        "enum": [
+                          "missing",
+                          "not_a_file",
+                          "too_small",
+                          "magic_mismatch",
+                          "sha256_mismatch",
+                          "too_large_to_hash",
+                          "unreadable",
+                          "forbidden"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "exists"
+                    ],
+                    "additionalProperties": false
+                  }
                 }
               },
               "required": [
@@ -524,6 +608,59 @@
                 "elapsedMs": {
                   "type": "integer",
                   "minimum": 0
+                },
+                "errorCode": {
+                  "type": "string",
+                  "enum": [
+                    "expected_output_missing",
+                    "expected_output_mismatch"
+                  ]
+                },
+                "artifacts": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "exists": {
+                        "type": "boolean"
+                      },
+                      "sizeBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "magicOk": {
+                        "type": "boolean"
+                      },
+                      "problem": {
+                        "type": "string",
+                        "enum": [
+                          "missing",
+                          "not_a_file",
+                          "too_small",
+                          "magic_mismatch",
+                          "sha256_mismatch",
+                          "too_large_to_hash",
+                          "unreadable",
+                          "forbidden"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "exists"
+                    ],
+                    "additionalProperties": false
+                  }
                 }
               },
               "required": [
@@ -745,6 +882,17 @@
         }
       }
     },
+    "preflightExecRunExpectFilesSecretResponse": {
+      "jsonrpc": "2.0",
+      "id": 809,
+      "result": {
+        "preflight": {
+          "status": "denied",
+          "errorCode": "fs_secret_file_forbidden",
+          "reasonCode": "secret_file"
+        }
+      }
+    },
     "toolsCallExecRunRequest": {
       "jsonrpc": "2.0",
       "id": 810,
@@ -807,6 +955,95 @@
         "_meta": {
           "xuna/status": "ok",
           "xuna/durationMs": 10004
+        }
+      }
+    },
+    "toolsCallExecRunExpectFilesRequest": {
+      "jsonrpc": "2.0",
+      "id": 816,
+      "method": "tools/call",
+      "params": {
+        "name": "exec.run",
+        "arguments": {
+          "command": "npm run build",
+          "cwd": "~/Projects/app",
+          "expectFiles": [
+            {
+              "path": "~/Projects/app/dist/report.pdf",
+              "minBytes": 1024,
+              "magic": "25504446"
+            }
+          ]
+        },
+        "_meta": {
+          "xuna/invocationId": "6a4d3e21-9b5f-4c82-8d23-1f5a7b9c0d16",
+          "xuna/deadlineMs": 15000
+        }
+      }
+    },
+    "toolsCallExecRunExpectFilesCompletedResponse": {
+      "jsonrpc": "2.0",
+      "id": 816,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "exec.run completed exit=0"
+          }
+        ],
+        "structuredContent": {
+          "status": "completed",
+          "exitCode": 0,
+          "output": "built dist/report.pdf\n",
+          "truncated": false,
+          "durationMs": 3120,
+          "artifacts": [
+            {
+              "path": "~/Projects/app/dist/report.pdf",
+              "exists": true,
+              "sizeBytes": 2048,
+              "sha256": "77d594dcb0d379c0153bb54502dd4b3896d1d021401c5f0cdcdf1da219217ab1",
+              "magicOk": true
+            }
+          ]
+        },
+        "isError": false,
+        "_meta": {
+          "xuna/status": "ok",
+          "xuna/durationMs": 3125
+        }
+      }
+    },
+    "toolsCallExecRunExpectedOutputMissingResponse": {
+      "jsonrpc": "2.0",
+      "id": 817,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "exec.run failed exit=0 expected_output_missing"
+          }
+        ],
+        "structuredContent": {
+          "status": "failed",
+          "exitCode": 0,
+          "output": "done\n",
+          "truncated": false,
+          "durationMs": 2410,
+          "errorCode": "expected_output_missing",
+          "artifacts": [
+            {
+              "path": "~/Projects/app/dist/report.pdf",
+              "exists": false,
+              "problem": "missing"
+            }
+          ]
+        },
+        "isError": true,
+        "_meta": {
+          "xuna/status": "failed",
+          "xuna/errorCode": "expected_output_missing",
+          "xuna/durationMs": 2415
         }
       }
     },

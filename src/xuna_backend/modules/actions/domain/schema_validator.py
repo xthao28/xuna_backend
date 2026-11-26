@@ -6,6 +6,11 @@ Supported keywords:
 - Property schemas:
   - `type == "string"`: optional `maxLength`, `pattern`, `enum`, `description`.
   - `type == "integer"`: optional `minimum`, `maximum`, `enum`, `description`.
+  - `type == "boolean"`: optional `description`.
+  - `type == "array"`: `items` (one property schema), optional `minItems`, `maxItems`.
+  - `type == "object"` **only as array `items`** (e.g. `exec.run` `expectFiles`):
+    `properties` of scalar types, optional `required`, `additionalProperties is False`.
+    Objects do not nest further.
 
 Any other keyword or type in a descriptor schema is rejected with `SchemaDefinitionError`.
 """
@@ -19,6 +24,10 @@ _ALLOWED_STRING_KEYS = frozenset(
 _ALLOWED_INT_KEYS = frozenset({"type", "minimum", "maximum", "enum", "description"})
 _ALLOWED_BOOL_KEYS = frozenset({"type", "description"})
 _ALLOWED_ARRAY_KEYS = frozenset({"type", "items", "minItems", "maxItems", "description"})
+_ALLOWED_ITEM_OBJECT_KEYS = frozenset(
+    {"type", "properties", "required", "additionalProperties", "description"}
+)
+_SCALAR_TYPES = frozenset({"string", "integer", "number", "boolean"})
 
 
 class SchemaDefinitionError(ValueError):
@@ -133,9 +142,34 @@ class SchemaValidator:
             items_schema = prop.get("items")
             if not isinstance(items_schema, dict):
                 raise SchemaDefinitionError(f"items on {name!r} must be a dict")
-            SchemaValidator._validate_property_definition(f"{name}[]", items_schema)
+            if items_schema.get("type") == "object":
+                SchemaValidator._validate_item_object_definition(f"{name}[]", items_schema)
+            else:
+                SchemaValidator._validate_property_definition(f"{name}[]", items_schema)
         else:
             raise SchemaDefinitionError(f"unsupported property type {prop_type!r} on {name!r}")
+
+    @staticmethod
+    def _validate_item_object_definition(name: str, item: dict[str, object]) -> None:
+        unknown = set(item.keys()) - _ALLOWED_ITEM_OBJECT_KEYS
+        if unknown:
+            raise SchemaDefinitionError(
+                f"unsupported object keywords on {name!r}: {sorted(unknown)}"
+            )
+        if item.get("additionalProperties") is not False:
+            raise SchemaDefinitionError(f"additionalProperties on {name!r} must be False")
+        props = item.get("properties")
+        if not isinstance(props, dict) or not props:
+            raise SchemaDefinitionError(f"properties on {name!r} must be a non-empty dict")
+        required = item.get("required", [])
+        if not isinstance(required, list) or not all(k in props for k in required):
+            raise SchemaDefinitionError(f"required on {name!r} must list known properties")
+        for prop_name, prop_schema in props.items():
+            if not isinstance(prop_name, str) or not prop_name:
+                raise SchemaDefinitionError(f"property name on {name!r} must be non-empty")
+            if not isinstance(prop_schema, dict) or prop_schema.get("type") not in _SCALAR_TYPES:
+                raise SchemaDefinitionError(f"property {name}.{prop_name} must be a scalar schema")
+            SchemaValidator._validate_property_definition(f"{name}.{prop_name}", prop_schema)
 
     @staticmethod
     def validate_arguments(
@@ -235,3 +269,17 @@ class SchemaValidator:
             if isinstance(items_schema, dict):
                 for idx, elem in enumerate(value):
                     SchemaValidator._validate_value(f"{name}[{idx}]", elem, items_schema)
+        elif prop_type == "object":
+            if not isinstance(value, dict):
+                raise ArgumentValidationError(f"argument {name!r} must be an object")
+            props_raw = prop.get("properties")
+            props = props_raw if isinstance(props_raw, dict) else {}
+            for key, elem in value.items():
+                sub = props.get(key)
+                if not isinstance(sub, dict):
+                    raise ArgumentValidationError(f"unexpected key {key!r} in {name!r}")
+                SchemaValidator._validate_value(f"{name}.{key}", elem, sub)
+            required_raw = prop.get("required")
+            for req_key in required_raw if isinstance(required_raw, list) else []:
+                if req_key not in value:
+                    raise ArgumentValidationError(f"missing key {req_key!r} in {name!r}")
