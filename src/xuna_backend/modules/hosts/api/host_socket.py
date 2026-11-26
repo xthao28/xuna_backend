@@ -93,6 +93,7 @@ from xuna_backend.modules.hosts.domain.twin import (
     HostFocusChangedNotice,
     HostPresence,
     HostResources,
+    HostToolchain,
 )
 from xuna_backend.modules.identity.application.ports import SignatureVerifier
 
@@ -354,6 +355,9 @@ async def _serve_session(
                     workspaces=tuple(msg.params.workspaces),
                     updated_at=datetime.now(UTC),
                     capabilities_version=msg.params.capabilitiesVersion,
+                    toolchains=tuple(
+                        HostToolchain(id=tc.id, version=tc.version) for tc in msg.params.toolchains
+                    ),
                 )
                 hub.update_resources(str(host.host_id), resources)
                 continue

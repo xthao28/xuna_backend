@@ -803,6 +803,14 @@ def format_host_roster(
         )
         apps_cnt = len(r.installed_apps) if r is not None else 0
         ws_cnt = len(r.workspaces) if r is not None else 0
+        if r is not None and r.toolchains:
+            tc_cap = 24
+            shown_tc = [f"{tc.id}@{tc.version}" for tc in r.toolchains[:tc_cap]]
+            if len(r.toolchains) > tc_cap:
+                shown_tc.append(f"+{len(r.toolchains) - tc_cap}")
+            toolchains_s = "[" + ", ".join(shown_tc) + "]"
+        else:
+            toolchains_s = "[]"
         place_s = h.place if h.place is not None else "none"
         nicks_s = "[" + ", ".join(h.nicknames) + "]"
         state_s = "online" if online else "offline"
@@ -810,7 +818,7 @@ def format_host_roster(
             f"- {h.alias.value} (platform={h.platform.value}, kind={h.host_kind.value}, "
             f"place={place_s}, nicknames={nicks_s}, state={state_s}, locked={locked}, "
             f"mediaPlaying={media}, idleS={idle_s}, battery={battery}, "
-            f"appsCount={apps_cnt}, workspacesCount={ws_cnt})"
+            f"appsCount={apps_cnt}, workspacesCount={ws_cnt}, toolchains={toolchains_s})"
         )
     lines.append("[/HOST_ROSTER]")
     return "\n".join(lines)

@@ -56,6 +56,7 @@ from xuna_backend.modules.actions.domain.mesh_scoring import (
     extract_resource_query,
 )
 from xuna_backend.modules.actions.domain.mission_envelope import build_cu_session_mission_dict
+from xuna_backend.modules.actions.domain.remediation import sanitize_remediation
 from xuna_backend.modules.actions.domain.wake_queue import (
     WAKE_QUEUE_TTL,
     DeferredWakeStep,
@@ -691,6 +692,24 @@ def resolve_effective_target_reason(
     return None
 
 
+def extract_tool_remediation(
+    status: str,
+    structured_content: dict[str, object],
+) -> dict[str, object] | None:
+    """Validates and normalizes `remediation` on failed/non-ok results; drops invalid payloads."""
+    is_failure = status != "ok" or structured_content.get("status") == "failed"
+    if not is_failure:
+        structured_content.pop("remediation", None)
+        return None
+    sanitized = sanitize_remediation(structured_content.get("remediation"))
+    if "remediation" in structured_content:
+        if sanitized is not None:
+            structured_content["remediation"] = sanitized
+        else:
+            structured_content.pop("remediation", None)
+    return sanitized
+
+
 async def emit_host_action_result(
     ctx: "ActionContext",
     invocation_id: str,
@@ -700,6 +719,7 @@ async def emit_host_action_result(
     status: str,
     target_reason: str | None = None,
     error_code: str | None = None,
+    remediation: dict[str, object] | None = None,
 ) -> str:
     """Formats summary and emits `ActionResultEvent` with consistent spatial metadata."""
     target_alias = str(host.alias)
@@ -718,6 +738,7 @@ async def emit_host_action_result(
             target_reason=target_reason,
             target_platform=host.platform.value,
             mission_envelope=ctx.mission_envelope,
+            remediation=remediation,
         )
     )
     return summary

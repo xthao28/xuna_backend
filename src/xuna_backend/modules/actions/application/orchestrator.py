@@ -72,6 +72,7 @@ from xuna_backend.modules.actions.application.mesh_call_helper import (
     emit_no_host_required,
     emit_pending_with_battery,
     emit_unresolved_ctx,
+    extract_tool_remediation,
     handle_pre_route_ctx,
     resolve_effective_target_reason,
     validate_cu_session_goal,
@@ -2937,8 +2938,10 @@ class Orchestrator:
             )
         )
 
+        is_failure = status != "ok" or structured_content.get("status") == "failed"
         raw_error = structured_content.get("errorCode")
-        err_code = raw_error[:64] if status != "ok" and isinstance(raw_error, str) else None
+        err_code = raw_error[:64] if is_failure and isinstance(raw_error, str) else None
+        remediation = extract_tool_remediation(status, structured_content)
         result_summary = await emit_host_action_result(
             ctx,
             invocation_id,
@@ -2948,6 +2951,7 @@ class Orchestrator:
             status,
             eff_target_reason,
             err_code,
+            remediation=remediation,
         )
         if descriptor.family in (
             ToolFamily.CU,

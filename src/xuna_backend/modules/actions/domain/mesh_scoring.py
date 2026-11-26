@@ -410,7 +410,14 @@ def score_resource_match(
         return 1.00
     if resources is None:
         return 0.50
-    pool = [fold_text(item) for item in (*resources.installed_apps, *resources.workspaces)]
+    pool = [
+        fold_text(item)
+        for item in (
+            *resources.installed_apps,
+            *resources.workspaces,
+            *(tc.id for tc in resources.toolchains),
+        )
+    ]
     if q in pool:
         return 1.00
     matches = {item for item in pool if len(q) >= 2 and (item.startswith(q) or q in item)}

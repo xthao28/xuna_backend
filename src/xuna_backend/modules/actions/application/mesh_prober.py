@@ -594,7 +594,7 @@ class MeshProber:
         owner_id: uuid.UUID,
         targets: Sequence[ProbeTarget],
         query: str,
-        kind: Literal["app", "workspace", "tool"] | None = None,
+        kind: Literal["app", "workspace", "toolchain", "tool"] | None = None,
         host_screen_consent: bool = True,
         deadline_ms: int | None = None,
     ) -> dict[str, object]:
@@ -620,6 +620,7 @@ class MeshProber:
             has_twin_resources = resources is not None and (
                 bool(resources.installed_apps)
                 or bool(resources.workspaces)
+                or bool(resources.toolchains)
                 or resources.capabilities_version is not None
             )
 
@@ -654,6 +655,23 @@ class MeshProber:
                                 "kind": "workspace",
                                 "id": ws,
                                 "exact": folded_ws == q_folded,
+                                "source": "twin",
+                            }
+                        )
+
+            if kind in (None, "toolchain") and resources is not None:
+                for tc in resources.toolchains:
+                    folded_tc = fold_text(tc.id)
+                    if q_folded in folded_tc:
+                        matches.append(
+                            {
+                                "hostId": hid_str,
+                                "alias": host.alias.value,
+                                "platform": host.platform.value,
+                                "kind": "toolchain",
+                                "id": tc.id,
+                                "version": tc.version,
+                                "exact": folded_tc == q_folded,
                                 "source": "twin",
                             }
                         )

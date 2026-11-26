@@ -152,6 +152,44 @@ class PresenceParamsModel(_StrictModel):
         return datetime.fromisoformat(self.updatedAt).astimezone(UTC)
 
 
+_TOOLCHAIN_ID_RE = re.compile(r"^[a-z0-9_.-]{1,32}$")
+_TOOLCHAIN_VERSION_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,31}$")
+
+
+class ToolchainModel(_StrictModel):
+    """Strict host-declared toolchain entry (`XUNA_XTP_V1_CONTRACT.md` §4.2.11)."""
+
+    id: str = Field(min_length=1, max_length=32)
+    version: str = Field(min_length=1, max_length=32)
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        if (
+            "/" in value
+            or "\\" in value
+            or ".." in value
+            or value in {".", ".."}
+            or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value)
+            or not _TOOLCHAIN_ID_RE.fullmatch(value)
+        ):
+            raise ValueError("invalid toolchain id")
+        return value
+
+    @field_validator("version")
+    @classmethod
+    def _validate_version(cls, value: str) -> str:
+        if (
+            "/" in value
+            or "\\" in value
+            or ".." in value
+            or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value)
+            or not _TOOLCHAIN_VERSION_RE.fullmatch(value)
+        ):
+            raise ValueError("invalid toolchain version")
+        return value
+
+
 class ResourcesParamsModel(_StrictModel):
     schemaVersion: Literal[1]
     installedApps: list[Annotated[str, Field(pattern=r"^[a-z0-9_.-]{1,64}$")]] = Field(
@@ -161,6 +199,7 @@ class ResourcesParamsModel(_StrictModel):
         max_length=128
     )
     capabilitiesVersion: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_.-]{1,32}$")
+    toolchains: list[ToolchainModel] = Field(default_factory=list, max_length=64)
 
     @field_validator("installedApps", "workspaces")
     @classmethod
@@ -184,6 +223,16 @@ class ResourcesParamsModel(_StrictModel):
         if value is not None and ("\n" in value or "\r" in value):
             raise ValueError("newline characters are not allowed")
         return value
+
+    @field_validator("toolchains")
+    @classmethod
+    def _reject_duplicate_toolchains(cls, items: list[ToolchainModel]) -> list[ToolchainModel]:
+        seen: set[str] = set()
+        for item in items:
+            if item.id in seen:
+                raise ValueError("duplicate toolchain id")
+            seen.add(item.id)
+        return items
 
 
 class FocusRequestParamsModel(_StrictModel):

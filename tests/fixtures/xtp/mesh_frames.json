@@ -77,6 +77,32 @@
         "capabilitiesVersion": "r1_0001"
       }
     },
+    "resourcesWithToolchainsNotification": {
+      "jsonrpc": "2.0",
+      "method": "xuna/resources",
+      "params": {
+        "schemaVersion": 1,
+        "installedApps": [
+          "vscode",
+          "obsidian"
+        ],
+        "workspaces": [
+          "xuna_pet",
+          "Notes_Vault"
+        ],
+        "capabilitiesVersion": "r1_0002",
+        "toolchains": [
+          {
+            "id": "git",
+            "version": "2.47.1"
+          },
+          {
+            "id": "node",
+            "version": "22.11.0"
+          }
+        ]
+      }
+    },
     "focusRequestHotkeyNotification": {
       "jsonrpc": "2.0",
       "method": "xuna/focusRequest",

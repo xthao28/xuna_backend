@@ -16,10 +16,45 @@ _SUBNET_HASH_RE = re.compile(r"[0-9a-f]{16,64}")
 _APP_ID_RE = re.compile(r"[a-z0-9_.-]{1,64}")
 _WORKSPACE_ID_RE = re.compile(r"[a-zA-Z0-9_.-]{1,64}")
 _CAP_VERSION_RE = re.compile(r"[a-zA-Z0-9_.-]{1,32}")
+_TOOLCHAIN_ID_RE = re.compile(r"[a-z0-9_.-]{1,32}")
+_TOOLCHAIN_VERSION_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._+-]{0,31}")
 _FOCUS_SOURCES = frozenset({"app", "slash_cmd", "hotkey", "tray", "follow_me", "system", "revoked"})
 _TRUST_PRESETS = frozenset({"strict", "standard", "autopilot"})
 _MAX_INSTALLED_APPS = 256
 _MAX_WORKSPACES = 128
+_MAX_TOOLCHAINS = 64
+
+
+def _has_disallowed_resource_chars(value: str) -> bool:
+    return (
+        "/" in value
+        or "\\" in value
+        or ".." in value
+        or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value)
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class HostToolchain:
+    """Normalized host-probed toolchain declaration (`id` and `version`, zero paths)."""
+
+    id: str
+    version: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.id, str)
+            or self.id in {".", ".."}
+            or _has_disallowed_resource_chars(self.id)
+            or not _TOOLCHAIN_ID_RE.fullmatch(self.id)
+        ):
+            raise ValueError(f"invalid toolchain id: {self.id!r}")
+        if (
+            not isinstance(self.version, str)
+            or _has_disallowed_resource_chars(self.version)
+            or not _TOOLCHAIN_VERSION_RE.fullmatch(self.version)
+        ):
+            raise ValueError(f"invalid toolchain version: {self.version!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,12 +93,13 @@ class HostPresence:
 
 @dataclass(frozen=True, slots=True)
 class HostResources:
-    """Normalized app and workspace aliases reported via `xuna/resources` (zero paths)."""
+    """Normalized app, workspace, and toolchain digests reported via `xuna/resources`."""
 
     installed_apps: tuple[str, ...]
     workspaces: tuple[str, ...]
     updated_at: datetime
     capabilities_version: str | None = None
+    toolchains: tuple[HostToolchain, ...] = ()
 
     def __post_init__(self) -> None:
         if self.updated_at.tzinfo is None:
@@ -88,6 +124,15 @@ class HostResources:
             self.capabilities_version
         ):
             raise ValueError("capabilities_version must match ^[a-zA-Z0-9_.-]{1,32}$")
+        if len(self.toolchains) > _MAX_TOOLCHAINS:
+            raise ValueError(f"toolchains exceeds {_MAX_TOOLCHAINS} items")
+        seen_toolchains: set[str] = set()
+        for tc in self.toolchains:
+            if not isinstance(tc, HostToolchain):
+                raise ValueError("toolchains entries must be HostToolchain instances")
+            if tc.id in seen_toolchains:
+                raise ValueError(f"duplicate toolchain id: {tc.id!r}")
+            seen_toolchains.add(tc.id)
 
 
 @dataclass(frozen=True, slots=True)

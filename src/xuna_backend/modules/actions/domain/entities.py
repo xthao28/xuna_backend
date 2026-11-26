@@ -280,6 +280,7 @@ class ActionResultEvent:
     target_reason: str | None = None
     target_platform: str | None = None
     mission_envelope: dict[str, object] | None = None
+    remediation: dict[str, object] | None = None
 
     def wire_payload(self) -> dict[str, object]:
         """Wire JSON payload for `action_result` on SSE and the voice WebSocket."""
@@ -301,6 +302,8 @@ class ActionResultEvent:
             payload["targetPlatform"] = self.target_platform
         if self.mission_envelope is not None:
             payload["missionEnvelope"] = self.mission_envelope
+        if self.remediation is not None:
+            payload["remediation"] = self.remediation
         return payload
 
 

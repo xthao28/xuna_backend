@@ -1196,6 +1196,32 @@
           "xuna/durationMs": 3
         }
       }
+    },
+    "toolsCallToolchainMissingRemediationResponse": {
+      "jsonrpc": "2.0",
+      "id": 818,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "toolchain_missing: node"
+          }
+        ],
+        "structuredContent": {
+          "errorCode": "toolchain_missing",
+          "remediation": {
+            "summary": "Node.js runtime is required to run this command.",
+            "command": "winget install OpenJS.NodeJS.LTS",
+            "kind": "install"
+          }
+        },
+        "isError": true,
+        "_meta": {
+          "xuna/status": "failed",
+          "xuna/errorCode": "toolchain_missing",
+          "xuna/durationMs": 8
+        }
+      }
     }
   }
 }

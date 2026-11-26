@@ -390,14 +390,14 @@ def build_mesh_tool_specs() -> tuple[ToolSpec, ...]:
         ToolSpec(
             name=MESH_FIND_RESOURCE_FUNCTION,
             description=(
-                "Find which online device has a normalized app, workspace, or tool matching "
-                "`query` across live HostTwin resources and manifests."
+                "Find which online device has a normalized app, workspace, toolchain, or tool "
+                "matching `query` across live HostTwin resources and manifests."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "minLength": 1, "maxLength": MAX_MESH_QUERY_CHARS},
-                    "kind": {"type": "string", "enum": ["app", "workspace", "tool"]},
+                    "kind": {"type": "string", "enum": ["app", "workspace", "toolchain", "tool"]},
                 },
                 "required": ["query"],
                 "additionalProperties": False,
@@ -538,7 +538,7 @@ def parse_mesh_status_args(
 
 def parse_mesh_find_resource_args(
     arguments: Mapping[str, object],
-) -> tuple[str, Literal["app", "workspace", "tool"] | None]:
+) -> tuple[str, Literal["app", "workspace", "toolchain", "tool"] | None]:
     """Validates `mesh__find_resource` arguments strictly."""
     allowed_keys = frozenset({"query", "kind"})
     if not set(arguments).issubset(allowed_keys):
@@ -554,12 +554,14 @@ def parse_mesh_find_resource_args(
         raise MetaToolArgumentError("invalid_args")
 
     raw_kind = arguments.get("kind")
-    kind: Literal["app", "workspace", "tool"] | None = None
+    kind: Literal["app", "workspace", "toolchain", "tool"] | None = None
     if raw_kind is not None:
         if raw_kind == "app":
             kind = "app"
         elif raw_kind == "workspace":
             kind = "workspace"
+        elif raw_kind == "toolchain":
+            kind = "toolchain"
         elif raw_kind == "tool":
             kind = "tool"
         else:

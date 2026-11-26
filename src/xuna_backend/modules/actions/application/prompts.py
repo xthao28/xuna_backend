@@ -486,9 +486,15 @@ def truncate_tool_value(
                     max_list=max_list,
                     ui_nodes_max=ui_nodes_max,
                 )
-        for pk in ("settled", "settleMs"):
+        for pk in ("settled", "settleMs", "remediation"):
             if pk in val and pk not in res:
-                res[pk] = val[pk]
+                res[pk] = truncate_tool_value(
+                    val[pk],
+                    max_str=_max_str_for_key(pk, max_str, ui_tree_max),
+                    ui_tree_max=ui_tree_max,
+                    max_list=max_list,
+                    ui_nodes_max=ui_nodes_max,
+                )
         return res
     if isinstance(val, list | tuple):
         return [
@@ -623,6 +629,13 @@ def state_driven_hint(output: dict[str, object]) -> str | None:
         return (
             "Target is ambiguous (multiple candidates matched); specify a disambiguated "
             "relative path or re-inspect with ui__find / ui__observe_hybrid instead of guessing."
+        )
+    if isinstance(output.get("remediation"), dict):
+        return (
+            "A required dependency or configuration is missing on the host, and a "
+            "host-declared remediation card has been shown to the owner. Inform the owner "
+            "clearly and let them review or run the suggested remediation themselves; "
+            "do NOT run install or remediation commands automatically."
         )
     if not err_code:
         if output.get("effect") == "no_change" or output.get("uiChanged") is False:

@@ -22,6 +22,9 @@ from xuna_backend.modules.hosts.domain.twin import (
     HostResources as HostResources,
 )
 from xuna_backend.modules.hosts.domain.twin import (
+    HostToolchain as HostToolchain,
+)
+from xuna_backend.modules.hosts.domain.twin import (
     HostTwin as HostTwin,
 )
 

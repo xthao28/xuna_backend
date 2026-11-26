@@ -45,7 +45,7 @@ from xuna_backend.modules.hosts.domain.entities import (
     HostPlatform,
     HostStatus,
 )
-from xuna_backend.modules.hosts.domain.twin import HostFocusChangedNotice
+from xuna_backend.modules.hosts.domain.twin import HostFocusChangedNotice, HostToolchain
 
 ROOT = Path(__file__).resolve().parents[3]
 TABLES = (
@@ -1240,6 +1240,37 @@ def test_websocket_linux_mesh_notifications_and_eviction() -> None:
                 assert twin.resources is not None
                 assert twin.resources.installed_apps == ("vscode",)
                 assert twin.resources.workspaces == ("xuna_pet",)
+                assert twin.resources.toolchains == ()
+
+                ws.send_text(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "xuna/resources",
+                            "params": {
+                                "schemaVersion": 1,
+                                "installedApps": ["vscode"],
+                                "workspaces": ["xuna_pet"],
+                                "capabilitiesVersion": "r1_0002",
+                                "toolchains": [
+                                    {"id": "git", "version": "2.47.1"},
+                                    {"id": "node", "version": "22.11.0"},
+                                ],
+                            },
+                        }
+                    )
+                )
+                ws.send_text(
+                    json.dumps({"jsonrpc": "2.0", "id": 11, "method": "ping", "params": {}})
+                )
+                assert json.loads(ws.receive_text()) == {"jsonrpc": "2.0", "id": 11, "result": {}}
+                twin_with_tc = hub.get_twin(str(host_id))
+                assert twin_with_tc is not None
+                assert twin_with_tc.resources is not None
+                assert twin_with_tc.resources.toolchains == (
+                    HostToolchain(id="git", version="2.47.1"),
+                    HostToolchain(id="node", version="22.11.0"),
+                )
 
                 focus = hub.get_focus_state(owner_id)
                 assert focus is not None
