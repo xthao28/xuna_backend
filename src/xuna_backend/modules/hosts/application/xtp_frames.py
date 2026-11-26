@@ -761,6 +761,103 @@ class PreflightElementModel(_StrictModel):
     name: str = Field(min_length=1, max_length=80, pattern=r"^[^\x00-\x1f\x7f]*$")
 
 
+_PREVIEW_DRIVE_RE = re.compile(r"^[A-Za-z]:")
+_PREVIEW_SECRET_DIRS = frozenset(
+    {".ssh", ".gnupg", ".aws", ".kube", ".password-store", "keychains"}
+)
+_PREVIEW_SECRET_EXACT = frozenset(
+    {".npmrc", ".pypirc", ".pgpass", ".htpasswd", ".netrc", ".git-credentials"}
+)
+_PREVIEW_SECRET_EXTS = (".pem", ".key", ".p12", ".pfx", ".jks")
+_PREVIEW_SECRET_PREFIXES = ("id_rsa", "id_ed25519", "id_ecdsa", "id_dsa")
+
+
+class PreflightPreviewModel(_StrictModel):
+    """Optional bounded read-only preview on `ok` `xuna/preflight` (§4.2.8, ADR-0019 §2)."""
+
+    kind: Literal["diff", "paths"]
+    summary: str = Field(min_length=1, max_length=160, pattern=r"^[^\x00-\x1f\x7f]*$")
+    truncated: bool
+    snippet: str | None = None
+    paths: list[str] | None = None
+    totalCount: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_kind_fields(self) -> "PreflightPreviewModel":
+        if not self.summary.strip():
+            raise ValueError("preview summary must not be blank")
+        if self.kind == "diff":
+            if self.snippet is None or self.paths is not None or self.totalCount is not None:
+                raise ValueError("diff preview requires snippet and forbids paths/totalCount")
+            if not self.snippet or any(
+                (ord(ch) < 32 and ch not in ("\n", "\t")) or ord(ch) == 127 for ch in self.snippet
+            ):
+                raise ValueError("invalid diff preview snippet characters")
+            if len(self.snippet.encode("utf-8")) > 2048:
+                raise ValueError("diff preview snippet exceeds 2048 UTF-8 bytes")
+            if len(self.snippet.split("\n")) > 40:
+                raise ValueError("diff preview snippet exceeds 40 lines")
+            if self.truncated and not self.snippet.endswith("\u2026"):
+                raise ValueError("truncated diff preview snippet must end with ellipsis")
+            return self
+        if self.paths is None or self.totalCount is None or self.snippet is not None:
+            raise ValueError("paths preview requires paths/totalCount and forbids snippet")
+        if len(self.paths) > 20:
+            raise ValueError("paths preview exceeds 20 entries")
+        if self.totalCount < len(self.paths):
+            raise ValueError("paths preview totalCount must be >= len(paths)")
+        for raw_path in self.paths:
+            if (
+                not raw_path
+                or len(raw_path) > 260
+                or raw_path.strip() != raw_path
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in raw_path)
+            ):
+                raise ValueError("invalid paths preview entry")
+            if raw_path.startswith(("/", "\\", "~")) or _PREVIEW_DRIVE_RE.match(raw_path):
+                raise ValueError("paths preview entry must be workspace-relative")
+            segs = [s for s in raw_path.replace("\\", "/").split("/") if s]
+            if not segs or ".." in segs:
+                raise ValueError("paths preview entry must not contain parent traversal")
+            lower_segs = [s.lower() for s in segs]
+            for idx, seg in enumerate(lower_segs):
+                if seg in _PREVIEW_SECRET_DIRS or seg in _PREVIEW_SECRET_EXACT:
+                    raise ValueError("paths preview entry must not contain secret path")
+                nxt = lower_segs[idx + 1] if idx + 1 < len(lower_segs) else None
+                if seg.startswith(".") and nxt in (
+                    "config",
+                    "config.json",
+                    "credentials",
+                    "credentials.json",
+                ):
+                    raise ValueError("paths preview entry must not contain credential path")
+            leaf = lower_segs[-1]
+            if (
+                leaf == ".env"
+                or leaf.startswith(".env.")
+                or leaf.endswith(_PREVIEW_SECRET_EXTS)
+                or leaf.startswith(_PREVIEW_SECRET_PREFIXES)
+            ):
+                raise ValueError("paths preview entry must not contain secret file")
+        return self
+
+    def to_wire_dict(self) -> dict[str, object]:
+        if self.kind == "diff":
+            return {
+                "kind": "diff",
+                "summary": self.summary.strip(),
+                "snippet": self.snippet or "",
+                "truncated": self.truncated,
+            }
+        return {
+            "kind": "paths",
+            "summary": self.summary.strip(),
+            "paths": [p.replace("\\", "/") for p in (self.paths or [])],
+            "totalCount": self.totalCount if self.totalCount is not None else 0,
+            "truncated": self.truncated,
+        }
+
+
 class PreflightResultModel(_StrictModel):
     """`xuna/preflight` result body (`XUNA_XTP_V1_CONTRACT.md` §4.2.8)."""
 
@@ -769,15 +866,16 @@ class PreflightResultModel(_StrictModel):
     reasonCode: str | None = Field(default=None, pattern=_SHORT_CODE)
     errorCode: str | None = Field(default=None, pattern=_SHORT_CODE)
     element: PreflightElementModel | None = None
+    preview: PreflightPreviewModel | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class HostPreflight:
-    """What the host would enforce for a call (UDC-17 S17.1).
+    """What the host would enforce for a call (UDC-17 S17.1, ADR-0019 §2).
 
     `status == "ok"` carries `effective_risk`; any other status is a refusal with
-    `error_code`. `element_name` is the live label of the target; it is screen
-    content, so it may be shown to the owner but never logged or audited.
+    `error_code`. `element_name` and `preview` are ephemeral host content, so they
+    may be shown to the owner on the approval card but never logged, audited, or persisted.
     """
 
     status: str
@@ -786,6 +884,7 @@ class HostPreflight:
     error_code: str | None
     element_role: str | None
     element_name: str | None
+    preview: dict[str, object] | None = None
 
 
 def parse_preflight_result(result: dict[str, object]) -> HostPreflight:
@@ -799,7 +898,12 @@ def parse_preflight_result(result: dict[str, object]) -> HostPreflight:
     if body.status == "ok":
         if body.effectiveRisk is None or body.errorCode is not None:
             raise ValueError("an ok preflight carries a risk and no error code")
-    elif body.errorCode is None or body.effectiveRisk is not None or body.element is not None:
+    elif (
+        body.errorCode is None
+        or body.effectiveRisk is not None
+        or body.element is not None
+        or body.preview is not None
+    ):
         raise ValueError("a refused preflight carries an error code and nothing else")
     return HostPreflight(
         status=body.status,
@@ -808,6 +912,7 @@ def parse_preflight_result(result: dict[str, object]) -> HostPreflight:
         error_code=body.errorCode,
         element_role=body.element.role if body.element else None,
         element_name=body.element.name if body.element else None,
+        preview=body.preview.to_wire_dict() if body.preview is not None else None,
     )
 
 

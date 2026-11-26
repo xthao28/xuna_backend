@@ -505,6 +505,7 @@ async def emit_pending_with_battery(
     host_repo: HostRepository | None = None,
     capable_host_ids: Collection[HostId] | None = None,
     now: datetime | None = None,
+    preview: dict[str, object] | None = None,
 ) -> None:
     """Emits `ActionPendingEvent` enriched with Battery Advisor warnings when applicable."""
     eff_capable = capable_host_ids
@@ -560,6 +561,7 @@ async def emit_pending_with_battery(
             target_reason=eff_reason,
             target_platform=host.platform.value,
             battery_advisories=batt_adv,
+            preview=preview,
         )
     )
 

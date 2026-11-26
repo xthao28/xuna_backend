@@ -177,6 +177,7 @@ class ToolPreflightResult:
     element_role: str | None
     element_name: str | None
     duration_ms: int
+    preview: dict[str, object] | None = None
 
 
 async def start_enrollment(
@@ -1245,6 +1246,7 @@ async def preflight_tool(
         element_role=parsed.element_role,
         element_name=parsed.element_name,
         duration_ms=duration_ms,
+        preview=parsed.preview,
     )
 
 

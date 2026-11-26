@@ -1222,6 +1222,45 @@
           "xuna/durationMs": 8
         }
       }
+    },
+    "preflightFsPatchPreviewResponse": {
+      "jsonrpc": "2.0",
+      "id": 823,
+      "result": {
+        "preflight": {
+          "status": "ok",
+          "effectiveRisk": "R2",
+          "reasonCode": "workspace",
+          "preview": {
+            "kind": "diff",
+            "summary": "src/app.ts: 1 replacement",
+            "snippet": "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1,1 +1,1 @@\n-const port = 3000;\n+const port = 8080;",
+            "truncated": false
+          }
+        }
+      }
+    },
+    "preflightExecDeletePreviewResponse": {
+      "jsonrpc": "2.0",
+      "id": 824,
+      "result": {
+        "preflight": {
+          "status": "ok",
+          "effectiveRisk": "R3",
+          "reasonCode": "destructive_command",
+          "preview": {
+            "kind": "paths",
+            "summary": "3 matching file(s) in workspace",
+            "paths": [
+              "logs/a.log",
+              "logs/b.log",
+              "logs/c.log"
+            ],
+            "totalCount": 3,
+            "truncated": false
+          }
+        }
+      }
     }
   }
 }

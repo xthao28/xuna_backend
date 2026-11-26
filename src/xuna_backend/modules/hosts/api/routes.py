@@ -774,21 +774,21 @@ async def dev_preflight_host_tool_endpoint(
         )
     except HostError as error:
         raise _problem(error) from error
-    return JSONResponse(
-        status_code=HTTPStatus.OK,
-        content={
-            "tool": result.tool_name,
-            "status": result.status,
-            "effectiveRisk": (
-                result.effective_risk.value if result.effective_risk is not None else None
-            ),
-            "reasonCode": result.reason_code,
-            "errorCode": result.error_code,
-            "elementRole": result.element_role,
-            "elementName": result.element_name,
-            "durationMs": result.duration_ms,
-        },
-    )
+    content: dict[str, Any] = {
+        "tool": result.tool_name,
+        "status": result.status,
+        "effectiveRisk": (
+            result.effective_risk.value if result.effective_risk is not None else None
+        ),
+        "reasonCode": result.reason_code,
+        "errorCode": result.error_code,
+        "elementRole": result.element_role,
+        "elementName": result.element_name,
+        "durationMs": result.duration_ms,
+    }
+    if result.preview is not None:
+        content["preview"] = result.preview
+    return JSONResponse(status_code=HTTPStatus.OK, content=content)
 
 
 @router.post("/hosts/{host_id}/tools:invoke")

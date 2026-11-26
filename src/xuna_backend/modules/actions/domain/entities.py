@@ -151,6 +151,8 @@ class ActionPendingEvent:
     target_reason: str | None = None
     target_platform: str | None = None
     battery_advisories: tuple[str, ...] = ()
+    # Ephemeral bounded host preflight preview (ADR-0019 §2 / W4-M2); never persisted or audited.
+    preview: dict[str, object] | None = None
 
     def standing_payload(self) -> dict[str, object] | None:
         """The `standing` object of `action_pending` on SSE and the voice WebSocket, or
@@ -194,6 +196,8 @@ class ActionPendingEvent:
             payload["targetPlatform"] = self.target_platform
         if self.battery_advisories:
             payload["batteryAdvisories"] = list(self.battery_advisories)
+        if self.preview is not None:
+            payload["preview"] = self.preview
         return payload
 
 

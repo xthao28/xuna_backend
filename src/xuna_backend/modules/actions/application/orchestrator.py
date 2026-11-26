@@ -141,6 +141,9 @@ from xuna_backend.modules.actions.domain.personalization import (
     HostDefaultConvention,
     InMemoryHostDefaultStore,
 )
+from xuna_backend.modules.actions.domain.preflight_preview import (
+    sanitize_preflight_preview,
+)
 from xuna_backend.modules.actions.domain.schema_validator import (
     ArgumentValidationError,
     SchemaDefinitionError,
@@ -2636,6 +2639,11 @@ class Orchestrator:
                     mission_env=mission_env,
                     eff_target_reason=eff_target_reason,
                     host_repo=self._host_repo,
+                    preview=(
+                        sanitize_preflight_preview(preflight.preview)
+                        if preflight is not None and preflight.preview is not None
+                        else None
+                    ),
                 )
 
                 decision_state = await self._approval_broker.wait(
