@@ -1210,7 +1210,7 @@ class OrchestratorJobStepExecutor:
             "(such as a coding-agent prompt, build, or long-running protocol task), do NOT "
             "poll in a tight loop and do NOT advance immediately: call `job__wait` "
             "(for workspace file edits use `mode='fs_quiescence'` with `workspaceAlias`, "
-            "for UI activity use `mode='window_idle'`, for async protocol tasks use "
+            "for UI activity use `mode='ui_quiescence'`, for async protocol tasks use "
             "`mode='protocol_async'`) with `continuationMode='auto_continue'` so the job "
             "sleeps at zero token cost until completion, then inspect concrete deliverables "
             "(such as `changedFiles` or task results) before completing this sub-goal."
