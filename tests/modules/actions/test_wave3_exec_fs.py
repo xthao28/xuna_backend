@@ -277,6 +277,7 @@ def test_mandatory_preflight_set_matches_the_contract() -> None:
     assert (
         frozenset(
             {
+                "capability.run",
                 "draft.apply",
                 "exec.run",
                 "exec.write_stdin",

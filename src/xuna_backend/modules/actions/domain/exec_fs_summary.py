@@ -79,4 +79,13 @@ def exec_fs_pending_text(
             if english:
                 return f"Apply draft {did} (effect {short_hash}) on {target}"[:240]
             return f"Áp dụng bản nháp {did} (mã hiệu ứng {short_hash}) trên {target}"[:240]
+        case "capability.list":
+            if english:
+                return f"List detected capability adapters on {target}"[:240]
+            return f"Liệt kê năng lực đã phát hiện trên {target}"[:240]
+        case "capability.run":
+            adapter_id = _cut(arguments.get("adapterId"), 64)
+            if english:
+                return f"Run capability adapter {adapter_id} on {target}"[:240]
+            return f"Chạy bộ năng lực {adapter_id} trên {target}"[:240]
     return None

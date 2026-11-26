@@ -162,6 +162,8 @@ _PRIORITY_ORDER: tuple[str, ...] = (
     "draft.manifest",
     "draft.discard",
     "draft.apply",
+    "capability.list",
+    "capability.run",
     "tv.control",
     "tv.launch_app",
     "tv.cast_media",

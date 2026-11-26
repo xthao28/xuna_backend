@@ -1679,6 +1679,285 @@
           }
         }
       }
+    },
+    "toolsListCapabilityResponse": {
+      "jsonrpc": "2.0",
+      "id": 828,
+      "result": {
+        "tools": [
+          {
+            "name": "capability.list",
+            "description": "List approved local declarative capability adapters currently detected and verified on this host.",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*$"
+                },
+                "format": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9]{1,16}$"
+                }
+              },
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "adapters": {
+                  "type": "array",
+                  "maxItems": 64,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string",
+                        "pattern": "^[a-z][a-z0-9_.-]{1,63}$"
+                      },
+                      "capability": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      },
+                      "description": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      },
+                      "risk": {
+                        "type": "string",
+                        "enum": [
+                          "R2",
+                          "R3"
+                        ]
+                      },
+                      "provenance": {
+                        "type": "string",
+                        "enum": [
+                          "seed",
+                          "foundry"
+                        ]
+                      },
+                      "inputsSummary": {
+                        "type": "string",
+                        "minLength": 0,
+                        "maxLength": 240
+                      },
+                      "binaryVersion": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "capability",
+                      "description",
+                      "risk",
+                      "provenance",
+                      "inputsSummary"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "totalDetected": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "adapters",
+                "totalDetected"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "host",
+                "risk": "R1",
+                "observes": true,
+                "reversible": true,
+                "permission": "granted"
+              }
+            }
+          },
+          {
+            "name": "capability.run",
+            "description": "Invoke a detected declarative capability adapter by id with typed JSON inputs (direct non-shell argv, FsPathGuard, mandatory preflight, P1.1 verifyFiles).",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "adapterId": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{1,63}$"
+                },
+                "inputsJson": {
+                  "type": "string",
+                  "minLength": 2,
+                  "maxLength": 4096
+                },
+                "draftId": {
+                  "type": "string",
+                  "pattern": "^draft_[a-zA-Z0-9_-]{1,48}$"
+                }
+              },
+              "required": [
+                "adapterId",
+                "inputsJson"
+              ],
+              "additionalProperties": false
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "adapterId": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_.-]{1,63}$"
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "completed",
+                    "failed",
+                    "timed_out",
+                    "cancelled"
+                  ]
+                },
+                "exitCode": {
+                  "type": "integer"
+                },
+                "output": {
+                  "type": "string",
+                  "maxLength": 16384
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "durationMs": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "errorCode": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "artifacts": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      },
+                      "exists": {
+                        "type": "boolean"
+                      },
+                      "sizeBytes": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{64}$"
+                      },
+                      "magicOk": {
+                        "type": "boolean"
+                      },
+                      "problem": {
+                        "type": "string",
+                        "enum": [
+                          "missing",
+                          "not_a_file",
+                          "too_small",
+                          "magic_mismatch",
+                          "sha256_mismatch",
+                          "too_large_to_hash",
+                          "unreadable",
+                          "forbidden"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "exists"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              },
+              "required": [
+                "adapterId",
+                "status",
+                "output",
+                "truncated",
+                "durationMs"
+              ],
+              "additionalProperties": false
+            },
+            "_meta": {
+              "xuna/policy": {
+                "version": 1,
+                "family": "exec",
+                "risk": "R2",
+                "observes": false,
+                "reversible": false,
+                "permission": "granted"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "preflightCapabilityRunResponse": {
+      "jsonrpc": "2.0",
+      "id": 829,
+      "result": {
+        "preflight": {
+          "status": "ok",
+          "effectiveRisk": "R2",
+          "reasonCode": "capability_manifest"
+        }
+      }
+    },
+    "toolsCallCapabilityRunCompletedResponse": {
+      "jsonrpc": "2.0",
+      "id": 830,
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "capability.run completed exit=0"
+          }
+        ],
+        "structuredContent": {
+          "adapterId": "seed_document_convert",
+          "status": "completed",
+          "exitCode": 0,
+          "output": "converted 1 file\n",
+          "truncated": false,
+          "durationMs": 410,
+          "artifacts": [
+            {
+              "path": "~/Projects/app/dist/report.pdf",
+              "exists": true,
+              "sizeBytes": 4096,
+              "sha256": "77d594dcb0d379c0153bb54502dd4b3896d1d021401c5f0cdcdf1da219217ab1",
+              "magicOk": true
+            }
+          ]
+        },
+        "isError": false,
+        "_meta": {
+          "xuna/status": "ok",
+          "xuna/durationMs": 415
+        }
+      }
     }
   }
 }

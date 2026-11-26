@@ -365,8 +365,10 @@ def validate_tool_name(name: str, *, expected_family: ToolFamily | None = None) 
         family = ToolFamily.URL
     elif name in ("tv.list_devices", "tv.control") or family_str in ("meeting", "acoustic"):
         family = ToolFamily.MEDIA
-    elif family_str in ("system", "notifications", "device"):
+    elif family_str in ("system", "notifications", "device") or name == "capability.list":
         family = ToolFamily.HOST
+    elif name == "capability.run":
+        family = ToolFamily.EXEC
     elif family_str == "habit" or (
         family_str == "shortcuts" and expected_family == ToolFamily.WORKFLOW
     ):
